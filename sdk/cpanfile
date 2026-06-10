@@ -1,0 +1,33 @@
+# ABOUTME: Dependency declarations for the Temporalio-SDK distribution.
+# ABOUTME: Runtime deps per spec section 16; test deps per spec section 12.1.
+requires 'perl', '5.038000';
+
+# Core layer: FFI over the sdk-core C bridge (api => 2 per spec section 4)
+requires 'FFI::Platypus', '2.00';
+requires 'Alien::Temporalio::Core';
+requires 'Alien::Temporalio::PerlBridge';
+
+# Async surface (spec section 16.1)
+requires 'Future::AsyncAwait', '0.66';
+requires 'IO::Async';
+requires 'Syntax::Keyword::Dynamically';
+
+# Exceptions (spec section 16.1)
+requires 'Devel::StackTrace';
+
+# Logging interop (spec section 16.4)
+requires 'Log::Any';
+
+# Protobuf: pure-Perl parser-direct distribution (spec section 4.6)
+requires 'Protobuf',
+    git => 'https://github.com/MasonEgger/protobuf-perl.git';
+
+on 'test' => sub {
+    requires 'Test2::V1';
+    requires 'Test::Future::AsyncAwait';
+    requires 'Net::EmptyPort';
+};
+
+on 'develop' => sub {
+    requires 'Test2::Plugin::DieOnFail';
+};

@@ -6,8 +6,8 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 0 — Foundations
 
 ### P0.1 Repository scaffold + SDK distribution skeleton
-- [ ] P0.1.1 RED: sdk/t/00-load.t (SDK loads, VERSION 0.1.0)
-- [ ] P0.1.2 GREEN: monorepo dirs, Temporalio::SDK, dist.ini, cpanfile, .gitignore
+- [x] P0.1.1 RED: sdk/t/00-load.t (SDK loads, VERSION 0.1.0)
+- [x] P0.1.2 GREEN: monorepo dirs, Temporalio::SDK, dist.ini, cpanfile, .gitignore
 - [ ] P0.1.3 RED: sdk/t/unit/attribute_handlers.t (four §10.1 constraints)
 - [ ] P0.1.4 GREEN: regression test passes
 - [ ] P0.1.5 REFACTOR: ABOUTME headers everywhere

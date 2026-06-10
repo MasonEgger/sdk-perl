@@ -13,8 +13,9 @@ cover_db/
 # Devel::NYTProf
 nytprof.out
 
-# Dist::Zilla
+# Dist::Zilla (root and per-distribution build dirs, e.g. sdk/.build/)
 /.build/
+.build/
 
 # Module::Build
 _build/
@@ -40,5 +41,12 @@ inc/
 
 # BPE workflow (never commit)
 commit-msg.md
+goal.md
+
+# Test scratch space (dev server logs etc.)
+sdk/t/tmp/
+
+# Rust build output
+target/
 # cpanfile.snapshot should generally be ignored for library code, otherwise included
 # cpanfile.snapshot
