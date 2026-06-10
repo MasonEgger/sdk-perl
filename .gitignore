@@ -37,5 +37,8 @@ inc/
 # Carton/Carmel
 /local/
 /.carmel/
+
+# BPE workflow (never commit)
+commit-msg.md
 # cpanfile.snapshot should generally be ignored for library code, otherwise included
 # cpanfile.snapshot
