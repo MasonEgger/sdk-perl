@@ -8,10 +8,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ### P0.1 Repository scaffold + SDK distribution skeleton
 - [x] P0.1.1 RED: sdk/t/00-load.t (SDK loads, VERSION 0.1.0)
 - [x] P0.1.2 GREEN: monorepo dirs, Temporalio::SDK, dist.ini, cpanfile, .gitignore
-- [ ] P0.1.3 RED: sdk/t/unit/attribute_handlers.t (four §10.1 constraints)
-- [ ] P0.1.4 GREEN: regression test passes
-- [ ] P0.1.5 REFACTOR: ABOUTME headers everywhere
-- [ ] P0.1.6 Verify: prove -lj4 t
+- [x] P0.1.3 RED: sdk/t/unit/attribute_handlers.t (four §10.1 constraints)
+- [x] P0.1.4 GREEN: regression test passes
+- [x] P0.1.5 REFACTOR: ABOUTME headers everywhere
+- [x] P0.1.6 Verify: prove -lj4 t
 
 ### P0.2 Exception base + core subclasses
 - [ ] P0.2.1 RED: sdk/t/unit/exception.t (message/throw/cause chain/stack_trace)

@@ -2,6 +2,8 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- `prove t` does NOT recurse into `t/unit/` etc. — `sdk/.proverc` carries `--recurse` so the documented `prove -lj4 t` runs the whole tree; after adding a test in a new subdir, check prove's file list, not just PASS (2026-06-11)
+- Despite the mandatory `use utf8` test preamble, Test2's TAP formatter handle is not UTF-8 — non-ASCII in test names emits `Wide character in print`; keep test names ASCII (2026-06-11)
 - Test2::V1 with a bare `use` exports ONLY `T2()` — no `ok`/`is`/`done_testing` barewords; the spec §12.1 preamble therefore implies the `T2->method` style for every test file. `require_ok` does not exist anywhere in Test2 (it is Test::More-only) — use `my $ok = eval { require M; 1 }; T2->ok($ok, ...)` (2026-06-10)
 - `T2->ok(eval { ... }, $name)` is a silent false-pass trap: method-call args are list context, a failed eval collapses to the empty list, and $name shifts into the boolean slot. Assign the eval to a lexical first; a missing test name in TAP output is the tell (2026-06-10)
 - Verify MUST-match wire constants (payload encodings, gRPC code maps, defaults) by grepping the reference SDK source yourself — Explore subagents paraphrase (reported "json/proto"; actual constant is "json/protobuf") (2026-06-10)
@@ -11,5 +13,7 @@
 - To write files larger than one response allows, end each chunk with a unique marker comment and append via Edit on the marker (2026-06-10)
 
 ## Testing
+- `prove t` is non-recursive by default; this repo's `sdk/.proverc` adds `--recurse` so subdirectory tests run under the documented command (2026-06-11)
+- Test names must stay ASCII — Test2's TAP handle is not UTF-8 even though test files `use utf8` (2026-06-11)
 - Test2::V1 bare `use` exports only `T2()`; use `T2->method` style per spec §12.1, and emulate `require_ok` with `eval { require M; 1 }` into a lexical (2026-06-10)
 - Never pass `eval {}` directly as a `T2->ok` argument — list-context collapse on failure shifts the name into the boolean slot and false-passes (2026-06-10)
