@@ -14,10 +14,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.1.6 Verify: prove -lj4 t
 
 ### P0.2 Exception base + core subclasses
-- [ ] P0.2.1 RED: sdk/t/unit/exception.t (message/throw/cause chain/stack_trace)
-- [ ] P0.2.2 GREEN: Exception.pm + Argument/Runtime/Bridge
-- [ ] P0.2.3 REFACTOR: cause-chain stringifier
-- [ ] P0.2.4 Verify
+- [x] P0.2.1 RED: sdk/t/unit/exception.t (message/throw/cause chain/stack_trace)
+- [x] P0.2.2 GREEN: Exception.pm + Argument/Runtime/Bridge
+- [x] P0.2.3 REFACTOR: cause-chain stringifier
+- [x] P0.2.4 Verify
 
 ### P0.3 Alien::Temporalio::Core
 - [ ] P0.3.1 RED: alien-core/t/alien.t (T-alien-1, T-alien-3, T-alien-4)
