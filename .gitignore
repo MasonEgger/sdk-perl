@@ -46,6 +46,9 @@ goal.md
 # Test scratch space (dev server logs etc.)
 sdk/t/tmp/
 
+# Test::Alien::Build scratch dirs (alien-core/.tmp/ etc.)
+.tmp/
+
 # Rust build output
 target/
 # cpanfile.snapshot should generally be ignored for library code, otherwise included

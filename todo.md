@@ -20,10 +20,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.2.4 Verify
 
 ### P0.3 Alien::Temporalio::Core
-- [ ] P0.3.1 RED: alien-core/t/alien.t (T-alien-1, T-alien-3, T-alien-4)
-- [ ] P0.3.2 GREEN: alienfile + Alien module + dist.ini
-- [ ] P0.3.3 REFACTOR: cargo diagnostics per spec §2 failure modes
-- [ ] P0.3.4 Verify: dzil test with local sdk-rust override
+- [x] P0.3.1 RED: alien-core/t/alien.t (T-alien-1, T-alien-3, T-alien-4)
+- [x] P0.3.2 GREEN: alienfile + Alien module + dist.ini
+- [x] P0.3.3 REFACTOR: cargo diagnostics per spec §2 failure modes
+- [x] P0.3.4 Verify: dzil test with local sdk-rust override
 
 ### P0.4 Rust shim crate
 - [ ] P0.4.1 RED: cargo tests (T-shim-1..4 + user_data pair routing)

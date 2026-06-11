@@ -2,6 +2,8 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- `[@Starter::Git]` uses Git::GatherDir, which gathers only git-TRACKED files — `git add` a new distribution's files before its first `dzil test` or the build dir will be missing them (symptom: `[AlienBuild] No alienfile!`) (2026-06-11)
+- An alienfile local-path override needs a NON-EMPTY stub download dir (else Extract::Directory dies "no files extracted") plus an `install_prop->{download_detail}{$path} = { protocol => 'file' }` entry so the digest stage accepts the trusted local fetch (2026-06-11)
 - The `:reader` field attribute is Perl 5.40+ — on this project's 5.38 floor write explicit one-line reader methods; spec sketches like `method message :reader;` are aspirational syntax, so verify each construct against 5.38 before coding (2026-06-11)
 - `prove t` does NOT recurse into `t/unit/` etc. — `sdk/.proverc` carries `--recurse` so the documented `prove -lj4 t` runs the whole tree; after adding a test in a new subdir, check prove's file list, not just PASS (2026-06-11)
 - Despite the mandatory `use utf8` test preamble, Test2's TAP formatter handle is not UTF-8 — non-ASCII in test names emits `Wide character in print`; keep test names ASCII (2026-06-11)
@@ -10,6 +12,7 @@
 - Verify MUST-match wire constants (payload encodings, gRPC code maps, defaults) by grepping the reference SDK source yourself — Explore subagents paraphrase (reported "json/proto"; actual constant is "json/protobuf") (2026-06-10)
 - Read the actual sdk-core C bridge header before specing or planning FFI work — it alone revealed by-value tagged unions in WorkerOptions and the absence of a buffered-metrics API (2026-06-10)
 - Cross-check new-SDK semantics against at least two reference SDKs (Python for workflow semantics, Ruby for worker architecture) — single-source review missed RemoveFromCache eviction and the cancel-vs-fail completion command (2026-06-10)
+## Workflow
 - When a parallel tool batch partially fails (e.g. classifier outage), re-dispatch only the cancelled calls — results from the surviving calls in the batch remain valid (2026-06-10)
 - To write files larger than one response allows, end each chunk with a unique marker comment and append via Edit on the marker (2026-06-10)
 
