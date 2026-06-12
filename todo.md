@@ -37,10 +37,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.5.3 Verify: dzil test
 
 ### P0.6 Temporalio::Core::FFI
-- [ ] P0.6.1 RED: sdk/t/unit/core_ffi.t (T-ffi-1..3)
-- [ ] P0.6.2 GREEN: FFI.pm, opaque/record types, Phase-0 attach set
-- [ ] P0.6.3 REFACTOR: table-driven attach
-- [ ] P0.6.4 Verify
+- [x] P0.6.1 RED: sdk/t/unit/core_ffi.t (T-ffi-1..3)
+- [x] P0.6.2 GREEN: FFI.pm, opaque/record types, Phase-0 attach set
+- [x] P0.6.3 REFACTOR: table-driven attach
+- [x] P0.6.4 Verify
 
 ### P0.7 Temporalio::Core::ByteArray
 - [ ] P0.7.1 RED: sdk/t/unit/byte_array.t (T-ba-1..4 + dead-runtime warn)
