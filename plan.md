@@ -30,8 +30,13 @@ draft has been removed; spec.md is the sole contract.)
   encodings in spec order; `Temporalio::Payload` is a transparent
   subclass of the generated `temporal.api.common.v1.Payload` class;
   `Core::Proto` now exposes `schema()`/`json()` for the proto3 JSON
-  form). Next: P1.5 full exception hierarchy + Failure converter
-  (`Exception::DataConverter` already exists from P1.4).
+  form). P1.5 complete: every spec §6.2 exception subclass exists (one
+  file per class; spec naming `WorkflowNotFound` et al. wins over the
+  plan's `NotFound::Workflow` shorthand) and
+  `Temporalio::Converter::Failure` round-trips the §5.3 info-type table
+  with cause chains (enum fields cross as lowercased Temporal-spec
+  strings; unknown info warns once and degrades to Application). Next:
+  P1.6 PayloadCodec base + Converter::Data facade.
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 

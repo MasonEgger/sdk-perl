@@ -98,11 +98,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.4.3 Verify
 
 ### P1.5 Full exceptions + Failure converter
-- [ ] P1.5.1 RED: exception.t extension (T-exc-1, T-exc-4, table-driven §6.2)
-- [ ] P1.5.2 GREEN: all §6.2 subclasses
-- [ ] P1.5.3 RED: sdk/t/unit/converter_failure.t (T-fail-1..4 + §5.3 table)
-- [ ] P1.5.4 GREEN: Converter/Failure.pm
-- [ ] P1.5.5 Verify
+- [x] P1.5.1 RED: exception.t extension (T-exc-1, T-exc-4, table-driven §6.2)
+- [x] P1.5.2 GREEN: all §6.2 subclasses
+- [x] P1.5.3 RED: sdk/t/unit/converter_failure.t (T-fail-1..4 + §5.3 table)
+- [x] P1.5.4 GREEN: Converter/Failure.pm
+- [x] P1.5.5 Verify
 
 ### P1.6 PayloadCodec + Converter::Data
 - [ ] P1.6.1 RED: sdk/t/unit/converter_data.t (T-conv-1..4)

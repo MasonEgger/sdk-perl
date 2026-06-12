@@ -1,5 +1,5 @@
-# ABOUTME: Tests Temporalio::Exception base class and the Argument/Runtime/Bridge
-# ABOUTME: subclasses: construction, throw, cause-chain stringification, validation.
+# ABOUTME: Tests Temporalio::Exception base class and every concrete subclass in
+# ABOUTME: spec section 6.2: construction, throw, cause chain, fields, isa chains.
 use v5.38;
 use warnings;
 use utf8;
@@ -88,6 +88,164 @@ T2->subtest('stack_trace is populated via Devel::StackTrace' => sub {
     my $custom = Devel::StackTrace->new;
     my $explicit = Temporalio::Exception->new(message => 'x', stack_trace => $custom);
     T2->ref_is($explicit->stack_trace, $custom, 'an explicit stack_trace is kept as-is');
+});
+
+# --- Spec section 6.2: the full concrete-subclass hierarchy -----------------
+
+# Every class in spec section 6.2 with its listed fields and a sample value per
+# field. Each entry: [parent class, { field => sample }]. The parent defaults
+# to Temporalio::Exception; Rpc* and *NotFound override it (T-exc-4 shape).
+my %SPEC_SUBCLASSES = (
+    'Temporalio::Exception::Application' => [undef, {
+        type          => 'X',
+        non_retryable => 1,
+        details       => ['a', 1],
+        category      => 'benign',
+    }],
+    'Temporalio::Exception::Cancelled' => [undef, { details => ['d'] }],
+    'Temporalio::Exception::Timeout'   => [undef, {
+        timeout_type           => 'start_to_close',
+        last_heartbeat_details => [42],
+    }],
+    'Temporalio::Exception::Terminated' => [undef, { reason => 'because' }],
+    'Temporalio::Exception::Server'     => [undef, {
+        non_retryable => 1,
+        details       => ['d'],
+    }],
+    'Temporalio::Exception::Activity' => [undef, {
+        activity_id        => 'a1',
+        activity_type      => 'MyActivity',
+        attempt            => 3,
+        identity           => 'worker@host',
+        retry_state        => 'in_progress',
+        started_event_id   => 7,
+        scheduled_event_id => 6,
+    }],
+    'Temporalio::Exception::ChildWorkflow' => [undef, {
+        namespace          => 'ns',
+        workflow_id        => 'wf-1',
+        run_id             => 'run-1',
+        workflow_type      => 'MyWorkflow',
+        retry_state        => 'timeout',
+        initiated_event_id => 1,
+        started_event_id   => 2,
+    }],
+    'Temporalio::Exception::NexusHandler' => [undef, {
+        type           => 'BAD_REQUEST',
+        retry_behavior => 1,
+    }],
+    'Temporalio::Exception::NexusOperation' => [undef, {
+        scheduled_event_id => 5,
+        endpoint           => 'ep',
+        service            => 'svc',
+        operation          => 'op',
+        operation_token    => 'tok',
+    }],
+    'Temporalio::Exception::ResetWorkflow' => [undef, {
+        last_heartbeat_details => ['h'],
+    }],
+    'Temporalio::Exception::WorkflowAlreadyStarted' => [undef, {
+        workflow_id   => 'wf-1',
+        workflow_type => 'MyWorkflow',
+        run_id        => 'run-1',
+    }],
+    'Temporalio::Exception::RpcError' => [undef, {
+        status_code => 5,
+        status_name => 'NOT_FOUND',
+        details     => { code => 5 },
+    }],
+    'Temporalio::Exception::RpcTimeout' =>
+        ['Temporalio::Exception::RpcError', {}],
+    'Temporalio::Exception::RpcUnauthenticated' =>
+        ['Temporalio::Exception::RpcError', {}],
+    'Temporalio::Exception::RpcPermissionDenied' =>
+        ['Temporalio::Exception::RpcError', {}],
+    'Temporalio::Exception::RpcResourceExhausted' =>
+        ['Temporalio::Exception::RpcError', {}],
+    'Temporalio::Exception::Bridge'   => [undef, {}],
+    'Temporalio::Exception::Runtime'  => [undef, {}],
+    'Temporalio::Exception::Argument' => [undef, {}],
+    'Temporalio::Exception::NotFound' => [undef, {}],
+    'Temporalio::Exception::WorkflowNotFound' =>
+        ['Temporalio::Exception::NotFound', {}],
+    'Temporalio::Exception::ActivityNotFound' =>
+        ['Temporalio::Exception::NotFound', {}],
+    'Temporalio::Exception::NamespaceNotFound' =>
+        ['Temporalio::Exception::NotFound', {}],
+    'Temporalio::Exception::DataConverter' => [undef, {}],
+    'Temporalio::Exception::Heartbeat'     => [undef, {}],
+    'Temporalio::Exception::QueryRejected' => [undef, {
+        status => 'WORKFLOW_EXECUTION_STATUS_COMPLETED',
+    }],
+    'Temporalio::Exception::WorkflowContinuedAsNew' => [undef, {
+        new_run_id => 'run-2',
+    }],
+    'Temporalio::Exception::Workflow::NoRunner' => [undef, {}],
+);
+
+T2->subtest('every spec 6.2 class exists with its listed fields (table-driven)' => sub {
+    for my $class (sort keys %SPEC_SUBCLASSES) {
+        my ($parent, $fields) = @{ $SPEC_SUBCLASSES{$class} };
+        (my $file = "$class.pm") =~ s{::}{/}g;
+        my $loaded = eval { require $file; 1 };
+        T2->ok($loaded, "$class loads") or do { T2->diag($@); next };
+
+        my $exc = $class->new(message => 'm', %$fields);
+        T2->isa_ok($exc, $class, $parent // (), 'Temporalio::Exception');
+        T2->is($exc->message, 'm', "$class inherits message");
+        for my $field (sort keys %$fields) {
+            T2->is($exc->$field, $fields->{$field}, "$class ->$field round-trips");
+        }
+    }
+});
+
+T2->subtest('Application accessors and defaults (T-exc-1)' => sub {
+    require Temporalio::Exception::Application;
+    my $exc = Temporalio::Exception::Application->new(
+        message       => 'oops',
+        type          => 'X',
+        non_retryable => 1,
+    );
+    T2->is($exc->type, 'X', 'type accessor');
+    T2->is($exc->non_retryable, 1, 'non_retryable accessor');
+    T2->is($exc->category, 'application', "category defaults to 'application'");
+    T2->is($exc->details, undef, 'details defaults to undef');
+
+    my $plain = Temporalio::Exception::Application->new(message => 'm');
+    T2->ok(!$plain->non_retryable, 'non_retryable defaults to false');
+    T2->is($plain->type, undef, 'type defaults to undef');
+});
+
+T2->subtest('RpcTimeout isa RpcError (T-exc-4)' => sub {
+    require Temporalio::Exception::RpcTimeout;
+    T2->ok(Temporalio::Exception::RpcTimeout->isa('Temporalio::Exception::RpcError'),
+        'RpcTimeout isa RpcError');
+    my $exc = Temporalio::Exception::RpcTimeout->new(
+        message     => 'deadline exceeded',
+        status_code => 4,
+        status_name => 'DEADLINE_EXCEEDED',
+    );
+    T2->is($exc->status_code, 4, 'status_code inherited from RpcError');
+    T2->is($exc->status_name, 'DEADLINE_EXCEEDED', 'status_name inherited');
+});
+
+T2->subtest('WorkflowFailure requires a cause' => sub {
+    require Temporalio::Exception::WorkflowFailure;
+    my $inner = Temporalio::Exception->new(message => 'root');
+    my $exc = Temporalio::Exception::WorkflowFailure->new(
+        message => 'workflow failed',
+        cause   => $inner,
+    );
+    T2->isa_ok($exc, 'Temporalio::Exception::WorkflowFailure', 'Temporalio::Exception');
+    T2->ref_is($exc->cause, $inner, 'cause is the wrapped exception');
+
+    my $ok = eval {
+        Temporalio::Exception::WorkflowFailure->new(message => 'no cause');
+        1;
+    };
+    T2->ok(!$ok, 'constructing without a cause dies');
+    T2->isa_ok($@, 'Temporalio::Exception::Argument');
+    T2->like($@->message, qr/cause/, 'diagnostic names the cause field');
 });
 
 T2->done_testing;
