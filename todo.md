@@ -26,10 +26,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.3.4 Verify: dzil test with local sdk-rust override
 
 ### P0.4 Rust shim crate
-- [ ] P0.4.1 RED: cargo tests (T-shim-1..4 + user_data pair routing)
-- [ ] P0.4.2 GREEN: queue/user_data/trampolines/drain + cbindgen header
-- [ ] P0.4.3 REFACTOR: generic enqueue helper
-- [ ] P0.4.4 Verify: cargo test && cargo build --release
+- [x] P0.4.1 RED: cargo tests (T-shim-1..4 + user_data pair routing)
+- [x] P0.4.2 GREEN: queue/user_data/trampolines/drain + cbindgen header
+- [x] P0.4.3 REFACTOR: generic enqueue helper
+- [x] P0.4.4 Verify: cargo test && cargo build --release
 
 ### P0.5 Alien::Temporalio::PerlBridge
 - [ ] P0.5.1 RED: alien-perl-bridge/t/alien.t (T-alien-pb-1..3)
