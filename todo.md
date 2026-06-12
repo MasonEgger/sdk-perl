@@ -93,9 +93,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.3.3 Verify
 
 ### P1.4 Payload converters
-- [ ] P1.4.1 RED: sdk/t/unit/converter_payload.t (T-pay-1..5 + binary forms)
-- [ ] P1.4.2 GREEN: Payload base/composite + five subclasses + Payload record
-- [ ] P1.4.3 Verify
+- [x] P1.4.1 RED: sdk/t/unit/converter_payload.t (T-pay-1..5 + binary forms)
+- [x] P1.4.2 GREEN: Payload base/composite + five subclasses + Payload record
+- [x] P1.4.3 Verify
 
 ### P1.5 Full exceptions + Failure converter
 - [ ] P1.5.1 RED: exception.t extension (T-exc-1, T-exc-4, table-driven §6.2)

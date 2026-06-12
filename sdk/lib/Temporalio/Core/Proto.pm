@@ -11,6 +11,8 @@ use File::ShareDir ();
 use File::Spec ();
 use Protobuf::Parser ();
 use Protobuf::Schema ();
+use Protobuf::Codec ();
+use Protobuf::JSON ();
 use Protobuf::Class::Generator ();
 use Temporalio::Exception::Runtime ();
 
@@ -19,6 +21,8 @@ use Temporalio::Exception::Runtime ();
 # the shared Perl symbol table anyway, so there is exactly one registry.
 my $LOADED = 0;
 my %CLASS_FOR;    # 'temporal.api.failure.v1.Failure' => 'Temporalio::Proto::...'
+my $SCHEMA;       # the resolved Protobuf::Schema behind the generated classes
+my $JSON;         # shared Protobuf::JSON over $SCHEMA, built on first use
 
 # load: parse the vendored proto graph and generate every message class.
 # Idempotent — subsequent calls no-op. Dies with the offending file path when
@@ -48,8 +52,28 @@ sub load {
         _build_messages($schema, _perl_package($file->package), $file->messages);
     }
 
+    $SCHEMA = $schema;
     $LOADED = 1;
     return 1;
+}
+
+# schema() -> the resolved Protobuf::Schema behind the generated classes.
+# Loads on first use.
+sub schema {
+    load();
+    return $SCHEMA;
+}
+
+# json() -> a shared Protobuf::JSON codec over the loaded schema, for the
+# proto3 canonical JSON form (the json/protobuf payload encoding). Loads on
+# first use; one instance per process, like the class registry.
+sub json {
+    load();
+    $JSON //= Protobuf::JSON->new(
+        codec  => Protobuf::Codec->new(schema => $SCHEMA),
+        schema => $SCHEMA,
+    );
+    return $JSON;
 }
 
 # resolve('temporal.api.failure.v1.Failure')
@@ -176,6 +200,9 @@ Temporalio::Core::Proto - load vendored Temporal protos, generate message classe
     my $class = Temporalio::Core::Proto::resolve('temporal.api.failure.v1.Failure');
     # 'Temporalio::Proto::Api::Failure::V1::Failure'
 
+    my $schema = Temporalio::Core::Proto::schema();   # the resolved Protobuf::Schema
+    my $json   = Temporalio::Core::Proto::json();     # shared Protobuf::JSON codec
+
 =head1 DESCRIPTION
 
 Parses the complete vendored proto trees under C<share/proto> (the Temporal
@@ -194,6 +221,9 @@ share directory.
 C<load> dies with the offending file path when any C<.proto> fails to parse —
 the guard against a bad re-vendor. C<resolve> maps a protobuf full name to its
 generated class and throws L<Temporalio::Exception::Runtime> for an unknown
-name.
+name. C<schema> returns the resolved L<Protobuf::Schema> behind the generated
+classes, and C<json> returns a process-shared L<Protobuf::JSON> codec over it
+(used for the C<json/protobuf> payload encoding). All entry points load the
+protos on first use.
 
 =cut

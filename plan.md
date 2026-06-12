@@ -25,8 +25,13 @@ draft has been removed; spec.md is the sole contract.)
   (start/target/shutdown over the callback bridge; DevServerOptions +
   TestServerOptions records gcc-probe-verified; integration test runs the
   real `temporal` CLI via existing_path and skip_alls when no CLI is
-  found — no download is ever attempted in tests). Next: P1.4 payload
-  converters.
+  found — no download is ever attempted in tests). P1.4 payload
+  converters complete (T-pay-1..5 + binary forms; the five spec
+  encodings in spec order; `Temporalio::Payload` is a transparent
+  subclass of the generated `temporal.api.common.v1.Payload` class;
+  `Core::Proto` now exposes `schema()`/`json()` for the proto3 JSON
+  form). Next: P1.5 full exception hierarchy + Failure converter
+  (`Exception::DataConverter` already exists from P1.4).
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 
