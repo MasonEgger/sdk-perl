@@ -7,8 +7,11 @@ draft has been removed; spec.md is the sole contract.)
 
 ## Current Status
 
-- **Phase 0: not started.** Only spike artifacts exist (`sdk/t/spike/` —
-  the `Attribute::Handlers × feature 'class'` proofs).
+- **Phase 0: COMPLETE (P0.1–P0.11, 2026-06-12).** Acceptance per spec §11
+  is green: distributions scaffolded, shim + Aliens build, FFI attaches,
+  Runtime lifecycle works, protos vendored and loaded
+  (`Temporalio::Core::Proto`, T-proto-1..5; eager load measured at ~1.7s,
+  under the 2s lazy-build threshold).
 - Dependency `Protobuf` (protobuf-perl) is complete and verified against
   the full Temporal proto graph (`proto3-perl/verification-2026-06-09.md`).
 - Risk spikes: #1 proto loading CLOSED; #2 attributes CLOSED; #3

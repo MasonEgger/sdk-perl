@@ -26,6 +26,10 @@ requires 'Log::Any';
 requires 'Protobuf',
     git => 'https://github.com/MasonEgger/protobuf-perl.git';
 
+# Locates the vendored proto share dir (and Protobuf's bundled WKTs) when
+# running from an installed distribution (spec section 4.6).
+requires 'File::ShareDir';
+
 on 'test' => sub {
     requires 'Test2::V1';
     requires 'Test::Future::AsyncAwait';

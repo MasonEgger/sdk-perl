@@ -68,11 +68,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.10.6 Verify: cargo test + prove
 
 ### P0.11 Vendor protos + Temporalio::Core::Proto
-- [ ] P0.11.1 Vendor full api_upstream + local trees via xt/author/vendor-protos.pl
-- [ ] P0.11.2 RED: sdk/t/unit/proto.t (T-proto-1..5)
-- [ ] P0.11.3 GREEN: Core/Proto.pm (Parser + Generator + resolve)
-- [ ] P0.11.4 REFACTOR: measure load time; lazy-build only if >2s
-- [ ] P0.11.5 Verify — **Phase 0 acceptance green**
+- [x] P0.11.1 Vendor full api_upstream + local trees via xt/author/vendor-protos.pl
+- [x] P0.11.2 RED: sdk/t/unit/proto.t (T-proto-1..5)
+- [x] P0.11.3 GREEN: Core/Proto.pm (Parser + Generator + resolve)
+- [x] P0.11.4 REFACTOR: measure load time; lazy-build only if >2s
+- [x] P0.11.5 Verify — **Phase 0 acceptance green**
 
 ## Phase 1 — Client smoke
 

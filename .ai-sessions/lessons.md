@@ -2,6 +2,7 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- An installed (non-checkout) Protobuf dist cannot auto-resolve its bundled WKTs — Parser.pm's share lookup is checkout-relative but installs land in auto/share/dist/Protobuf — so pass `File::ShareDir::dist_dir('Protobuf') . '/proto'` as an explicit include path (2026-06-12)
 - cbindgen tagged unions (#[repr(C)] Rust enums with payload) lay out as {4-byte C-enum tag, pad to union alignment, union sized by largest member}; Perl-side hand-pack is `pack('L x4', $tag) . $variant` zero-padded to the union size — and verify hand-packed layouts with a shim echo function built on #[repr(C)] mirrors copied verbatim from the owning crate (compiler-guaranteed layout, no server needed) (2026-06-11)
 - Linux::FD::Event flags use long literals (`'non-blocking'`, `'close-on-exec'`) — spec §4.2's `'nonblock'` sketch is rejected with "No such flag"; spike CPAN flag/option literals in a one-liner before coding against spec sketches (2026-06-11)
 - FFI::Platypus::Record drops C trailing padding (TemporalCoreByteArray: 25 bytes vs C's 32) — by-pointer field reads are safe (offsets match), but never use Perl record sizes for allocation or array strides; read struct fields from an opaque ptr by casting `'opaque' => 'record(Class)*'` through the shared FFI instance (2026-06-11)
@@ -11,7 +12,6 @@
 - `[@Starter::Git]` uses Git::GatherDir, which gathers only git-TRACKED files — `git add` a new distribution's files before its first `dzil test` or the build dir will be missing them (symptom: `[AlienBuild] No alienfile!`) (2026-06-11)
 - An alienfile local-path override needs a NON-EMPTY stub download dir (else Extract::Directory dies "no files extracted") plus an `install_prop->{download_detail}{$path} = { protocol => 'file' }` entry so the digest stage accepts the trusted local fetch (2026-06-11)
 - The `:reader` field attribute is Perl 5.40+ — on this project's 5.38 floor write explicit one-line reader methods; spec sketches like `method message :reader;` are aspirational syntax, so verify each construct against 5.38 before coding (2026-06-11)
-- `prove t` does NOT recurse into `t/unit/` etc. — `sdk/.proverc` carries `--recurse` so the documented `prove -lj4 t` runs the whole tree; after adding a test in a new subdir, check prove's file list, not just PASS (2026-06-11)
 ## Workflow
 - Verify MUST-match wire constants (payload encodings, gRPC code maps, defaults) by grepping the reference SDK source yourself — Explore subagents paraphrase (reported "json/proto"; actual constant is "json/protobuf") (2026-06-10)
 - Read the actual sdk-core C bridge header before specing or planning FFI work — it alone revealed by-value tagged unions in WorkerOptions and the absence of a buffered-metrics API (2026-06-10)
@@ -29,6 +29,7 @@
 - FFI::Platypus::Record drops C trailing padding — by-pointer field reads are safe (offsets match), but never use Perl record sizes for allocation or array strides; read struct fields from an opaque ptr via `cast('opaque' => 'record(Class)*', $ptr)` (2026-06-11)
 - Alien::Build runs alienfiles via `do '<abs path>'` (`__FILE__` is real — usable to locate in-tree sources); Test::Alien::Build's `alien_build_ok` monkeypatches `${class}::dist_dir`, so dist_dir-derived accessors work under test (2026-06-11)
 - `field $x :reader` requires Perl 5.40+; on the 5.38 floor declare explicit reader methods inside the class block (2026-06-11)
+- An installed Protobuf dist's WKT auto-include is a no-op (share installs under auto/share/dist/Protobuf, not relative to Parser.pm) — add `File::ShareDir::dist_dir('Protobuf') . '/proto'` to include_paths explicitly (2026-06-12)
 
 ## Testing
 - `prove t` is non-recursive by default; this repo's `sdk/.proverc` adds `--recurse` so subdirectory tests run under the documented command (2026-06-11)
