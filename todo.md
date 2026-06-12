@@ -77,9 +77,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 1 — Client smoke
 
 ### P1.1 Temporalio::Cancellation
-- [ ] P1.1.1 RED: sdk/t/unit/cancellation.t (T-can-1..3)
-- [ ] P1.1.2 GREEN: Cancellation.pm + FFI attaches
-- [ ] P1.1.3 Verify
+- [x] P1.1.1 RED: sdk/t/unit/cancellation.t (T-can-1..3)
+- [x] P1.1.2 GREEN: Cancellation.pm + FFI attaches
+- [x] P1.1.3 Verify
 
 ### P1.2 Core::Callback issue_async + drain
 - [ ] P1.2.1 RED: sdk/t/unit/callback.t (T-cb-1..4 + shutdown sentinel)

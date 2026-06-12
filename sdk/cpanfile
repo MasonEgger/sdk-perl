@@ -7,7 +7,9 @@ requires 'FFI::Platypus', '2.00';
 requires 'Alien::Temporalio::Core';
 requires 'Alien::Temporalio::PerlBridge';
 
-# Async surface (spec section 16.1)
+# Async surface (spec section 16.1); Future is used directly (e.g. the
+# Temporalio::Cancellation cancelled-Future, spec section 4.4)
+requires 'Future';
 requires 'Future::AsyncAwait', '0.66';
 requires 'IO::Async';
 requires 'Syntax::Keyword::Dynamically';
