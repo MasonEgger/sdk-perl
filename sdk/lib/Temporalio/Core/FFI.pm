@@ -34,6 +34,27 @@ package Temporalio::Core::FFI::ByteArray {
     );
 }
 
+package Temporalio::Core::FFI::CallbackEntry {
+    use FFI::Platypus::Record;
+    # struct TemporalioPerlBridgeEntry (temporalio-perl-bridge.h): one queued
+    # completion popped by temporalio_perl_bridge_queue_drain. kind (1..6 in
+    # trampoline order) discriminates which fields are meaningful. Only ever
+    # handled BY POINTER into the drain buffer; record_layout_1 inserts the
+    # same interior padding as the C layout (callback_id 0, kind 8 + 7 pad,
+    # pointers 16/24/32, rpc_status_code 40 + 4 pad, pointers 48/56) for the
+    # C struct's 64-byte stride, so casting buffer + i * sizeof views slot i.
+    record_layout_1(
+        uint64 => 'callback_id',
+        uint8  => 'kind',
+        opaque => 'success_ba',
+        opaque => 'fail_ba',
+        opaque => 'success_handle',
+        uint32 => 'rpc_status_code',
+        opaque => 'rpc_failure_details',
+        opaque => 'ephemeral_target',
+    );
+}
+
 package Temporalio::Core::FFI::LoggingOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreLoggingOptions

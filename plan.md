@@ -19,7 +19,9 @@ draft has been removed; spec.md is the sole contract.)
   via the shim's debug_worker_options echo — spec §11, step P0.10).
 - **Phase 1 in progress.** P1.1 `Temporalio::Cancellation` complete
   (T-can-1..3; the three cancellation_token FFI functions were already in
-  the Phase-0 attach set). Next: P1.2 Core::Callback issue_async + drain.
+  the Phase-0 attach set). P1.2 `Core::Callback` complete (T-cb-1..4 +
+  shutdown sentinel; per-kind dispatch table; runtime fd watcher now runs
+  the real drain loop). Next: P1.3 ephemeral dev server.
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 

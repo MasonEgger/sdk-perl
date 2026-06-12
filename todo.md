@@ -82,10 +82,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.1.3 Verify
 
 ### P1.2 Core::Callback issue_async + drain
-- [ ] P1.2.1 RED: sdk/t/unit/callback.t (T-cb-1..4 + shutdown sentinel)
-- [ ] P1.2.2 GREEN: Callback.pm full implementation
-- [ ] P1.2.3 REFACTOR: per-kind dispatch table
-- [ ] P1.2.4 Verify
+- [x] P1.2.1 RED: sdk/t/unit/callback.t (T-cb-1..4 + shutdown sentinel)
+- [x] P1.2.2 GREEN: Callback.pm full implementation
+- [x] P1.2.3 REFACTOR: per-kind dispatch table
+- [x] P1.2.4 Verify
 
 ### P1.3 Ephemeral dev server
 - [ ] P1.3.1 RED: sdk/t/integration/dev_server.t (start/shutdown/two ports)

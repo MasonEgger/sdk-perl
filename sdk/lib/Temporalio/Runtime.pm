@@ -68,13 +68,21 @@ class Temporalio::Runtime {
         $callback  = Temporalio::Core::Callback->new;
         $queue_ptr = Temporalio::Core::FFI::queue_new($callback->signal_fd);
 
-        # Register the read end with the loop. The on_read_ready watcher is
-        # a Phase 0 stub; the real drain loop lands with
-        # Temporalio::Core::Callback's issue_async (spec section 4.5, P1.2).
+        # Register the read end with the loop: when the shim signals the fd,
+        # drain the completion queue and resolve pending Futures (spec
+        # section 4.5). $weak_self keeps the closure from holding the
+        # runtime alive (loop -> handle -> closure -> self would otherwise
+        # cycle and DESTROY could never run); $callback is the captured
+        # field, undef once shutdown has torn it down.
         $loop //= IO::Async::Loop->new;
+        my $weak_self = $self;
+        Scalar::Util::weaken($weak_self);
         $watch_handle = IO::Async::Handle->new(
             read_handle   => $callback->read_handle,
-            on_read_ready => sub { },
+            on_read_ready => sub {
+                $callback->drain($weak_self)
+                    if defined $weak_self && defined $callback;
+            },
         );
         $loop->add($watch_handle);
     }
@@ -104,6 +112,7 @@ class Temporalio::Runtime {
 
     method core_ptr ()    { $self->_assert_open; $core_ptr }
     method queue_ptr ()   { $self->_assert_open; $queue_ptr }
+    method callback ()    { $self->_assert_open; $callback }
     method read_handle () { $self->_assert_open; $callback->read_handle }
     method loop ()        { $loop }
     method is_shutdown () { $is_shutdown }
@@ -176,8 +185,9 @@ with the bridge message if construction fails. Each runtime owns one
 C<temporalio-perl-bridge> callback queue plus a wakeup fd (owned by a
 L<Temporalio::Core::Callback>, which hides the eventfd-vs-pipe choice)
 whose read end is registered with an L<IO::Async::Loop> (caller-provided
-via C<loop>, or the process loop). The Phase 0 read watcher is a stub; the
-drain loop lands with C<Temporalio::Core::Callback>'s C<issue_async>.
+via C<loop>, or the process loop). When the shim signals the fd, the
+watcher runs the callback object's drain loop, which resolves the Futures
+issued by C<< Temporalio::Core::Callback->issue_async >> (spec section 4.5).
 
 C<default> lazily creates the process default runtime; C<set_default>
 raises C<"Default runtime already set"> unless called with
@@ -191,10 +201,11 @@ C<DESTROY> shuts down with a warning - call C<shutdown> explicitly.
 
 =head1 METHODS
 
-=head2 core_ptr / queue_ptr / read_handle
+=head2 core_ptr / queue_ptr / callback / read_handle
 
-Internal accessors for the C runtime pointer, the shim queue pointer, and
-the wakeup fd read end. All raise L<Temporalio::Exception::Runtime> with
-C<"Runtime is shut down"> after C<shutdown>.
+Internal accessors for the C runtime pointer, the shim queue pointer, the
+owning L<Temporalio::Core::Callback> instance, and the wakeup fd read end.
+All raise L<Temporalio::Exception::Runtime> with C<"Runtime is shut down">
+after C<shutdown>.
 
 =cut
