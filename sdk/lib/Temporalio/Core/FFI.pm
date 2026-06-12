@@ -45,6 +45,69 @@ package Temporalio::Core::FFI::LoggingOptions {
     );
 }
 
+package Temporalio::Core::FFI::OpenTelemetryOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreOpenTelemetryOptions
+    #   { TemporalCoreByteArrayRef url; TemporalCoreNewlineDelimitedMapRef headers;
+    #     uint32_t metric_periodicity_millis;
+    #     enum TemporalCoreOpenTelemetryMetricTemporality metric_temporality;
+    #     bool durations_as_seconds; enum TemporalCoreOpenTelemetryProtocol protocol;
+    #     TemporalCoreNewlineDelimitedMapRef histogram_bucket_overrides; }
+    # Enums are #[repr(C)] in runtime.rs (C int, 4 bytes): Cumulative=1/Delta=2,
+    # Grpc=1/Http=2.
+    record_layout_1(
+        opaque => 'url_data',
+        size_t => 'url_size',
+        opaque => 'headers_data',
+        size_t => 'headers_size',
+        uint32 => 'metric_periodicity_millis',
+        uint32 => 'metric_temporality',
+        bool   => 'durations_as_seconds',
+        uint32 => 'protocol',
+        opaque => 'histogram_bucket_overrides_data',
+        size_t => 'histogram_bucket_overrides_size',
+    );
+}
+
+package Temporalio::Core::FFI::PrometheusOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCorePrometheusOptions
+    #   { TemporalCoreByteArrayRef bind_address; bool counters_total_suffix;
+    #     bool unit_suffix; bool durations_as_seconds;
+    #     TemporalCoreNewlineDelimitedMapRef histogram_bucket_overrides; }
+    record_layout_1(
+        opaque => 'bind_address_data',
+        size_t => 'bind_address_size',
+        bool   => 'counters_total_suffix',
+        bool   => 'unit_suffix',
+        bool   => 'durations_as_seconds',
+        opaque => 'histogram_bucket_overrides_data',
+        size_t => 'histogram_bucket_overrides_size',
+    );
+}
+
+package Temporalio::Core::FFI::MetricsOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreMetricsOptions
+    #   { const TemporalCoreOpenTelemetryOptions *opentelemetry;
+    #     const TemporalCorePrometheusOptions *prometheus;
+    #     const TemporalCoreCustomMetricMeter *custom_meter;
+    #     bool attach_service_name; TemporalCoreNewlineDelimitedMapRef global_tags;
+    #     TemporalCoreByteArrayRef metric_prefix; }
+    # Only one of opentelemetry/prometheus/custom_meter may be non-NULL
+    # (enforced Perl-side by Temporalio::Runtime::TelemetryConfig, T-rt-4).
+    record_layout_1(
+        opaque => 'opentelemetry',
+        opaque => 'prometheus',
+        opaque => 'custom_meter',
+        bool   => 'attach_service_name',
+        opaque => 'global_tags_data',
+        size_t => 'global_tags_size',
+        opaque => 'metric_prefix_data',
+        size_t => 'metric_prefix_size',
+    );
+}
+
 package Temporalio::Core::FFI::TelemetryOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreTelemetryOptions
@@ -81,6 +144,7 @@ package Temporalio::Core::FFI;
 our $VERSION = '0.1.0';
 
 use FFI::Platypus 2.00;
+use FFI::Platypus::Buffer ();
 use Alien::Temporalio::Core      ();
 use Alien::Temporalio::PerlBridge ();
 
@@ -114,11 +178,70 @@ $ffi->type('opaque' => $_) for qw(
 );
 
 # Record type aliases for the by-value structs declared above.
-$ffi->type('record(Temporalio::Core::FFI::ByteArrayRef)'     => 'TemporalCoreByteArrayRef');
-$ffi->type('record(Temporalio::Core::FFI::LoggingOptions)'   => 'TemporalCoreLoggingOptions');
-$ffi->type('record(Temporalio::Core::FFI::TelemetryOptions)' => 'TemporalCoreTelemetryOptions');
-$ffi->type('record(Temporalio::Core::FFI::RuntimeOptions)'   => 'TemporalCoreRuntimeOptions');
-$ffi->type('record(Temporalio::Core::FFI::RuntimeOrFail)'    => 'TemporalCoreRuntimeOrFail');
+$ffi->type('record(Temporalio::Core::FFI::ByteArrayRef)'         => 'TemporalCoreByteArrayRef');
+$ffi->type('record(Temporalio::Core::FFI::LoggingOptions)'       => 'TemporalCoreLoggingOptions');
+$ffi->type('record(Temporalio::Core::FFI::OpenTelemetryOptions)' => 'TemporalCoreOpenTelemetryOptions');
+$ffi->type('record(Temporalio::Core::FFI::PrometheusOptions)'    => 'TemporalCorePrometheusOptions');
+$ffi->type('record(Temporalio::Core::FFI::MetricsOptions)'       => 'TemporalCoreMetricsOptions');
+$ffi->type('record(Temporalio::Core::FFI::TelemetryOptions)'     => 'TemporalCoreTelemetryOptions');
+$ffi->type('record(Temporalio::Core::FFI::RuntimeOptions)'       => 'TemporalCoreRuntimeOptions');
+$ffi->type('record(Temporalio::Core::FFI::RuntimeOrFail)'        => 'TemporalCoreRuntimeOrFail');
+
+# --- Marshalling helpers for the by-pointer record trees -------------------
+#
+# Records hold raw pointers into Perl-owned memory; the @$keep arrayref
+# pattern makes those lifetimes explicit. Callers allocate one @keep per
+# bridge call (e.g. runtime_new), thread it through every to_ffi builder,
+# and hold it until the call returns.
+
+# keep_buffer(\@keep, $scalar) — returns the (data, size) pair for a copy of
+# $scalar, pushing the copy onto @$keep so the pointer stays valid. Returns
+# (undef, 0) for undef (a NULL TemporalCoreByteArrayRef).
+sub keep_buffer ($keep, $scalar) {
+    return (undef, 0) unless defined $scalar;
+    my $copy = $scalar;    # private copy: caller's SV may be modified/freed
+    push @$keep, \$copy;
+    return FFI::Platypus::Buffer::scalar_to_buffer($copy);
+}
+
+# keep_record(\@keep, $record) — pushes the record object onto @$keep and
+# returns its address as an opaque pointer (for struct members that hold a
+# pointer to another struct).
+sub keep_record ($keep, $record) {
+    push @$keep, $record;
+    return $ffi->cast('record(' . ref($record) . ')*' => 'opaque', $record);
+}
+
+# encode_newline_map($hashref) — encodes a hash as the C bridge's
+# TemporalCoreNewlineDelimitedMapRef payload: "k1\nv1\nk2\nv2" (keys sorted
+# for determinism). Keys and values cannot contain newlines (per the header).
+# Returns undef for undef/empty (a NULL map ref).
+sub encode_newline_map ($map) {
+    return undef unless defined $map && %$map;
+    my @parts;
+    for my $key (sort keys %$map) {
+        my $value = $map->{$key} // '';
+        if ("$key$value" =~ /\n/) {
+            require Temporalio::Exception::Argument;
+            Temporalio::Exception::Argument->throw(
+                message => 'newline-delimited map keys and values must not'
+                         . " contain newlines (key '$key')",
+            );
+        }
+        push @parts, $key, $value;
+    }
+    return join "\n", @parts;
+}
+
+# encode_bucket_overrides($hashref) — histogram bucket overrides as a
+# newline-delimited map of "metric" => "f1,f2,f3" (per the header comment on
+# histogram_bucket_overrides).
+sub encode_bucket_overrides ($overrides) {
+    return undef unless defined $overrides && %$overrides;
+    return encode_newline_map({
+        map { $_ => join(',', @{ $overrides->{$_} }) } keys %$overrides,
+    });
+}
 
 # Phase-0 attach set: (C symbol, wrapper name, argument types, return type).
 # Wrapper names drop the temporal_core_ / temporalio_perl_bridge_ prefix.

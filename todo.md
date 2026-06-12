@@ -48,10 +48,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.7.3 Verify
 
 ### P0.8 Telemetry config classes
-- [ ] P0.8.1 RED: sdk/t/unit/runtime_config.t (T-rt-4, T-rt-6, validation)
-- [ ] P0.8.2 GREEN: TelemetryConfig/LoggingConfig/LoggingFilter/OTel/Prometheus
-- [ ] P0.8.3 GREEN: to_ffi builders
-- [ ] P0.8.4 Verify
+- [x] P0.8.1 RED: sdk/t/unit/runtime_config.t (T-rt-4, T-rt-6, validation)
+- [x] P0.8.2 GREEN: TelemetryConfig/LoggingConfig/LoggingFilter/OTel/Prometheus
+- [x] P0.8.3 GREEN: to_ffi builders
+- [x] P0.8.4 Verify
 
 ### P0.9 Temporalio::Runtime
 - [ ] P0.9.1 RED: sdk/t/unit/runtime.t (T-rt-1, T-rt-2, T-rt-3, T-rt-5 + idempotent shutdown)
