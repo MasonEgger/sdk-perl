@@ -21,7 +21,12 @@ draft has been removed; spec.md is the sole contract.)
   (T-can-1..3; the three cancellation_token FFI functions were already in
   the Phase-0 attach set). P1.2 `Core::Callback` complete (T-cb-1..4 +
   shutdown sentinel; per-kind dispatch table; runtime fd watcher now runs
-  the real drain loop). Next: P1.3 ephemeral dev server.
+  the real drain loop). P1.3 `Temporalio::Test::DevServer` complete
+  (start/target/shutdown over the callback bridge; DevServerOptions +
+  TestServerOptions records gcc-probe-verified; integration test runs the
+  real `temporal` CLI via existing_path and skip_alls when no CLI is
+  found — no download is ever attempted in tests). Next: P1.4 payload
+  converters.
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 

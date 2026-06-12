@@ -2,6 +2,7 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- The C bridge header alone under-specifies semantics — read the bridge's .rs conversion code too (testing.rs: an EMPTY download_version becomes `Fixed("")` not SDK-default, so pass the literal 'default'; `ephemeral_server_free` must wait for the shutdown callback because the async block borrows the server box; the spawned CLI inherits stdout/stderr) (2026-06-12)
 - A bare `class` file (no preceding `package` statement) compiles file-scope subs into `main::`, so calls from inside the class block fail with "Undefined subroutine &Class::_helper" — define every helper sub INSIDE the `class { }` block (2026-06-12)
 - An installed (non-checkout) Protobuf dist cannot auto-resolve its bundled WKTs — Parser.pm's share lookup is checkout-relative but installs land in auto/share/dist/Protobuf — so pass `File::ShareDir::dist_dir('Protobuf') . '/proto'` as an explicit include path (2026-06-12)
 - cbindgen tagged unions (#[repr(C)] Rust enums with payload) lay out as {4-byte C-enum tag, pad to union alignment, union sized by largest member}; Perl-side hand-pack is `pack('L x4', $tag) . $variant` zero-padded to the union size — and verify hand-packed layouts with a shim echo function built on #[repr(C)] mirrors copied verbatim from the owning crate (compiler-guaranteed layout, no server needed) (2026-06-11)
@@ -11,8 +12,8 @@
 - Alien::Build runs alienfiles via `do '<abs path>'`, so `__FILE__` inside an alienfile is the real path — walk up from it to locate in-tree sources (works from a checkout AND a dzil .build dir); Test::Alien::Build's `alien_build_ok` monkeypatches `${class}::dist_dir` to the test prefix, so dist_dir-derived accessors like `include_dir` work under test (2026-06-11)
 - cbindgen turns `#[repr(C)] struct Foo { _private: [u8; 0] }` into a zero-size struct DEFINITION that conflicts with the foreign header's real definition — for borrowed foreign types use `[export] exclude` plus `after_includes` forward typedefs in cbindgen.toml (2026-06-11)
 - `[@Starter::Git]` uses Git::GatherDir, which gathers only git-TRACKED files — `git add` a new distribution's files before its first `dzil test` or the build dir will be missing them (symptom: `[AlienBuild] No alienfile!`) (2026-06-11)
-- An alienfile local-path override needs a NON-EMPTY stub download dir (else Extract::Directory dies "no files extracted") plus an `install_prop->{download_detail}{$path} = { protocol => 'file' }` entry so the digest stage accepts the trusted local fetch (2026-06-11)
 ## Workflow
+- The C bridge header declares shapes, but the bridge's .rs conversion code declares semantics (empty-string traps, free-after-callback ordering, stdio inheritance) — read both before writing FFI wrappers (2026-06-12)
 - Verify MUST-match wire constants (payload encodings, gRPC code maps, defaults) by grepping the reference SDK source yourself — Explore subagents paraphrase (reported "json/proto"; actual constant is "json/protobuf") (2026-06-10)
 - Read the actual sdk-core C bridge header before specing or planning FFI work — it alone revealed by-value tagged unions in WorkerOptions and the absence of a buffered-metrics API (2026-06-10)
 - Cross-check new-SDK semantics against at least two reference SDKs (Python for workflow semantics, Ruby for worker architecture) — single-source review missed RemoveFromCache eviction and the cancel-vs-fail completion command (2026-06-10)
@@ -31,6 +32,7 @@
 - Alien::Build runs alienfiles via `do '<abs path>'` (`__FILE__` is real — usable to locate in-tree sources); Test::Alien::Build's `alien_build_ok` monkeypatches `${class}::dist_dir`, so dist_dir-derived accessors work under test (2026-06-11)
 - `field $x :reader` requires Perl 5.40+; on the 5.38 floor declare explicit reader methods inside the class block (2026-06-11)
 - An installed Protobuf dist's WKT auto-include is a no-op (share installs under auto/share/dist/Protobuf, not relative to Parser.pm) — add `File::ShareDir::dist_dir('Protobuf') . '/proto'` to include_paths explicitly (2026-06-12)
+- An alienfile local-path override needs a NON-EMPTY stub download dir (else Extract::Directory dies "no files extracted") plus an `install_prop->{download_detail}{$path} = { protocol => 'file' }` entry so the digest stage accepts the trusted local fetch (2026-06-11)
 
 ## Testing
 - `prove t` is non-recursive by default; this repo's `sdk/.proverc` adds `--recurse` so subdirectory tests run under the documented command (2026-06-11)

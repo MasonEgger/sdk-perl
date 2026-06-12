@@ -88,9 +88,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.2.4 Verify
 
 ### P1.3 Ephemeral dev server
-- [ ] P1.3.1 RED: sdk/t/integration/dev_server.t (start/shutdown/two ports)
-- [ ] P1.3.2 GREEN: FFI attaches + Test/DevServer.pm
-- [ ] P1.3.3 Verify
+- [x] P1.3.1 RED: sdk/t/integration/dev_server.t (start/shutdown/two ports)
+- [x] P1.3.2 GREEN: FFI attaches + Test/DevServer.pm
+- [x] P1.3.3 Verify
 
 ### P1.4 Payload converters
 - [ ] P1.4.1 RED: sdk/t/unit/converter_payload.t (T-pay-1..5 + binary forms)

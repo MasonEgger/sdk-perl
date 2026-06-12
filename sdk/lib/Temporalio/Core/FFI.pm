@@ -55,6 +55,57 @@ package Temporalio::Core::FFI::CallbackEntry {
     );
 }
 
+package Temporalio::Core::FFI::TestServerOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreTestServerOptions (testing.rs / header): five
+    # ByteArrayRef members flattened to (data, size) pairs. Empty refs mean
+    # "default behavior"; with existing_path set the download_* fields are
+    # ignored, otherwise download_version 'default' selects the SDK-default
+    # lookup keyed on sdk_name/sdk_version. Layout verified against the
+    # pinned header with a gcc offsetof probe: port at 80 (+6 pad),
+    # extra_args at 88, download_ttl_seconds at 104, sizeof 112.
+    record_layout_1(
+        opaque => 'existing_path_data',
+        size_t => 'existing_path_size',
+        opaque => 'sdk_name_data',
+        size_t => 'sdk_name_size',
+        opaque => 'sdk_version_data',
+        size_t => 'sdk_version_size',
+        opaque => 'download_version_data',
+        size_t => 'download_version_size',
+        opaque => 'download_dest_dir_data',
+        size_t => 'download_dest_dir_size',
+        uint16 => 'port',
+        opaque => 'extra_args_data',
+        size_t => 'extra_args_size',
+        uint64 => 'download_ttl_seconds',
+    );
+}
+
+package Temporalio::Core::FFI::DevServerOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreDevServerOptions (testing.rs / header): test_server
+    # must always point at a TemporalCoreTestServerOptions. Layout verified
+    # against the pinned header with a gcc offsetof probe: ui at 56 (bool),
+    # ui_port at 58 (+1 pad), log_format at 64 (+4 pad), log_level at 80,
+    # sizeof 96 — record_layout_1 inserts the same padding.
+    record_layout_1(
+        opaque => 'test_server',
+        opaque => 'namespace_data',
+        size_t => 'namespace_size',
+        opaque => 'ip_data',
+        size_t => 'ip_size',
+        opaque => 'database_filename_data',
+        size_t => 'database_filename_size',
+        bool   => 'ui',
+        uint16 => 'ui_port',
+        opaque => 'log_format_data',
+        size_t => 'log_format_size',
+        opaque => 'log_level_data',
+        size_t => 'log_level_size',
+    );
+}
+
 package Temporalio::Core::FFI::LoggingOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreLoggingOptions
@@ -200,6 +251,8 @@ $ffi->type('opaque' => $_) for qw(
 
 # Record type aliases for the by-value structs declared above.
 $ffi->type('record(Temporalio::Core::FFI::ByteArrayRef)'         => 'TemporalCoreByteArrayRef');
+$ffi->type('record(Temporalio::Core::FFI::TestServerOptions)'    => 'TemporalCoreTestServerOptions');
+$ffi->type('record(Temporalio::Core::FFI::DevServerOptions)'     => 'TemporalCoreDevServerOptions');
 $ffi->type('record(Temporalio::Core::FFI::LoggingOptions)'       => 'TemporalCoreLoggingOptions');
 $ffi->type('record(Temporalio::Core::FFI::OpenTelemetryOptions)' => 'TemporalCoreOpenTelemetryOptions');
 $ffi->type('record(Temporalio::Core::FFI::PrometheusOptions)'    => 'TemporalCorePrometheusOptions');
@@ -282,6 +335,19 @@ my @phase0_attach = (
       [ 'TemporalCoreCancellationToken' ] => 'void' ],
     [ temporal_core_cancellation_token_free => 'cancellation_token_free',
       [ 'TemporalCoreCancellationToken' ] => 'void' ],
+    # Ephemeral dev server (spec section 12.2). The callback arguments are
+    # the shim trampoline pointers (server_start / server_shutdown kinds),
+    # passed as opaque; user_data is the shim (queue, callback_id) pair.
+    # Per testing.rs: the runtime must outlive the server, and the shutdown
+    # async block borrows the server box — free only after the shutdown
+    # callback has fired.
+    [ temporal_core_ephemeral_server_start_dev_server => 'ephemeral_server_start_dev_server',
+      [ 'TemporalCoreRuntime', 'record(Temporalio::Core::FFI::DevServerOptions)*',
+        'opaque', 'opaque' ] => 'void' ],
+    [ temporal_core_ephemeral_server_shutdown => 'ephemeral_server_shutdown',
+      [ 'TemporalCoreEphemeralServer', 'opaque', 'opaque' ] => 'void' ],
+    [ temporal_core_ephemeral_server_free => 'ephemeral_server_free',
+      [ 'TemporalCoreEphemeralServer' ] => 'void' ],
 
     # temporalio-perl-bridge
     [ temporalio_perl_bridge_queue_new => 'queue_new',
