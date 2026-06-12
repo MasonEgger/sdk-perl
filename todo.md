@@ -32,9 +32,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.4.4 Verify: cargo test && cargo build --release
 
 ### P0.5 Alien::Temporalio::PerlBridge
-- [ ] P0.5.1 RED: alien-perl-bridge/t/alien.t (T-alien-pb-1..3)
-- [ ] P0.5.2 GREEN: alienfile + Alien module + dist.ini
-- [ ] P0.5.3 Verify: dzil test
+- [x] P0.5.1 RED: alien-perl-bridge/t/alien.t (T-alien-pb-1..3)
+- [x] P0.5.2 GREEN: alienfile + Alien module + dist.ini
+- [x] P0.5.3 Verify: dzil test
 
 ### P0.6 Temporalio::Core::FFI
 - [ ] P0.6.1 RED: sdk/t/unit/core_ffi.t (T-ffi-1..3)
