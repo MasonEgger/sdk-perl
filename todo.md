@@ -43,9 +43,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.6.4 Verify
 
 ### P0.7 Temporalio::Core::ByteArray
-- [ ] P0.7.1 RED: sdk/t/unit/byte_array.t (T-ba-1..4 + dead-runtime warn)
-- [ ] P0.7.2 GREEN: ByteArray.pm
-- [ ] P0.7.3 Verify
+- [x] P0.7.1 RED: sdk/t/unit/byte_array.t (T-ba-1..4 + dead-runtime warn)
+- [x] P0.7.2 GREEN: ByteArray.pm
+- [x] P0.7.3 Verify
 
 ### P0.8 Telemetry config classes
 - [ ] P0.8.1 RED: sdk/t/unit/runtime_config.t (T-rt-4, T-rt-6, validation)

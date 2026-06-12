@@ -17,6 +17,23 @@ package Temporalio::Core::FFI::ByteArrayRef {
     );
 }
 
+package Temporalio::Core::FFI::ByteArray {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreByteArray
+    #   { const uint8_t *data; size_t size; size_t cap; bool disable_free; }
+    # Only ever handled BY POINTER (wrapped via Temporalio::Core::ByteArray
+    # or crafted in tests); FFI::Platypus::Record omits the C struct's 7
+    # bytes of trailing padding (25 vs 32), which is irrelevant for
+    # pointer-only use — field offsets (0/8/16/24) match the C layout and
+    # nothing reads past disable_free.
+    record_layout_1(
+        opaque => 'data',
+        size_t => 'size',
+        size_t => 'cap',
+        bool   => 'disable_free',
+    );
+}
+
 package Temporalio::Core::FFI::LoggingOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreLoggingOptions
@@ -79,6 +96,11 @@ for my $lib (@libs) {
 
 my $ffi = FFI::Platypus->new(api => 2);
 $ffi->lib(@libs);
+
+# The process-wide FFI::Platypus instance, exposed for cast() by the thin
+# object wrappers (e.g. Temporalio::Core::ByteArray reads struct fields by
+# casting an opaque pointer to a record view).
+sub ffi { $ffi }
 
 # Opaque pointer aliases for every C struct we only ever handle by pointer.
 $ffi->type('opaque' => $_) for qw(
