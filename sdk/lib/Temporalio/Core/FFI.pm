@@ -283,6 +283,14 @@ my @phase0_attach = (
       [] => 'opaque' ],
     [ temporalio_perl_bridge_ephemeral_server_shutdown_callback_ptr => 'ephemeral_server_shutdown_callback_ptr',
       [] => 'opaque' ],
+    # WorkerOptions marshalling spike (plan P0.10): the shim parses a
+    # TemporalCoreWorkerOptions built Perl-side and echoes every field as a
+    # NUL-terminated "field=value" summary string (cast it to 'string', then
+    # release it with string_free).
+    [ temporalio_perl_bridge_debug_worker_options => 'debug_worker_options',
+      [ 'opaque' ] => 'opaque' ],
+    [ temporalio_perl_bridge_string_free => 'string_free',
+      [ 'opaque' ] => 'void' ],
 );
 
 # Attach eagerly at load time and die loudly on any failure so a version

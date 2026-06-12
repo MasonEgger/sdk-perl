@@ -12,7 +12,8 @@ draft has been removed; spec.md is the sole contract.)
 - Dependency `Protobuf` (protobuf-perl) is complete and verified against
   the full Temporal proto graph (`proto3-perl/verification-2026-06-09.md`).
 - Risk spikes: #1 proto loading CLOSED; #2 attributes CLOSED; #3
-  WorkerOptions marshalling OPEN (step P0.10).
+  WorkerOptions marshalling CLOSED (hand-packed `pack()` buffer verified
+  via the shim's debug_worker_options echo — spec §11, step P0.10).
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 

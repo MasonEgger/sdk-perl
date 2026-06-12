@@ -11,6 +11,7 @@
 typedef struct TemporalCoreByteArray TemporalCoreByteArray;
 typedef struct TemporalCoreConnection TemporalCoreConnection;
 typedef struct TemporalCoreEphemeralServer TemporalCoreEphemeralServer;
+typedef struct TemporalCoreWorkerOptions TemporalCoreWorkerOptions;
 
 /**
  * `kind` discriminator values, 1..6 in spec section 3 trampoline order.
@@ -200,6 +201,29 @@ void *temporalio_perl_bridge_ephemeral_server_start_callback_ptr(void);
  * Address of the ephemeral-server-shutdown trampoline.
  */
 void *temporalio_perl_bridge_ephemeral_server_shutdown_callback_ptr(void);
+
+/**
+ * Parse a `TemporalCoreWorkerOptions` built by the caller and return a
+ * newline-delimited `field=value` summary covering every field in struct
+ * order, as a NUL-terminated string. Free the result with
+ * [`temporalio_perl_bridge_string_free`]. Debug-only: this exists so the
+ * Perl SDK's marshalling can be verified empirically (plan P0.10) without a
+ * server connection.
+ *
+ * # Safety
+ * `options` must be null or point to a fully initialized
+ * `TemporalCoreWorkerOptions` whose pointers remain valid for the call.
+ */
+char *temporalio_perl_bridge_debug_worker_options(const TemporalCoreWorkerOptions *options);
+
+/**
+ * Free a string returned by [`temporalio_perl_bridge_debug_worker_options`].
+ *
+ * # Safety
+ * `s` must be null or a pointer previously returned by this crate's
+ * string-returning functions, not yet freed.
+ */
+void temporalio_perl_bridge_string_free(char *s);
 
 #ifdef __cplusplus
 }  // extern "C"

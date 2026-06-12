@@ -2137,18 +2137,26 @@ Aggregated from the phased roadmap + specific test IDs above.
   constraints from §10.1 are now permanent design requirements, not
   open questions. Phase 0 still includes a Test2-style version of this
   test to guard against regressions on newer Perl versions in CI.
-- **Risk spike 3 (`TemporalCoreWorkerOptions` marshalling): OPEN.**
-  The struct (header is authoritative) embeds tagged unions passed **by
-  value** — `TemporalCoreWorkerVersioningStrategy`, and four
-  `TemporalCoreSlotSupplier` unions inside `TemporalCoreTunerHolder` —
-  plus nested structs and `ByteArrayRefArray`s. It is not yet proven that
-  `FFI::Platypus::Record` can express this. Spike: build the full struct
-  (versioning `None{build_id}`, four `FixedSize` suppliers, simple-maximum
-  pollers), call `temporal_core_worker_new` against an ephemeral dev
-  server connection, assert the worker constructs and shuts down cleanly.
-  Fallback if Platypus records can't express the unions: hand-pack the
-  struct bytes with `pack` per the pinned header's layout (we control the
-  header version, so the layout is stable per release).
+- **Risk spike 3 (`TemporalCoreWorkerOptions` marshalling): CLOSED —
+  hand-packed `pack()` buffer, 2026-06-11.** The struct embeds tagged
+  unions passed **by value** — `TemporalCoreWorkerVersioningStrategy`,
+  and four `TemporalCoreSlotSupplier` unions inside
+  `TemporalCoreTunerHolder` — which `FFI::Platypus::Record` cannot
+  express (no unions, no nested records), so the spec-sanctioned fallback
+  is the mechanism: `Temporalio::Core::FFI::WorkerOptions` hand-packs the
+  full 464-byte struct with `pack` per the pinned header's x86-64 SysV
+  layout (we control the header version, so the layout is stable per
+  release). Verified empirically without a server: the shim's
+  `temporalio_perl_bridge_debug_worker_options` parses the Perl-built
+  struct through `#[repr(C)]` mirrors of the bridge's own definitions and
+  echoes every field as `field=value` lines;
+  `sdk/t/unit/worker_options_marshal.t` asserts the full v0.1
+  configuration (versioning `None{build_id}`, four `FixedSize` suppliers,
+  simple-maximum pollers) plus a pairwise-distinct-values configuration
+  match field-for-field. The original spike's live
+  `temporal_core_worker_new` exercise happens at worker construction
+  (Phase 2, T-wkr-1). Bumping the sdk-rust pin requires re-running the
+  echo test (plan P0.10).
 
 ### Phase 1 — client smoke
 

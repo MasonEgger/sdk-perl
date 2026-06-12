@@ -60,12 +60,12 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.9.4 Verify
 
 ### P0.10 Risk spike 3 — WorkerOptions marshalling
-- [ ] P0.10.1 RED: shim debug_worker_options echo + cargo test
-- [ ] P0.10.2 GREEN: regen header, rebuild Alien
-- [ ] P0.10.3 RED: sdk/t/unit/worker_options_marshal.t (full struct echo match)
-- [ ] P0.10.4 GREEN: FFI/WorkerOptions.pm records (or pack() fallback, documented)
-- [ ] P0.10.5 Update spec §11: spike 3 CLOSED with mechanism
-- [ ] P0.10.6 Verify: cargo test + prove
+- [x] P0.10.1 RED: shim debug_worker_options echo + cargo test
+- [x] P0.10.2 GREEN: regen header, rebuild Alien
+- [x] P0.10.3 RED: sdk/t/unit/worker_options_marshal.t (full struct echo match)
+- [x] P0.10.4 GREEN: FFI/WorkerOptions.pm records (or pack() fallback, documented)
+- [x] P0.10.5 Update spec §11: spike 3 CLOSED with mechanism
+- [x] P0.10.6 Verify: cargo test + prove
 
 ### P0.11 Vendor protos + Temporalio::Core::Proto
 - [ ] P0.11.1 Vendor full api_upstream + local trees via xt/author/vendor-protos.pl
