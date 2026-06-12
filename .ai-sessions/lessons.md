@@ -2,6 +2,7 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- Linux::FD::Event flags use long literals (`'non-blocking'`, `'close-on-exec'`) — spec §4.2's `'nonblock'` sketch is rejected with "No such flag"; spike CPAN flag/option literals in a one-liner before coding against spec sketches (2026-06-11)
 - FFI::Platypus::Record drops C trailing padding (TemporalCoreByteArray: 25 bytes vs C's 32) — by-pointer field reads are safe (offsets match), but never use Perl record sizes for allocation or array strides; read struct fields from an opaque ptr by casting `'opaque' => 'record(Class)*'` through the shared FFI instance (2026-06-11)
 - FFI::Platypus `record(Class)` (no `*`) passes AND returns structs by value — small by-value returns like TemporalCoreRuntimeOrFail work directly on x86-64, no shim out-param needed; `record(Class)*` is the pointer form; nested records are unsupported by FFI::Platypus::Record, so flatten embedded structs into layout-identical scalar fields (2026-06-11)
 - Alien::Build runs alienfiles via `do '<abs path>'`, so `__FILE__` inside an alienfile is the real path — walk up from it to locate in-tree sources (works from a checkout AND a dzil .build dir); Test::Alien::Build's `alien_build_ok` monkeypatches `${class}::dist_dir` to the test prefix, so dist_dir-derived accessors like `include_dir` work under test (2026-06-11)
@@ -11,7 +12,6 @@
 - The `:reader` field attribute is Perl 5.40+ — on this project's 5.38 floor write explicit one-line reader methods; spec sketches like `method message :reader;` are aspirational syntax, so verify each construct against 5.38 before coding (2026-06-11)
 - `prove t` does NOT recurse into `t/unit/` etc. — `sdk/.proverc` carries `--recurse` so the documented `prove -lj4 t` runs the whole tree; after adding a test in a new subdir, check prove's file list, not just PASS (2026-06-11)
 - Despite the mandatory `use utf8` test preamble, Test2's TAP formatter handle is not UTF-8 — non-ASCII in test names emits `Wide character in print`; keep test names ASCII (2026-06-11)
-- List-context collapse in T2 method args is a recurring trap: a failed `eval {}` AND an FFI::Platypus::Record opaque accessor reading NULL both return the empty list, shifting the test name into the value slot. Assign to a lexical first; a missing test name in TAP output is the tell (2026-06-11)
 ## Workflow
 - Verify MUST-match wire constants (payload encodings, gRPC code maps, defaults) by grepping the reference SDK source yourself — Explore subagents paraphrase (reported "json/proto"; actual constant is "json/protobuf") (2026-06-10)
 - Read the actual sdk-core C bridge header before specing or planning FFI work — it alone revealed by-value tagged unions in WorkerOptions and the absence of a buffered-metrics API (2026-06-10)
@@ -23,6 +23,7 @@
 - cbindgen renders opaque `_private: [u8; 0]` structs as zero-size definitions; borrowed foreign types need `[export] exclude` + `after_includes` forward typedefs to coexist with the owning header (2026-06-11)
 
 ## Perl
+- Linux::FD::Event flags use long literals (`'non-blocking'`, `'close-on-exec'`) — spec §4.2's `'nonblock'` sketch is rejected; spike CPAN flag literals before coding against spec sketches (2026-06-11)
 - FFI::Platypus `record(Class)` is by value (returns included), `record(Class)*` by pointer; FFI::Platypus::Record cannot nest records — flatten embedded structs to layout-identical fields (2026-06-11)
 - FFI::Platypus::Record drops C trailing padding — by-pointer field reads are safe (offsets match), but never use Perl record sizes for allocation or array strides; read struct fields from an opaque ptr via `cast('opaque' => 'record(Class)*', $ptr)` (2026-06-11)
 - Alien::Build runs alienfiles via `do '<abs path>'` (`__FILE__` is real — usable to locate in-tree sources); Test::Alien::Build's `alien_build_ok` monkeypatches `${class}::dist_dir`, so dist_dir-derived accessors work under test (2026-06-11)

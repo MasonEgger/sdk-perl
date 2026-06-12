@@ -54,10 +54,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P0.8.4 Verify
 
 ### P0.9 Temporalio::Runtime
-- [ ] P0.9.1 RED: sdk/t/unit/runtime.t (T-rt-1, T-rt-2, T-rt-3, T-rt-5 + idempotent shutdown)
-- [ ] P0.9.2 GREEN: Runtime.pm (runtime_new, queue, fd, shutdown sequence)
-- [ ] P0.9.3 REFACTOR: fd creation into Core::Callback stub
-- [ ] P0.9.4 Verify
+- [x] P0.9.1 RED: sdk/t/unit/runtime.t (T-rt-1, T-rt-2, T-rt-3, T-rt-5 + idempotent shutdown)
+- [x] P0.9.2 GREEN: Runtime.pm (runtime_new, queue, fd, shutdown sequence)
+- [x] P0.9.3 REFACTOR: fd creation into Core::Callback stub
+- [x] P0.9.4 Verify
 
 ### P0.10 Risk spike 3 — WorkerOptions marshalling
 - [ ] P0.10.1 RED: shim debug_worker_options echo + cargo test

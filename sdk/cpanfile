@@ -12,6 +12,10 @@ requires 'Future::AsyncAwait', '0.66';
 requires 'IO::Async';
 requires 'Syntax::Keyword::Dynamically';
 
+# Wakeup eventfd on Linux (spec section 4.2); Temporalio::Core::Callback
+# falls back to a nonblocking pipe when unavailable or on non-Linux.
+recommends 'Linux::FD';
+
 # Exceptions (spec section 16.1)
 requires 'Devel::StackTrace';
 
