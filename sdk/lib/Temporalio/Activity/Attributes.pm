@@ -37,6 +37,9 @@ sub parse_defn ($data, $method_name, $pkg) {
             elsif ($k eq 'no_thread_cancellation') {
                 $opts{no_thread_cancellation} = $v ? 1 : 0;
             }
+            elsif ($k eq 'sync') {
+                $opts{sync} = $v ? 1 : 0;
+            }
             else {
                 require Temporalio::Exception::Argument;
                 Temporalio::Exception::Argument->throw(

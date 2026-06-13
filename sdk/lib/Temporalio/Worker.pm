@@ -17,6 +17,7 @@ use Temporalio::Core::FFI::WorkerOptions ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::Bridge ();
 use Temporalio::Exception::Runtime ();
+use Temporalio::Activity::Pool ();
 use Temporalio::Worker::ActivityDispatcher ();
 use Temporalio::Worker::ActivityRegistry ();
 use Temporalio::Worker::PollLoop ();
@@ -51,7 +52,12 @@ class Temporalio::Worker {
     field $workflow_failure_exception_types    :param = [];
     field $nondeterminism_as_workflow_fail     :param = 0;
 
+    # IO::Async::Function fork-pool size for sync activities (spec section 8.1
+    # / 9.4). Only the count matters Perl-side; sync activities run in a child.
+    field $sync_activity_workers               :param = 4;
+
     field $activity_registry;
+    field $activity_pool;    # Temporalio::Activity::Pool, built lazily in run
     field $worker_ptr;       # TemporalCoreWorker*, NULL until _ensure_worker
     field $worker_keep;      # @keep pinning the packed options buffer
     field $is_shutdown = 0;
@@ -213,6 +219,14 @@ class Temporalio::Worker {
         # own), then finalize + free. _finalize_and_free is idempotent.
         $self->_initiate_shutdown_once;
         await $self->_finalize_and_free;
+
+        # Stop the sync-activity fork pool (reap its children) so no orphaned
+        # worker processes linger after the worker stops.
+        if (defined $activity_pool) {
+            eval { $activity_pool->close; 1 };
+            $activity_pool = undef;
+        }
+
         $is_running  = 0;
         $is_shutdown = 1;
 
@@ -227,16 +241,38 @@ class Temporalio::Worker {
     # bridge borrows it — header), so @keep lives until the Future resolves.
     method _build_activity_dispatcher () {
         my $runtime = $self->_runtime;
+        $activity_pool = $self->_build_activity_pool;
         return Temporalio::Worker::ActivityDispatcher->new(
             registry       => $activity_registry,
             data_converter => $client->data_converter,
             task_queue     => $task_queue,
             client         => $client,
             loop           => $runtime->loop,
+            pool           => $activity_pool,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_activity_task($completion_bytes);
             },
             heartbeat_recorder => sub ($heartbeat_bytes) {
+                return $self->_record_heartbeat($heartbeat_bytes);
+            },
+        );
+    }
+
+    # Build the sync-activity fork pool (spec section 9.4) only when the worker
+    # registers at least one sync activity. The forked children MUST close the
+    # runtime's wakeup fd (the read end of the eventfd/pipe the shim signals) —
+    # a child holding it would corrupt the parent's completion drain. Heartbeats
+    # a child records are relayed to the real synchronous FFI heartbeat here on
+    # the parent side.
+    method _build_activity_pool () {
+        return undef unless $activity_registry->has_sync_activities;
+        my $runtime = $self->_runtime;
+        return Temporalio::Activity::Pool->new(
+            loop          => $runtime->loop,
+            max_workers   => $sync_activity_workers,
+            registry      => $activity_registry,
+            inherited_fhs => [ $runtime->read_handle ],
+            heartbeat_relay => sub ($task_token, $heartbeat_bytes) {
                 return $self->_record_heartbeat($heartbeat_bytes);
             },
         );

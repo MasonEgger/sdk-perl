@@ -168,10 +168,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P2.4.5 Verify
 
 ### P2.5 Sync activity fork pool
-- [ ] P2.5.1 RED: sdk/t/unit/activity_pool.t (T-act-6, T-act-10, heartbeat relay, coop cancel)
-- [ ] P2.5.2 GREEN: Pool.pm + dispatcher routing
-- [ ] P2.5.3 REFACTOR: cross-fork invocation struct
-- [ ] P2.5.4 Verify — **Phase 2 acceptance green (unit level)**
+- [x] P2.5.1 RED: sdk/t/unit/activity_pool.t (T-act-6, T-act-10, heartbeat relay, coop cancel)
+- [x] P2.5.2 GREEN: Pool.pm + dispatcher routing
+- [x] P2.5.3 REFACTOR: cross-fork invocation struct
+- [x] P2.5.4 Verify — **Phase 2 acceptance green (unit level)**
 
 ## Phase 3 — Workflows
 

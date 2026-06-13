@@ -16,6 +16,7 @@ use Syntax::Keyword::Dynamically;
 
 use Temporalio::Activity ();          # the context()/info()/heartbeat() surface
 use Temporalio::Activity::Context ();
+use Temporalio::Activity::Invocation ();
 use Temporalio::Cancellation ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Application ();
@@ -34,6 +35,11 @@ class Temporalio::Worker::ActivityDispatcher {
     field $task_queue :param;
     field $client     :param = undef;
     field $loop       :param = undef;
+
+    # The Temporalio::Activity::Pool that runs sync-declared activities in a
+    # fork pool (spec section 8.4 step 6 / section 9.4). undef when the worker
+    # registers no sync activities; a sync activity with no pool fails.
+    field $pool :param = undef;
 
     # A coderef ($completion_bytes) -> Future: sends the serialized
     # ActivityTaskCompletion to core (worker_complete_activity_task over the
@@ -123,32 +129,42 @@ class Temporalio::Worker::ActivityDispatcher {
             my @args = await $data_converter->from_payloads(
                 [ @{ $start->input // [] } ]);
 
-            # Build the per-invocation context (spec section 9.3). info is the
-            # frozen hashref the Context exposes; heartbeat flows through the
-            # injected recorder.
             my $info = $self->_build_info($task_token, $start);
-            my $ctx  = Temporalio::Activity::Context->new(
-                info               => $info,
-                cancellation       => $cancellation,
-                data_converter     => $data_converter,
-                client             => $client,
-                heartbeat_recorder => $heartbeat_recorder
-                    // sub ($bytes) { return undef },
-            );
-            $running{$task_token}{context} = $ctx;
 
-            # Step 6: run the body with the context dynamically scoped (NEVER
-            # `local` — F::AA panics across an await, spec section 16.1). The
-            # `dynamically` MUST wrap the `await` itself, not just the
-            # synchronous call: Syntax::Keyword::Dynamically restores the value
-            # correctly across each suspend/resume, so a body that parks on
-            # `await $ctx->cancellation->cancelled` still sees $CURRENT when it
-            # resumes. Async and sync bodies both work: a sync body returns a
-            # value, an async one a Future; _invoke + await normalizes both.
-            my $result = do {
-                dynamically $Temporalio::Activity::Context::CURRENT = $ctx;
-                await $self->_invoke($def->{code}, @args);
-            };
+            # Step 6: route by the activity's sync/async declaration. A sync
+            # activity runs in the fork pool (spec section 9.4); an async one
+            # runs on the main loop under a dynamically-scoped Context.
+            my $result;
+            if ($def->{sync}) {
+                $result = await $self->_run_in_pool(
+                    $task_token, $info, $cancellation, @args);
+            }
+            else {
+                # Build the per-invocation context (spec section 9.3). info is
+                # the frozen hashref the Context exposes; heartbeat flows through
+                # the injected recorder.
+                my $ctx = Temporalio::Activity::Context->new(
+                    info               => $info,
+                    cancellation       => $cancellation,
+                    data_converter     => $data_converter,
+                    client             => $client,
+                    heartbeat_recorder => $heartbeat_recorder
+                        // sub ($bytes) { return undef },
+                );
+                $running{$task_token}{context} = $ctx;
+
+                # Run the body with the context dynamically scoped (NEVER
+                # `local` — F::AA panics across an await, spec section 16.1). The
+                # `dynamically` MUST wrap the `await` itself, not just the
+                # synchronous call: Syntax::Keyword::Dynamically restores the
+                # value correctly across each suspend/resume, so a body that
+                # parks on `await $ctx->cancellation->cancelled` still sees
+                # $CURRENT when it resumes.
+                $result = do {
+                    dynamically $Temporalio::Activity::Context::CURRENT = $ctx;
+                    await $self->_invoke($def->{code}, @args);
+                };
+            }
 
             # Success (step 7): convert + codec-encode the result payload.
             my ($payload) = await $data_converter->to_payloads([$result]);
@@ -177,6 +193,28 @@ class Temporalio::Worker::ActivityDispatcher {
     # `await` uniformly and routes a synchronous die into the Future.
     method _invoke ($code, @args) {
         return Future->call(sub { $code->(@args) });
+    }
+
+    # Run a sync activity in the fork pool (spec section 9.4). Builds the
+    # serializable cross-fork invocation struct — activity type, already-decoded
+    # args (plain scalars), the info hashref, task token, and the cooperative
+    # cancellation flag — and awaits the pool. No live core pointers or
+    # Cancellation objects cross the fork; cancellation is conveyed as a flag.
+    async method _run_in_pool ($task_token, $info, $cancellation, @args) {
+        Temporalio::Exception::Application->throw(
+            message => 'Sync activity dispatched but the worker has no activity'
+                . ' pool configured',
+            type    => 'NotFoundError',
+        ) if !defined $pool;
+
+        my $inv = Temporalio::Activity::Invocation->new(
+            activity_type => $info->{activity_type},
+            args          => [@args],
+            info          => $info,
+            task_token    => $task_token,
+            cancelled     => $cancellation->is_cancelled,
+        );
+        return await $pool->invoke($inv);
     }
 
     # Build the failed/cancelled completion for a thrown $error. A Cancelled

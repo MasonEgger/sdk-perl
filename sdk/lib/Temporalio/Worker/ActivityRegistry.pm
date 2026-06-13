@@ -15,6 +15,7 @@ class Temporalio::Worker::ActivityRegistry {
     # activity type name => {
     #   code                   => $callable invoked as $code->(@args),
     #   no_thread_cancellation => 0|1,
+    #   sync                   => 0|1,   # sync => fork pool; async => main loop
     # }
     field %definitions;
 
@@ -32,6 +33,15 @@ class Temporalio::Worker::ActivityRegistry {
     # Look up a single activity definition by type name (undef if absent).
     method definition ($name) { return $definitions{$name} }
 
+    # True if any registered activity is sync-declared (so the worker needs to
+    # build the fork pool — spec section 9.4).
+    method has_sync_activities {
+        for my $def (values %definitions) {
+            return 1 if $def->{sync};
+        }
+        return 0;
+    }
+
     # Add one activity entry (class name string, Definition instance, or
     # FunctionDefinition). Helper subs live inside the class block so they are
     # callable from ADJUST (a bare `class` file puts file-scope subs in main::,
@@ -42,6 +52,7 @@ class Temporalio::Worker::ActivityRegistry {
             _register($defs, $entry->name, {
                 code                   => $entry->code,
                 no_thread_cancellation => $entry->no_thread_cancellation,
+                sync                   => $entry->sync ? 1 : 0,
             });
             return;
         }
@@ -92,6 +103,7 @@ class Temporalio::Worker::ActivityRegistry {
             _register($defs, $type, {
                 code                   => $code,
                 no_thread_cancellation => $class_defs->{$type}{no_thread_cancellation},
+                sync                   => $class_defs->{$type}{sync} ? 1 : 0,
             });
         }
     }

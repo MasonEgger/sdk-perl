@@ -11,6 +11,11 @@ class Temporalio::Activity::FunctionDefinition {
     field $name :param;
     field $code :param;
     field $no_thread_cancellation :param = 0;
+    # Sync activities run in the IO::Async::Function fork pool (spec section
+    # 9.4); async activities run on the main loop. The author declares this:
+    # an `async sub` is async, a plain `sub` is sync. The flag drives the
+    # dispatcher's pool-vs-loop routing (spec section 8.4 step 6).
+    field $sync :param = 0;
 
     ADJUST {
         if (!defined $name || $name eq '') {
@@ -30,6 +35,7 @@ class Temporalio::Activity::FunctionDefinition {
     method name                   { $name }
     method code                   { $code }
     method no_thread_cancellation { $no_thread_cancellation }
+    method sync                   { $sync }
 }
 
 1;

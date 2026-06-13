@@ -34,6 +34,7 @@ class Temporalio::Activity::Definition {
         $_DEFS{$pkg}{$name} = {
             code                   => $ref,
             no_thread_cancellation => $opts{no_thread_cancellation} // 0,
+            sync                   => $opts{sync} // 0,
         };
         return;
     }
