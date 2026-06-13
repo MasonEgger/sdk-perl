@@ -150,10 +150,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P2.1.3 Verify
 
 ### P2.2 Worker construction + validate
-- [ ] P2.2.1 RED: sdk/t/unit/worker_new.t (T-wkr-1, kwargs→options echo)
-- [ ] P2.2.2 RED: sdk/t/integration/worker_new.t (validate, clean shutdown, T-wkr-5)
-- [ ] P2.2.3 GREEN: Worker.pm construction/validate/shutdown + FFI attaches
-- [ ] P2.2.4 Verify
+- [x] P2.2.1 RED: sdk/t/unit/worker_new.t (T-wkr-1, kwargs→options echo)
+- [x] P2.2.2 RED: sdk/t/integration/worker_new.t (validate, clean shutdown, T-wkr-5)
+- [x] P2.2.3 GREEN: Worker.pm construction/validate/shutdown + FFI attaches
+- [x] P2.2.4 Verify
 
 ### P2.3 Activity::Context + heartbeat
 - [ ] P2.3.1 RED: sdk/t/unit/activity_context.t (context scoping, heartbeat proto, T-act-7 unit)

@@ -322,6 +322,18 @@ package Temporalio::Core::FFI::RuntimeOrFail {
     );
 }
 
+package Temporalio::Core::FFI::WorkerOrFail {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreWorkerOrFail
+    #   { TemporalCoreWorker *worker; const TemporalCoreByteArray *fail; }
+    # Returned BY VALUE from temporal_core_worker_new (header: "Only worker or
+    # fail will be non-null. Whichever is must be freed when done.").
+    record_layout_1(
+        opaque => 'worker',
+        opaque => 'fail',
+    );
+}
+
 package Temporalio::Core::FFI;
 
 our $VERSION = '0.1.0';
@@ -376,6 +388,7 @@ $ffi->type('record(Temporalio::Core::FFI::MetricsOptions)'       => 'TemporalCor
 $ffi->type('record(Temporalio::Core::FFI::TelemetryOptions)'     => 'TemporalCoreTelemetryOptions');
 $ffi->type('record(Temporalio::Core::FFI::RuntimeOptions)'       => 'TemporalCoreRuntimeOptions');
 $ffi->type('record(Temporalio::Core::FFI::RuntimeOrFail)'        => 'TemporalCoreRuntimeOrFail');
+$ffi->type('record(Temporalio::Core::FFI::WorkerOrFail)'         => 'TemporalCoreWorkerOrFail');
 
 # --- Marshalling helpers for the by-pointer record trees -------------------
 #
@@ -500,6 +513,24 @@ my @phase0_attach = (
       [ 'TemporalCoreEphemeralServer', 'opaque', 'opaque' ] => 'void' ],
     [ temporal_core_ephemeral_server_free => 'ephemeral_server_free',
       [ 'TemporalCoreEphemeralServer' ] => 'void' ],
+    # Worker construction + validate + shutdown (spec sections 8.1-8.2).
+    # worker_new takes a pointer to the hand-packed TemporalCoreWorkerOptions
+    # buffer (Temporalio::Core::FFI::WorkerOptions, passed as opaque) and
+    # returns the worker-or-fail union BY VALUE. validate and
+    # finalize_shutdown are async (callback bridge, 'worker' kind); the
+    # callback arguments are the shim trampoline pointer and the (queue,
+    # callback_id) user_data pair, both opaque. initiate_shutdown and free
+    # are synchronous (header: initiate then finalize then free).
+    [ temporal_core_worker_new => 'worker_new',
+      [ 'TemporalCoreConnection', 'opaque' ] => 'TemporalCoreWorkerOrFail' ],
+    [ temporal_core_worker_validate => 'worker_validate',
+      [ 'TemporalCoreWorker', 'opaque', 'opaque' ] => 'void' ],
+    [ temporal_core_worker_initiate_shutdown => 'worker_initiate_shutdown',
+      [ 'TemporalCoreWorker' ] => 'void' ],
+    [ temporal_core_worker_finalize_shutdown => 'worker_finalize_shutdown',
+      [ 'TemporalCoreWorker', 'opaque', 'opaque' ] => 'void' ],
+    [ temporal_core_worker_free => 'worker_free',
+      [ 'TemporalCoreWorker' ] => 'void' ],
 
     # temporalio-perl-bridge
     [ temporalio_perl_bridge_queue_new => 'queue_new',

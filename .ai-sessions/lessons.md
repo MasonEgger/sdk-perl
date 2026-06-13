@@ -2,6 +2,7 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- sdk-core `temporal_core_worker_finalize_shutdown` awaits `Worker::shutdown`, which blocks on `workflows.shutdown()` until the workflow poll loop returns ShutDown — so a never-run worker (construction+validate only) deadlocks on finalize. For a construction-only shutdown call `worker_initiate_shutdown` + `worker_free` (a plain box drop) and issue finalize only from `run` after the poll loops drain (2026-06-13)
 - A lazy `state $x = eval { require Foo; 1 } ? 1 : 0` probe re-raises its failed `require` when the FIRST call lands inside a Future::AsyncAwait async frame (the async error-detection sees the leftover $@) — compute load-detection at module load time in a `my $HAVE_FOO = do { local $@; eval {...} }` instead of lazily per-call (2026-06-12)
 - Unit-testing a method that `await`s an `async` collaborator: the mock for that collaborator MUST return a Future (`Future->done($v)` / `Future->fail($e)`), not the bare value — a plain return dies with "Can't locate object method AWAIT_IS_READY via package <the returned value's class>" (2026-06-12)
 - Generated Protobuf message accessors (Temporalio::Proto::*) are READ-ONLY — `$msg->field($x)` silently no-ops (no error), so build every field via `Class->new(\%fields)`; collect variant-only fields (e.g. SignalWithStart's signal_name/signal_input) into an extras hash and merge into the constructor args rather than setting them after construction (2026-06-12)
@@ -11,13 +12,13 @@
 - With Future::AsyncAwait loaded (0.71, perl 5.38.2) — even `use Future::AsyncAwait ()` with no import — only the FIRST `class X :isa(Y)` per file parses; the next dies with "Subroutine attributes must come before the signature" or "non-empty @ISA". Keep one `:isa` class per file; codec/test classes that must share a file can skip the `async` sugar and return `Future->done/fail` directly (2026-06-12)
 - The C bridge header alone under-specifies semantics — read the bridge's .rs conversion code too (testing.rs: an EMPTY download_version becomes `Fixed("")` not SDK-default, so pass the literal 'default'; `ephemeral_server_free` must wait for the shutdown callback because the async block borrows the server box; the spawned CLI inherits stdout/stderr) (2026-06-12)
 - A bare `class` file (no preceding `package` statement) compiles file-scope subs into `main::`, so calls from inside the class block fail with "Undefined subroutine &Class::_helper" — define every helper sub INSIDE the `class { }` block (2026-06-12)
-- An installed (non-checkout) Protobuf dist cannot auto-resolve its bundled WKTs — Parser.pm's share lookup is checkout-relative but installs land in auto/share/dist/Protobuf — so pass `File::ShareDir::dist_dir('Protobuf') . '/proto'` as an explicit include path (2026-06-12)
 
 ## Tooling
 - `[@Starter::Git]` uses Git::GatherDir, which gathers only git-TRACKED files — `git add` a new distribution's files before its first `dzil test` or the build dir will be missing them (symptom: `[AlienBuild] No alienfile!`) (2026-06-11)
 
 ## Workflow
 - The C bridge header declares shapes, but the bridge's .rs conversion code declares semantics (empty-string traps, free-after-callback ordering, stdio inheritance) — read both before writing FFI wrappers (2026-06-12)
+- For sdk-core async lifecycle calls, read the CORE `.rs` method (not just the bridge) to learn what it awaits: `worker_finalize_shutdown` → `Worker::shutdown` blocks on `workflows.shutdown()` until the poll loop returns ShutDown, so a never-run worker deadlocks on finalize — initiate+free only until `run` drives the loops (2026-06-13)
 - Verify MUST-match wire constants (payload encodings, gRPC code maps, defaults) by grepping the reference SDK source yourself — Explore subagents paraphrase (reported "json/proto"; actual constant is "json/protobuf") (2026-06-10)
 - Sibling reference checkouts track upstream HEAD and can drift from spec MUST-match constants (sdk-rust RetryOptions multiplier 1.5→1.7) — on disagreement, confirm against a second reference SDK; spec wins (2026-06-12)
 - Read the actual sdk-core C bridge header before specing or planning FFI work — it alone revealed by-value tagged unions in WorkerOptions and the absence of a buffered-metrics API (2026-06-10)
