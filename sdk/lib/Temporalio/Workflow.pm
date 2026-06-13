@@ -19,8 +19,9 @@ use Temporalio::Exception::Workflow::NoRunner ();
 # which the runner sets via Syntax::Keyword::Dynamically around the workflow
 # body. Calling any of them outside a workflow body raises
 # Temporalio::Exception::Workflow::NoRunner. The deterministic-execution
-# functions (execute_activity, start_timer, sleep, continue_as_new, ...) land
-# in later phases (P3.4+); P3.3 provides the replay-safety accessors.
+# functions land incrementally: replay-safety accessors (P3.3),
+# execute_activity/start_activity (P3.4), start_timer/sleep (P3.5);
+# continue_as_new and friends arrive in later phases.
 
 # Internal: return the active runner or raise NoRunner. $CURRENT lives in the
 # Temporalio::Workflow::Runner package; we read it by its fully-qualified name
@@ -93,6 +94,26 @@ sub start_activity ($activity, %opts) {
         activity_type => _activity_type_name($activity),
         %opts,
     );
+}
+
+# --- timers (spec section 10.2) ---------------------------------------------
+
+# start_timer($seconds) -> a Workflow::Future that resolves when the timer
+# fires. Emits a StartTimer command and returns without awaiting, so the caller
+# may start several timers (or run other work) before awaiting. Cancelling the
+# returned Future emits a CancelTimer command and raises
+# Temporalio::Exception::Cancelled at the await site.
+sub start_timer ($seconds) {
+    return _runner()->start_timer($seconds);
+}
+
+# sleep($seconds) -> a Future that resolves after the timer fires. The
+# documented alias over start_timer: sleep(duration) starts a timer and awaits
+# it. Returning the Future (rather than awaiting here) keeps the await in the
+# caller's async frame so the dynamically-scoped runner context is preserved
+# across the suspension (spec section 16.1).
+sub sleep ($seconds) {
+    return _runner()->start_timer($seconds);
 }
 
 1;

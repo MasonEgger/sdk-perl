@@ -57,6 +57,21 @@ sub schedule_activity ($fields) {
     return _command_class()->new({ schedule_activity => $fields });
 }
 
+# start_timer { seq, start_to_fire_timeout } — emitted when the workflow body
+# calls Temporalio::Workflow::start_timer / sleep (spec section 10.2). $fields
+# is the assembled StartTimer field hashref (the runner owns timer-seq
+# allocation and the Duration conversion).
+sub start_timer ($fields) {
+    return _command_class()->new({ start_timer => $fields });
+}
+
+# cancel_timer { seq } — emitted when a started timer's Workflow::Future is
+# cancelled (spec section 10.3; MUST-match sdk-ruby _apply_cancel_command).
+# $seq is the seq of the StartTimer being cancelled.
+sub cancel_timer ($seq) {
+    return _command_class()->new({ cancel_timer => { seq => $seq } });
+}
+
 1;
 
 __END__
@@ -81,9 +96,10 @@ with exactly one variant set; the L<Temporalio::Workflow::Runner> buffers them
 during an activation and drains the buffer into the
 C<WorkflowActivationCompletion> it returns to the worker.
 
-The set grows as later phases land: C<start_timer> / C<cancel_timer> (P3.5),
+The set grows as later phases land:
 C<continue_as_new_workflow_execution> (P3.7), and so on. This module hosts the
-completion-outcome commands and C<schedule_activity> (P3.4).
+completion-outcome commands, C<schedule_activity> (P3.4), and
+C<start_timer> / C<cancel_timer> (P3.5).
 
 =head1 FUNCTIONS
 
@@ -111,6 +127,19 @@ C<ScheduleActivity { ... }> — emitted when the workflow body calls
 C<Temporalio::Workflow::execute_activity> / C<start_activity>. C<$fields> is
 the assembled C<ScheduleActivity> field hashref (the runner owns seq
 allocation, timeout conversion, and the default task queue).
+
+=item C<start_timer($fields)>
+
+C<StartTimer { seq, start_to_fire_timeout }> — emitted when the workflow body
+calls C<Temporalio::Workflow::start_timer> / C<sleep>. C<$fields> is the
+assembled C<StartTimer> field hashref (the runner owns the timer-seq allocation
+and the C<google.protobuf.Duration> conversion).
+
+=item C<cancel_timer($seq)>
+
+C<CancelTimer { seq }> — emitted when a started timer's
+L<Temporalio::Workflow::Future> is cancelled. C<$seq> is the seq of the
+C<StartTimer> being cancelled.
 
 =back
 

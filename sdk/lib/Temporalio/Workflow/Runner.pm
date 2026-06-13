@@ -58,17 +58,25 @@ class Temporalio::Workflow::Runner {
     field @commands;                 # outbound WorkflowCommand buffer
     field $main_run_future;          # the Future returned by :Run
 
-    # Sequence counter for command emission (spec section 10.3): workflow-scoped,
-    # monotonic, starting at 1. Allocated when a ScheduleActivity (P3.4) /
-    # StartTimer (P3.5) / ... command is emitted, and matched on the
-    # corresponding ResolveActivity / FireTimer job.
-    field $seq_counter = 0;
+    # Per-command-type sequence counters (spec section 10.3): each is
+    # workflow-scoped, monotonic, starting at 1. Activities and timers allocate
+    # from SEPARATE seq spaces (MUST-match sdk-python _next_seq("activity") vs
+    # _next_seq("timer"); sdk-ruby @activity_counter vs @timer_counter), so a
+    # workflow's first activity and first timer are both seq 1. Each is
+    # matched on the corresponding ResolveActivity / FireTimer job.
+    field $activity_seq_counter = 0;
+    field $timer_seq_counter    = 0;
 
     # Pending activity Futures keyed by their command seq: { seq => $future }.
     # The Workflow::Future for each in-flight activity, resolved imperatively
-    # when its ResolveActivity job arrives (P3.4). Timers (P3.5) and child
-    # workflows (Phase 6+) join analogous maps.
+    # when its ResolveActivity job arrives (P3.4). Child workflows (Phase 6+)
+    # join analogous maps.
     field %pending_activities;
+
+    # Pending timer Futures keyed by their StartTimer seq: { seq => $future }.
+    # Resolved imperatively when the matching FireTimer job arrives (P3.5), or
+    # removed and failed-as-cancelled when the timer Future is cancelled.
+    field %pending_timers;
 
     # Activation context (set per activation; never the OS clock).
     field $activation_seconds = 0;
@@ -127,7 +135,7 @@ class Temporalio::Workflow::Runner {
             // die "Temporalio::Workflow::Runner: schedule_activity needs an "
                  . "activity_type";
 
-        my $seq = ++$seq_counter;   # workflow-scoped, monotonic from 1.
+        my $seq = ++$activity_seq_counter;  # activity seq space, from 1.
 
         # Convert the activity arguments to payloads (MUST-match sdk-python:
         # arguments converted before the command is built so a converter error
@@ -184,6 +192,44 @@ class Temporalio::Workflow::Runner {
         return $future;
     }
 
+    # --- timers (spec section 10.2 start_timer/sleep + 10.3 FireTimer) -------
+
+    # start_timer($seconds) -> a Temporalio::Workflow::Future resolved when the
+    # matching FireTimer job arrives. Allocates the next TIMER seq (a seq space
+    # separate from activities — sdk-python _next_seq("timer") / sdk-ruby
+    # @timer_counter), builds the StartTimer command, buffers it, and registers
+    # the pending Future. Cancelling the returned Future emits a CancelTimer
+    # command (same seq) and resolves the Future as Temporalio::Exception::
+    # Cancelled (MUST-match sdk-ruby _apply_cancel_command / CanceledError).
+    method start_timer ($seconds) {
+        my $seq = ++$timer_seq_counter;   # timer seq space, from 1.
+
+        push @commands, Temporalio::Workflow::Commands::start_timer({
+            seq                   => $seq,
+            start_to_fire_timeout => _duration($seconds),
+        });
+
+        # A timer future whose ->cancel FAILS the future with a
+        # Temporalio::Exception::Cancelled (rather than putting it into Future's
+        # native cancelled state). The reference SDKs raise a cancellation
+        # *exception* into the awaiting frame (sdk-ruby fiber.raise(CanceledError);
+        # sdk-python cancels the asyncio task which surfaces CancelledError) — a
+        # natively-cancelled CPAN Future would instead make `await` throw a bare
+        # "was cancelled" string, losing the Temporal exception identity. The
+        # cancel also emits the CancelTimer command (same seq) and de-registers
+        # the pending timer so a later FireTimer for it is a no-op.
+        my $future = Temporalio::Workflow::Runner::_TimerFuture->_new_timer(
+            seq        => $seq,
+            on_cancel  => sub {
+                return unless delete $pending_timers{$seq};
+                push @commands,
+                    Temporalio::Workflow::Commands::cancel_timer($seq);
+            },
+        );
+        $pending_timers{$seq} = $future;
+        return $future;
+    }
+
     # --- activation processing (spec section 10.3) ---------------------------
 
     # process_activation($activation) -> the WorkflowActivationCompletion proto.
@@ -228,8 +274,11 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'resolve_activity') {
             return $self->_apply_resolve_activity($job->resolve_activity);
         }
-        # FireTimer / SignalWorkflow / QueryWorkflow / CancelWorkflow /
-        # RemoveFromCache and friends land in later phases.
+        if ($variant eq 'fire_timer') {
+            return $self->_apply_fire_timer($job->fire_timer);
+        }
+        # SignalWorkflow / QueryWorkflow / CancelWorkflow / RemoveFromCache and
+        # friends land in later phases.
         warn "Temporalio::Workflow::Runner: ignoring unhandled activation job"
            . " variant '$variant'\n";
         return;
@@ -296,6 +345,20 @@ class Temporalio::Workflow::Runner {
             die "Temporalio::Workflow::Runner: ResolveActivity seq $seq had no "
               . "recognized status (got '$status')";
         }
+        return;
+    }
+
+    # FireTimer { seq } — resolve the pending timer Future for this seq (spec
+    # section 10.3; MUST-match sdk-python _apply_fire_timer). An absent handle
+    # is ignored, not an error: the timer may have been cancelled (and removed)
+    # earlier in this same activation, in which case FireTimer is stale. The
+    # awaiting workflow continuation runs synchronously at resolve time
+    # (Future::AsyncAwait on_ready), so progress is observed in the pump.
+    method _apply_fire_timer ($job) {
+        my $seq    = $job->seq;
+        my $future = delete $pending_timers{$seq};
+        return unless defined $future;   # cancelled/removed: ignore stale fire.
+        $future->done unless $future->is_ready;
         return;
     }
 
@@ -373,6 +436,46 @@ class Temporalio::Workflow::Runner {
         my $whole = int($seconds);
         my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
         return $Duration->new({ seconds => $whole, nanos => $nanos });
+    }
+}
+
+# A Workflow::Future for timers whose ->cancel maps to a Temporalio::Exception::
+# Cancelled FAILURE (not Future's native cancelled state). Kept in its own
+# package because a `feature 'class'` file may declare only one `class :isa`
+# once Future::AsyncAwait is loaded (lessons.md), and this is a plain Future
+# subclass with one overridden method anyway. The override is the whole point:
+# a natively-cancelled CPAN Future makes `await` throw a bare "was cancelled"
+# string, losing the Temporal exception identity, whereas the reference SDKs
+# raise a cancellation EXCEPTION into the awaiting frame.
+package Temporalio::Workflow::Runner::_TimerFuture {
+    use v5.38;
+    use warnings;
+
+    use parent -norequire, 'Temporalio::Workflow::Future';
+    use Temporalio::Exception::Cancelled ();
+
+    # _new_timer(seq => $seq, on_cancel => $cb) -> a pending timer future. The
+    # on_cancel callback (emits CancelTimer + de-registers the pending timer)
+    # runs exactly once, on the first ->cancel of a still-pending timer.
+    sub _new_timer ($class, %args) {
+        my $self = $class->new;
+        $self->{_timer_on_cancel} = $args{on_cancel};
+        return $self;
+    }
+
+    # cancel: emit the CancelTimer command (via the stored callback) and fail
+    # the future with Temporalio::Exception::Cancelled so the await site sees a
+    # proper Temporal cancellation. A no-op once the future is ready (already
+    # fired or already cancelled), mirroring the references' pending-state guard.
+    sub cancel ($self) {
+        return $self if $self->is_ready;
+        if (my $cb = delete $self->{_timer_on_cancel}) {
+            $cb->();
+        }
+        $self->fail(Temporalio::Exception::Cancelled->new(
+            message => 'Timer cancelled',
+        ));
+        return $self;
     }
 }
 
@@ -460,19 +563,27 @@ C<Math::Random::ISAAC::XS> primitive.
 
 Handles C<InitializeWorkflow>, activity scheduling
 (C<execute_activity>/C<start_activity> -> C<ScheduleActivity> command +
-C<ResolveActivity> job, P3.4), and the success completion outcome. Each
-activity is tracked by its workflow-scoped command C<seq> in a pending-Futures
-map and resolved imperatively when the matching C<ResolveActivity> job arrives
-(completed -> C<< ->done >>, failed/cancelled -> C<< ->fail >> with the
-exception mapped from the Failure proto). Timers (P3.5), the dispatcher cache
-and eviction (P3.6), and the full fail/cancel/task-fail/continue-as-new outcome
-table (P3.7) land in later phases.
+C<ResolveActivity> job, P3.4), timers (C<start_timer>/C<sleep> -> C<StartTimer>
+command + C<FireTimer> job, with C<CancelTimer> on Future cancel, P3.5), and the
+success completion outcome. Each activity is tracked by its command C<seq> in a
+pending-Futures map and resolved imperatively when the matching
+C<ResolveActivity> job arrives (completed -> C<< ->done >>, failed/cancelled ->
+C<< ->fail >> with the exception mapped from the Failure proto). Each timer is
+tracked likewise and resolved on its C<FireTimer> job (C<< ->done >>) or, when
+the timer Future is cancelled, removed and failed with a
+L<Temporalio::Exception::Cancelled> after emitting C<CancelTimer>. The
+dispatcher cache and eviction (P3.6) and the full
+fail/cancel/task-fail/continue-as-new outcome table (P3.7) land in later phases.
 
 =head2 Sequence numbers
 
 Command sequence numbers (spec section 10.3) are workflow-scoped, monotonic
 from 1, allocated at command-emission time and persisted across activations.
-The command buffer, by contrast, holds only the current activation's commands
-(the worker returns one completion per activation).
+Each command type allocates from its OWN seq space: activities and timers each
+start at 1 independently (MUST-match sdk-python C<_next_seq("activity")> vs
+C<_next_seq("timer")>; sdk-ruby C<@activity_counter> vs C<@timer_counter>), so a
+workflow's first activity and first timer are both seq 1. The command buffer, by
+contrast, holds only the current activation's commands (the worker returns one
+completion per activation).
 
 =cut

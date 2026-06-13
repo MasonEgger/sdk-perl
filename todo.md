@@ -197,9 +197,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P3.4.3 Verify
 
 ### P3.5 Timers
-- [ ] P3.5.1 RED: sdk/t/replay/timers.t (T-wf-6, sleep alias, CancelTimer)
-- [ ] P3.5.2 GREEN: start_timer/sleep + FireTimer
-- [ ] P3.5.3 Verify
+- [x] P3.5.1 RED: sdk/t/replay/timers.t (T-wf-6, sleep alias, CancelTimer)
+- [x] P3.5.2 GREEN: start_timer/sleep + FireTimer
+- [x] P3.5.3 Verify
 
 ### P3.6 Workflow poll loop + cache + eviction
 - [ ] P3.6.1 RED: sdk/t/unit/workflow_poll_loop.t (routing, T-wf-14, eviction-last, codec, shutdown)
