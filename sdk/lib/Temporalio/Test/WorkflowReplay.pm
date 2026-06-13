@@ -17,6 +17,12 @@ class Temporalio::Test::WorkflowReplay {
     # inject a recording/custom converter.
     field $payload_converter :param = undef;
 
+    # Worker-level outcome-policy options (spec section 10.3 step 6), threaded
+    # to the Runner so a test can exercise the full completion decision table
+    # (T-wf-13 / T-wf-15c). Defaults match a worker with no overrides.
+    field $workflow_failure_exception_types :param = [];
+    field $nondeterminism_as_workflow_fail   :param = 0;
+
     # The per-run Runner. Created lazily on the first push_activation so the
     # run_id from the activation seeds it (one harness drives one run, like
     # Python's WorkflowReplayer over a single run).
@@ -32,6 +38,16 @@ class Temporalio::Test::WorkflowReplay {
     # reuse the same Runner (the same run), mirroring how the worker feeds a
     # cached runner successive activations for one run id.
     method push_activation ($activation) {
+        return $self->commands_of(
+            $self->push_activation_completion($activation));
+    }
+
+    # push_activation_completion($activation) -> the fully-decoded
+    # WorkflowActivationCompletion proto. Unlike push_activation (which returns
+    # only the commands of a SUCCESSFUL completion), this exposes the raw
+    # completion so a test can inspect a TASK-failure outcome (which_status eq
+    # 'failed', spec section 10.3 step 6 / T-wf-15a).
+    method push_activation_completion ($activation) {
         # Normalise the activation the way the real worker receives it: fully
         # decoded off the wire, with every nested message blessed and its
         # oneof discriminator (which_variant) live. A proto built via ->new
@@ -40,21 +56,25 @@ class Temporalio::Test::WorkflowReplay {
         $activation = ref($activation)->decode($activation->encode);
 
         $runner //= Temporalio::Workflow::Runner->new(
-            workflow_class    => $workflow_class,
-            run_id            => $activation->run_id,
-            payload_converter => $payload_converter,
+            workflow_class                   => $workflow_class,
+            run_id                           => $activation->run_id,
+            payload_converter                => $payload_converter,
+            workflow_failure_exception_types => $workflow_failure_exception_types,
+            nondeterminism_as_workflow_fail  => $nondeterminism_as_workflow_fail,
         );
 
         my $completion = $runner->process_activation($activation);
 
         # Round-trip the completion the way the worker hands it to core (encode
-        # to bytes, decode back) so every nested message — Success, each
+        # to bytes, decode back) so every nested message — Success/Failure, each
         # WorkflowCommand, its variant payloads — is fully blessed with live
         # accessors and oneof discriminators.
-        $completion = ref($completion)->decode($completion->encode);
+        return ref($completion)->decode($completion->encode);
+    }
 
-        # A successful completion carries the commands; a failed completion has
-        # none (the full failed-status surface lands with P3.7).
+    # commands_of($completion) -> the WorkflowCommand list of a SUCCESSFUL
+    # completion (empty for a `failed` completion, which carries no commands).
+    method commands_of ($completion) {
         my $success = $completion->successful;
         return () unless defined $success;
         return ($success->commands // [])->@*;

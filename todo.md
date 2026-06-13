@@ -208,9 +208,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P3.6.4 Verify
 
 ### P3.7 Completion outcomes
-- [ ] P3.7.1 RED: sdk/t/replay/completion_outcomes.t (T-wf-12, T-wf-15a/b/c, T-wf-8, T-wf-13)
-- [ ] P3.7.2 GREEN: outcome decision table + continue_as_new + CancelWorkflow
-- [ ] P3.7.3 Verify
+- [x] P3.7.1 RED: sdk/t/replay/completion_outcomes.t (T-wf-12, T-wf-15a/b/c, T-wf-8, T-wf-13)
+- [x] P3.7.2 GREEN: outcome decision table + continue_as_new + CancelWorkflow
+- [x] P3.7.3 Verify
 
 ### P3.8 Determinism primitives
 - [ ] P3.8.1 RED: sdk/t/replay/determinism.t (UpdateRandomSeed, T-wf-9 logger, NotifyHasPatch)

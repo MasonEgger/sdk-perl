@@ -45,6 +45,19 @@ sub cancel_workflow_execution () {
     return _command_class()->new({ cancel_workflow_execution => {} });
 }
 
+# continue_as_new_workflow_execution { ... } — the workflow requested
+# continue-as-new (spec section 10.3 step 6). $fields is the already-assembled
+# ContinueAsNewWorkflowExecution field hashref (workflow_type, task_queue,
+# arguments, retry_policy, memo, headers, search_attributes, the two timeout
+# Durations, versioning_intent); the runner owns the payload conversion. Only
+# the fields the caller set are present (continue-as-new does NOT re-use the old
+# run's arguments — see the proto comment).
+sub continue_as_new_workflow_execution ($fields) {
+    return _command_class()->new({
+        continue_as_new_workflow_execution => $fields,
+    });
+}
+
 # schedule_activity { ... } — emitted when the workflow body calls
 # Temporalio::Workflow::execute_activity / start_activity (spec section 10.2).
 # $fields is the already-assembled ScheduleActivity field hashref (seq,
@@ -96,10 +109,11 @@ with exactly one variant set; the L<Temporalio::Workflow::Runner> buffers them
 during an activation and drains the buffer into the
 C<WorkflowActivationCompletion> it returns to the worker.
 
-The set grows as later phases land:
-C<continue_as_new_workflow_execution> (P3.7), and so on. This module hosts the
-completion-outcome commands, C<schedule_activity> (P3.4), and
-C<start_timer> / C<cancel_timer> (P3.5).
+The set grows as later phases land (signal/query response commands, child
+workflow commands, and so on). This module hosts the completion-outcome
+commands (C<complete_workflow_execution>, C<fail_workflow_execution>,
+C<cancel_workflow_execution>, C<continue_as_new_workflow_execution>),
+C<schedule_activity> (P3.4), and C<start_timer> / C<cancel_timer> (P3.5).
 
 =head1 FUNCTIONS
 
@@ -120,6 +134,14 @@ C<temporal.api.failure.v1.Failure> proto.
 
 C<CancelWorkflowExecution {}> — the cancellation outcome (de facto Temporal
 spec: a C<Cancelled> escape after C<CancelWorkflow> is NOT a failure).
+
+=item C<continue_as_new_workflow_execution($fields)>
+
+C<ContinueAsNewWorkflowExecution { ... }> — emitted when the workflow body
+calls C<Temporalio::Workflow::continue_as_new>. C<$fields> is the assembled
+field hashref (C<workflow_type>, C<task_queue>, C<arguments>, C<retry_policy>,
+C<memo>, C<headers>, C<search_attributes>, the two timeout Durations,
+C<versioning_intent>); only the fields the caller set are present.
 
 =item C<schedule_activity($fields)>
 

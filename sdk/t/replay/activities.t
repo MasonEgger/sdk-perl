@@ -126,11 +126,13 @@ T2->subtest('ResolveActivity success resumes the await (T-wf-2)' => sub {
 
 # ---------------------------------------------------------------------------
 # T-wf-7: ResolveActivity{seq:1, failed} raises an exception at the await site.
-# The activity failure (an ActivityFailure wrapping the cause) escapes :Run, so
-# (until the P3.7 outcome table) the runner surfaces it — we assert the
-# exception is a Temporalio::Exception::Activity with its cause type populated.
+# The activity failure (an ActivityFailure wrapping the cause) is a Temporal
+# failure exception, so when it escapes :Run the P3.7 outcome decision table
+# emits FailWorkflowExecution carrying the converted failure — we assert the
+# command is FailWorkflowExecution and its failure proto preserves the
+# ActivityFailureInfo plus the underlying application-error cause type.
 # ---------------------------------------------------------------------------
-T2->subtest('ResolveActivity failure raises Exception::Activity (T-wf-7)' => sub {
+T2->subtest('ResolveActivity failure -> FailWorkflowExecution (T-wf-7)' => sub {
     my $harness = Temporalio::Test::WorkflowReplay->new(
         workflow_class => 'WfDef::ActivityCaller',
     );
@@ -163,30 +165,25 @@ T2->subtest('ResolveActivity failure raises Exception::Activity (T-wf-7)' => sub
     );
     my $failure_proto = $fc->to_failure($act_exc, $PC);
 
-    my $err = T2->dies(sub {
-        $harness->push_activation(activation({
-            run_id    => 'r1',
-            timestamp => { seconds => 101 },
-            jobs      => [
-                { resolve_activity => {
-                    seq    => 1,
-                    result => { failed => { failure => $failure_proto } },
-                } },
-            ],
-        }));
-    });
+    my @commands = $harness->push_activation(activation({
+        run_id    => 'r1',
+        timestamp => { seconds => 101 },
+        jobs      => [
+            { resolve_activity => {
+                seq    => 1,
+                result => { failed => { failure => $failure_proto } },
+            } },
+        ],
+    }));
 
-    T2->ok(
-        Scalar::Util::blessed($err)
-            && $err->isa('Temporalio::Exception::Activity'),
-        'await site raises Temporalio::Exception::Activity',
-    ) or T2->diag("got: $err");
-    T2->ok(
-        Scalar::Util::blessed($err) && $err->can('cause') && defined $err->cause,
-        'the activity error has a cause',
-    );
-    T2->is($err->cause->type, 'BadInput',
-        'cause->type is the underlying application error type');
+    T2->is(scalar @commands, 1, 'one command');
+    T2->is($commands[0]->which_variant, 'fail_workflow_execution',
+        'the escaped activity failure fails the workflow execution');
+    my $failure = $commands[0]->fail_workflow_execution->failure;
+    T2->like($failure->message, qr/Activity task failed/,
+        'failure carries the activity-failure message');
+    T2->is($failure->cause->application_failure_info->type, 'BadInput',
+        'failure cause preserves the underlying application error type');
 });
 
 # ---------------------------------------------------------------------------

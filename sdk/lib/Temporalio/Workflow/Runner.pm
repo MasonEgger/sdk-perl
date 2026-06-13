@@ -12,9 +12,12 @@ use Syntax::Keyword::Dynamically;
 
 use Temporalio::Workflow::Commands ();
 use Temporalio::Workflow::Future ();
+use Temporalio::Workflow::ContinueAsNew ();
 use Temporalio::Converter::Payload ();
 use Temporalio::Converter::Failure ();
 use Temporalio::Core::Proto ();
+use Temporalio::Exception::Cancelled ();
+use Temporalio::Exception::Nondeterminism ();
 use Temporalio::Exception::Workflow::NoRunner ();
 
 # The dynamically-scoped pointer to the currently-active runner. Every
@@ -53,6 +56,19 @@ class Temporalio::Workflow::Runner {
     # workflow execution's task queue). The replay harness leaves it undef.
     field $task_queue :param = undef;
 
+    # Worker-level workflow_failure_exception_types (spec section 10.3 step 6 /
+    # T-wf-15c): an arrayref of class names. A NON-Temporal exception escaping
+    # :Run fails the WORKFLOW (FailWorkflowExecution) only when its class is one
+    # of these (or a subclass); otherwise it fails the TASK. MUST-match
+    # sdk-python workflow_is_failure_exception (the worker-level
+    # failure_exception_types).
+    field $workflow_failure_exception_types :param = [];
+
+    # Worker option nondeterminism_as_workflow_fail (spec section 10.3 step 6 /
+    # T-wf-13): when false (default), a non-determinism error fails the workflow
+    # TASK (the server retries); when true, it fails the WORKFLOW.
+    field $nondeterminism_as_workflow_fail :param = 0;
+
     field $instance;                 # the workflow Definition instance
     field $workflow_type;            # resolved run type name
     field @commands;                 # outbound WorkflowCommand buffer
@@ -86,6 +102,19 @@ class Temporalio::Workflow::Runner {
     # Deterministic RNG state (seeded from the InitializeWorkflow job's
     # randomness_seed). See _make_rng below.
     field $rng;
+
+    # Cancellation flag (spec section 10.3 CancelWorkflow / step 6). Set when a
+    # CancelWorkflow job arrives; the outcome decision table promotes a
+    # Cancelled escaping :Run to CancelWorkflowExecution only when this is set
+    # (MUST-match sdk-python self._cancel_requested gating cancel_workflow_execution).
+    field $cancel_requested = 0;
+
+    # A non-determinism error captured during job application (e.g. a
+    # ResolveActivity for an unknown seq). Job application cannot simply die
+    # because the dynamically-scoped $CURRENT teardown and the completion build
+    # must still run; instead the error is stashed here and the decision table
+    # routes it (task-fail by default, workflow-fail when configured — T-wf-13).
+    field $nondeterminism_error;
 
     ADJUST {
         $payload_converter //= Temporalio::Converter::Payload->default;
@@ -250,6 +279,11 @@ class Temporalio::Workflow::Runner {
         # contrast, is workflow-scoped and persists across activations.
         @commands = ();
 
+        # Non-determinism is detected per-activation (it concerns the jobs in
+        # THIS activation), so clear any prior detection. cancel_requested, by
+        # contrast, is run-scoped and persists across activations.
+        $nondeterminism_error = undef;
+
         # Step 4: apply jobs under the dynamically-scoped runner context so the
         # workflow body's Temporalio::Workflow:: calls resolve to this runner.
         dynamically $Temporalio::Workflow::Runner::CURRENT = $self;
@@ -296,8 +330,11 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'fire_timer') {
             return $self->_apply_fire_timer($job->fire_timer);
         }
-        # SignalWorkflow / QueryWorkflow / CancelWorkflow / RemoveFromCache and
-        # friends land in later phases.
+        if ($variant eq 'cancel_workflow') {
+            return $self->_apply_cancel_workflow($job->cancel_workflow);
+        }
+        # SignalWorkflow / QueryWorkflow / RemoveFromCache (handled by the
+        # dispatcher fast path) and friends land in later phases.
         warn "Temporalio::Workflow::Runner: ignoring unhandled activation job"
            . " variant '$variant'\n";
         return;
@@ -331,11 +368,16 @@ class Temporalio::Workflow::Runner {
         my $seq    = $job->seq;
         my $future = delete $pending_activities{$seq};
         unless (defined $future) {
-            # An unknown seq is a non-determinism signal (spec T-wf-13). The
-            # full non-determinism policy is P3.5/P3.7; for now, fail loudly
-            # rather than silently dropping the resolution.
-            die "Temporalio::Workflow::Runner: ResolveActivity for unknown "
-              . "seq $seq (no pending activity)";
+            # An unknown seq is a non-determinism error (spec section 10.3 /
+            # T-wf-13): the activation references a command this workflow never
+            # emitted. Stash it (do NOT die here — the dynamically-scoped
+            # context teardown and completion build must still run) so the
+            # outcome decision table can route it (task-fail by default,
+            # workflow-fail when nondeterminism_as_workflow_fail is set).
+            $self->_record_nondeterminism(
+                "ResolveActivity for unknown seq $seq (no pending activity) — "
+                . "non-determinism: the workflow never scheduled this activity");
+            return;
         }
 
         my $resolution = $job->result;
@@ -381,6 +423,54 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
+    # CancelWorkflow (spec section 10.3 / T-wf-12): mark the run cancel-requested
+    # and cancel the run's pending Futures. Cancelling a pending activity/timer
+    # Future fails it with Temporalio::Exception::Cancelled (the timer Future
+    # already does this via its on_cancel override; pending activity Futures are
+    # failed directly here), which raises Cancelled at the awaiting site. The
+    # main run Future is cancelled too, in case the body parked on something
+    # other than a tracked pending Future. If a Cancelled then propagates out of
+    # :Run, the outcome decision table emits CancelWorkflowExecution (NOT a
+    # FailWorkflowExecution). MUST-match sdk-python _apply_cancel_workflow:
+    # set self._cancel_requested and cancel the workflow's primary task.
+    method _apply_cancel_workflow ($job) {
+        $cancel_requested = 1;
+
+        # Fail every pending activity Future with Cancelled so the await site
+        # raises a proper Temporal cancellation (a natively-cancelled Future
+        # would surface a bare "was cancelled" string, losing the exception
+        # identity — same reasoning as the timer Future override). Timer Futures
+        # carry their own cancel override (emits CancelTimer + fails Cancelled),
+        # so ->cancel them. Continuations run synchronously at resolve time, so
+        # the body observes the cancellation before _pump/_build_completion.
+        for my $seq (keys %pending_activities) {
+            my $future = delete $pending_activities{$seq};
+            next if !defined $future || $future->is_ready;
+            $future->fail(Temporalio::Exception::Cancelled->new(
+                message => 'Workflow execution cancelled',
+            ));
+        }
+        for my $seq (keys %pending_timers) {
+            my $future = $pending_timers{$seq};
+            $future->cancel if defined $future && !$future->is_ready;
+        }
+        if (defined $main_run_future && !$main_run_future->is_ready) {
+            $main_run_future->cancel;
+        }
+        return;
+    }
+
+    # Stash a non-determinism error (spec section 10.3 / T-wf-13) for the outcome
+    # decision table. Built as a Temporalio::Exception::Nondeterminism so the
+    # decision table can recognize it and route it by the
+    # nondeterminism_as_workflow_fail flag. Only the first such error is kept.
+    method _record_nondeterminism ($message) {
+        $nondeterminism_error //= Temporalio::Exception::Nondeterminism->new(
+            message => "Temporalio::Workflow::Runner: $message",
+        );
+        return;
+    }
+
     # Pump phase (spec section 10.3 pump semantics): drive any ready Future
     # continuations. For the skeleton there are no pending workflow Futures, so
     # the main run Future is either already ready (Future::AsyncAwait ran the
@@ -395,15 +485,39 @@ class Temporalio::Workflow::Runner {
     }
 
     # Build the WorkflowActivationCompletion from the run outcome + command
-    # buffer (spec section 10.3 step 6 outcome table; skeleton covers the
-    # success path — fail/cancel/task-fail/continue-as-new land in P3.7).
+    # buffer. This is the spec section 10.3 step 6 OUTCOME DECISION TABLE
+    # (MUST-match sdk-python _run_top_level_workflow_function /
+    # _set_workflow_failure):
+    #
+    #   - A non-determinism error detected this activation -> task-fail by
+    #     default, FailWorkflowExecution when nondeterminism_as_workflow_fail
+    #     (checked first: it concerns the activation, not the run body) (T-wf-13).
+    #   - continue_as_new control signal escaped :Run ->
+    #     ContinueAsNewWorkflowExecution (caught BEFORE the failure branch so it
+    #     is never mistaken for an error) (T-wf-8).
+    #   - A Cancelled escaped after a CancelWorkflow job ->
+    #     CancelWorkflowExecution (NOT a failure) (T-wf-12).
+    #   - A Temporal failure exception (Temporalio::Exception::*) OR a class
+    #     listed in workflow_failure_exception_types -> FailWorkflowExecution
+    #     (T-wf-15b/c).
+    #   - Any other exception (plain die, foreign class) -> the whole completion
+    #     is `failed`: a workflow TASK failure the server retries (T-wf-15a).
+    #   - The run method returned a value -> CompleteWorkflowExecution { result }
+    #     (T-wf-11); a still-blocked body emits its buffered commands only.
     method _build_completion {
+        # 1. Non-determinism takes precedence (it is an activation-level fault,
+        #    detected while applying jobs, before the run body even ran).
+        if (defined $nondeterminism_error) {
+            return $nondeterminism_as_workflow_fail
+                ? $self->_workflow_failed_completion($nondeterminism_error)
+                : $self->_task_failed_completion($nondeterminism_error);
+        }
+
         if (defined $main_run_future && $main_run_future->is_ready) {
             if (my @failure = $main_run_future->failure) {
-                # A run-body exception: full outcome decision table is P3.7. For
-                # now surface it so the skeleton never silently swallows errors.
-                die $failure[0];
+                return $self->_outcome_for_failure($failure[0]);
             }
+            # Success: the run method returned a value.
             my $result = ($main_run_future->result)[0];
             my $payload = defined $result
                 ? $payload_converter->to_payload($result)
@@ -412,11 +526,146 @@ class Temporalio::Workflow::Runner {
                 Temporalio::Workflow::Commands::complete_workflow_execution($payload);
         }
 
+        return $self->_successful_completion;
+    }
+
+    # Route a value that escaped :Run through the failure decision table.
+    method _outcome_for_failure ($err) {
+        # continue_as_new: a control signal, NOT a failure — caught first so it
+        # is never converted as an error (mirrors sdk-python catching
+        # _ContinueAsNewError before the generic Exception branch).
+        if (Scalar::Util::blessed($err)
+            && $err->isa('Temporalio::Workflow::ContinueAsNew'))
+        {
+            push @commands, $self->_build_continue_as_new_command($err);
+            return $self->_successful_completion;
+        }
+
+        # Cancelled after a CancelWorkflow job -> CancelWorkflowExecution (NOT a
+        # FailWorkflowExecution). Gated on cancel_requested: a Cancelled with no
+        # cancel request is a normal failure (sdk-python self._cancel_requested).
+        if ($cancel_requested
+            && Scalar::Util::blessed($err)
+            && $err->isa('Temporalio::Exception::Cancelled'))
+        {
+            push @commands,
+                Temporalio::Workflow::Commands::cancel_workflow_execution();
+            return $self->_successful_completion;
+        }
+
+        # A Temporal failure exception, or a class listed in
+        # workflow_failure_exception_types, fails the WORKFLOW.
+        if ($self->_is_workflow_failure_exception($err)) {
+            return $self->_workflow_failed_completion($err);
+        }
+
+        # Anything else (plain die, foreign object not listed) fails the TASK.
+        return $self->_task_failed_completion($err);
+    }
+
+    # workflow_is_failure_exception (MUST-match sdk-python): an escaped value
+    # fails the WORKFLOW (rather than the task) if it is a Temporal failure
+    # exception (any Temporalio::Exception::*) or an instance of any class in the
+    # worker's workflow_failure_exception_types.
+    method _is_workflow_failure_exception ($err) {
+        return 0 unless Scalar::Util::blessed($err);
+        return 1 if $err->isa('Temporalio::Exception');
+        for my $type ($workflow_failure_exception_types->@*) {
+            return 1 if $err->isa($type);
+        }
+        return 0;
+    }
+
+    # Build a ContinueAsNewWorkflowExecution command from the captured signal's
+    # options (spec section 10.3 step 6 / T-wf-8; MUST-match sdk-python
+    # _ContinueAsNewError._apply_command). Only the fields the caller set are
+    # populated — continue-as-new does NOT re-use the old run's arguments.
+    method _build_continue_as_new_command ($signal) {
+        my %opts = $signal->options;
+        my %fields;
+
+        $fields{workflow_type} = $opts{workflow} if defined $opts{workflow};
+        $fields{task_queue}    = $opts{task_queue} if defined $opts{task_queue};
+
+        if (my $args = $opts{args}) {
+            if (@$args) {
+                $fields{arguments} =
+                    [ map { $payload_converter->to_payload($_) } @$args ];
+            }
+        }
+
+        for my $pair (
+            [ run_timeout  => 'workflow_run_timeout' ],
+            [ task_timeout => 'workflow_task_timeout' ],
+        ) {
+            my ($opt, $field) = @$pair;
+            next unless defined $opts{$opt};
+            $fields{$field} = _duration($opts{$opt});
+        }
+
+        if (defined(my $rp = $opts{retry_policy})) {
+            $fields{retry_policy} = $rp->to_proto;
+        }
+
+        if (my $memo = $opts{memo}) {
+            if (%$memo) {
+                $fields{memo} = {
+                    map { $_ => $payload_converter->to_payload($memo->{$_}) }
+                        keys %$memo
+                };
+            }
+        }
+
+        if (my $headers = $opts{headers}) {
+            if (%$headers) {
+                $fields{headers} = {
+                    map { $_ => $payload_converter->to_payload($headers->{$_}) }
+                        keys %$headers
+                };
+            }
+        }
+
+        return Temporalio::Workflow::Commands::continue_as_new_workflow_execution(
+            \%fields);
+    }
+
+    # A successful completion: the buffered commands (CompleteWorkflowExecution,
+    # FailWorkflowExecution, CancelWorkflowExecution, ContinueAsNew..., or the
+    # mid-run command set) wrapped in a Success status.
+    method _successful_completion {
         my $completion_class = Temporalio::Core::Proto::resolve(
             'coresdk.workflow_completion.WorkflowActivationCompletion');
         return $completion_class->new({
             run_id     => $run_id,
             successful => { commands => [@commands] },
+        });
+    }
+
+    # A workflow-FAILURE completion: a successful completion whose sole command
+    # is FailWorkflowExecution carrying the converted failure (T-wf-15b/c). The
+    # workflow execution itself fails (vs the task). Any commands already
+    # buffered this activation are discarded — a failing run does not also emit
+    # its earlier partial commands (sdk-python adds only the fail command).
+    method _workflow_failed_completion ($err) {
+        my $failure = $failure_converter->to_failure($err, $payload_converter);
+        @commands = (
+            Temporalio::Workflow::Commands::fail_workflow_execution($failure),
+        );
+        return $self->_successful_completion;
+    }
+
+    # A task-FAILURE completion: the entire WorkflowActivationCompletion is
+    # `failed` (a workflow-TASK failure the server retries), carrying the
+    # converted failure (T-wf-15a; sdk-python _current_activation_error path).
+    # NO commands are emitted — the workflow execution is neither completed nor
+    # failed.
+    method _task_failed_completion ($err) {
+        my $failure = $failure_converter->to_failure($err, $payload_converter);
+        my $completion_class = Temporalio::Core::Proto::resolve(
+            'coresdk.workflow_completion.WorkflowActivationCompletion');
+        return $completion_class->new({
+            run_id => $run_id,
+            failed => { failure => $failure },
         });
     }
 
@@ -590,9 +839,51 @@ C<ResolveActivity> job arrives (completed -> C<< ->done >>, failed/cancelled ->
 C<< ->fail >> with the exception mapped from the Failure proto). Each timer is
 tracked likewise and resolved on its C<FireTimer> job (C<< ->done >>) or, when
 the timer Future is cancelled, removed and failed with a
-L<Temporalio::Exception::Cancelled> after emitting C<CancelTimer>. The
-dispatcher cache and eviction (P3.6) and the full
-fail/cancel/task-fail/continue-as-new outcome table (P3.7) land in later phases.
+L<Temporalio::Exception::Cancelled> after emitting C<CancelTimer>.
+
+=head2 Completion-outcome decision table (spec section 10.3 step 6)
+
+C<_build_completion> routes the run outcome to one of:
+
+=over 4
+
+=item *
+
+A non-determinism error this activation (e.g. a C<ResolveActivity> for a
+sequence the workflow never emitted) — a workflow B<task> failure by default,
+or C<FailWorkflowExecution> when C<nondeterminism_as_workflow_fail> is set
+(T-wf-13).
+
+=item *
+
+A C<continue_as_new> control signal (L<Temporalio::Workflow::ContinueAsNew>)
+escaping C<:Run> — C<ContinueAsNewWorkflowExecution> carrying the new args and
+type/task-queue/policy overrides (T-wf-8).
+
+=item *
+
+A L<Temporalio::Exception::Cancelled> escaping after a C<CancelWorkflow> job —
+C<CancelWorkflowExecution> (NOT a failure) (T-wf-12).
+
+=item *
+
+A Temporal failure exception (any C<Temporalio::Exception::*>) or a class
+listed in C<workflow_failure_exception_types> — C<FailWorkflowExecution>
+(T-wf-15b/c).
+
+=item *
+
+Any other exception (a plain C<die>, a foreign class not listed) — the entire
+completion is C<failed>: a workflow B<task> failure the server retries
+(T-wf-15a).
+
+=item *
+
+A normal return — C<CompleteWorkflowExecution { result }> (T-wf-11).
+
+=back
+
+Signals/queries and the dispatcher's eviction fast path land in later phases.
 
 =head2 Sequence numbers
 

@@ -12,6 +12,7 @@ use warnings;
 use Scalar::Util ();
 
 use Temporalio::Workflow::Definition ();
+use Temporalio::Workflow::ContinueAsNew ();
 use Temporalio::Exception::Workflow::NoRunner ();
 
 # The Temporalio::Workflow:: functional surface (spec section 10.2). Every
@@ -116,6 +117,50 @@ sub sleep ($seconds) {
     return _runner()->start_timer($seconds);
 }
 
+# --- continue-as-new (spec section 10.2 / 10.3 step 6) ----------------------
+
+# continue_as_new($workflow_or_string, %opts) — request that the current run
+# end and a new run start with the given arguments. Like sdk-python's
+# workflow.continue_as_new (which raises _ContinueAsNewError), this NEVER
+# returns: it dies with a Temporalio::Workflow::ContinueAsNew control signal
+# that unwinds the :Run coroutine. The runner catches it in its outcome
+# decision table and emits a ContinueAsNewWorkflowExecution command.
+#
+# $workflow_or_string is the new workflow type (a name string, or a definition
+# class/object resolved the same way as execute_activity's first argument).
+# Pass undef to re-use the current workflow type. %opts mirror spec section
+# 10.2: args (arrayref), task_queue, retry_policy, memo, search_attributes,
+# headers, run_timeout / task_timeout (seconds), versioning_intent.
+sub continue_as_new ($workflow_or_string = undef, %opts) {
+    # Validate we are inside a workflow body (raises NoRunner otherwise) so a
+    # stray call outside a run is a clear error rather than an uncaught die.
+    _runner();
+
+    my $type = defined $workflow_or_string
+        ? _workflow_type_name($workflow_or_string)
+        : undef;
+
+    die Temporalio::Workflow::ContinueAsNew->new(
+        (defined $type ? (workflow => $type) : ()),
+        %opts,
+    );
+}
+
+# Resolve a continue_as_new first argument to a workflow-type name string.
+# Accepts a plain string (verbatim), a workflow definition class/object
+# exposing _workflow_type / workflow_type, mirroring _activity_type_name.
+sub _workflow_type_name ($workflow) {
+    if (Scalar::Util::blessed($workflow)) {
+        return $workflow->workflow_type if $workflow->can('workflow_type');
+        return $workflow->_workflow_type if $workflow->can('_workflow_type');
+    }
+    if (!ref $workflow && $workflow->can('_workflow_type')) {
+        return $workflow->_workflow_type;
+    }
+    # A plain string (the common case) is the workflow type verbatim.
+    return $workflow;
+}
+
 1;
 
 __END__
@@ -141,7 +186,11 @@ Temporalio::Workflow - entry point for workflow authors
 C<use Temporalio::Workflow;> in a workflow module loads
 L<Temporalio::Workflow::Definition> so the C<:isa> base resolves and the
 C<:Run>/C<:Signal>/C<:Query>/C<:Update>/C<:Init> attribute handlers are in
-scope. The workflow-context functional surface (C<Temporalio::Workflow::now>,
-C<execute_activity>, etc. — spec section 10.2) is added in a later phase.
+scope. It also provides the workflow-context functional surface (spec section
+10.2): replay-safety accessors (C<now>, C<time>, C<is_replaying>, C<info>,
+C<random>), activity invocation (C<execute_activity>, C<start_activity>),
+timers (C<start_timer>, C<sleep>), and C<continue_as_new>. Each looks up the
+active runner and raises L<Temporalio::Exception::Workflow::NoRunner> when
+called outside a workflow body.
 
 =cut
