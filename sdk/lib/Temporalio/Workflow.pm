@@ -52,9 +52,35 @@ sub is_replaying { return _runner()->is_replaying }
 # random -> the deterministic RNG seeded from the activation's randomness_seed.
 sub random { return _runner()->random }
 
-# info -> the WorkflowInfo hashref (run_id, workflow_type, ... grows in later
-# phases as more fields are threaded through the activation).
+# logger -> the replay-aware workflow logger (spec section 10.4). Its level
+# methods (info/warn/error/...) emit only while not replaying so history
+# re-application does not duplicate lines (T-wf-9); the is_* predicates always
+# return true so user code can build messages regardless of replay state.
+sub logger { return _runner()->logger }
+
+# info -> the WorkflowInfo hashref (run_id, workflow_type, patches, ... grows in
+# later phases as more fields are threaded through the activation).
 sub info { return _runner()->info }
+
+# --- versioning / patching (spec section 10.4) ------------------------------
+
+# patched($patch_id) -> a boolean: should this run take the "with change"
+# branch? On a fresh execution always true (and emits a SetPatchMarker); during
+# replay true only when the server notified the patch (NotifyHasPatch). The
+# answer is memoized per run so it is deterministic (MUST-match sdk-python
+# workflow.patched).
+sub patched ($patch_id) {
+    return _runner()->patched($patch_id);
+}
+
+# deprecate_patch($patch_id) -> mark a patch as being removed (all future
+# deployments will only have the "with change" code). Emits a SetPatchMarker
+# with deprecated => 1 the first time it is used on a live run; the patched
+# branch is then unconditional (MUST-match sdk-python workflow.deprecate_patch,
+# which calls workflow_patch(id, deprecated=True)).
+sub deprecate_patch ($patch_id) {
+    return _runner()->patched($patch_id, deprecated => 1);
+}
 
 # --- activity invocation (spec section 10.2) --------------------------------
 

@@ -9,9 +9,11 @@ no warnings 'experimental::class';
 use Future ();
 use Scalar::Util ();
 use Syntax::Keyword::Dynamically;
+use Math::Random::ISAAC::XS ();
 
 use Temporalio::Workflow::Commands ();
 use Temporalio::Workflow::Future ();
+use Temporalio::Workflow::Logger ();
 use Temporalio::Workflow::ContinueAsNew ();
 use Temporalio::Converter::Payload ();
 use Temporalio::Converter::Failure ();
@@ -99,9 +101,27 @@ class Temporalio::Workflow::Runner {
     field $activation_nanos   = 0;
     field $is_replaying       = 0;
 
-    # Deterministic RNG state (seeded from the InitializeWorkflow job's
-    # randomness_seed). See _make_rng below.
+    # Deterministic RNG (a Math::Random::ISAAC::XS instance seeded from the
+    # InitializeWorkflow job's randomness_seed — spec section 10.4; re-created
+    # on an UpdateRandomSeed job). See _make_rng below.
     field $rng;
+
+    # Patches notified by the server for this run (spec section 10.3
+    # NotifyHasPatch / 10.4 versioning). A set of patch ids present in history;
+    # during replay, patched($id) returns true iff $id is here (MUST-match
+    # sdk-python self._patches_notified). Workflow-scoped (persists across
+    # activations) and surfaced in workflow info.
+    field %patches_notified;
+
+    # Memoized patched() answers keyed by patch id (MUST-match sdk-python
+    # self._patches_memoized): once patched($id) has computed an answer for this
+    # run it returns the same answer (and emits no further SetPatchMarker) so the
+    # decision is deterministic and the marker is emitted at most once.
+    field %patches_memoized;
+
+    # The replay-aware workflow logger (spec section 10.4 / T-wf-9), lazily
+    # built on first access so a run that never logs pays nothing.
+    field $logger;
 
     # Cancellation flag (spec section 10.3 CancelWorkflow / step 6). Set when a
     # CancelWorkflow job arrives; the outcome decision table promotes a
@@ -141,11 +161,49 @@ class Temporalio::Workflow::Runner {
 
     method random { return $rng }
 
+    # The replay-aware workflow logger (spec section 10.4). Built once per run,
+    # bound to this runner so its is_replaying gate tracks the live activation.
+    method logger {
+        $logger //= Temporalio::Workflow::Logger->new(runner => $self);
+        return $logger;
+    }
+
     method info {
         return {
             run_id        => $run_id,
             workflow_type => $workflow_type,
+            # The patch ids the server has notified for this run (spec section
+            # 10.3 "record in workflow info"). Sorted for a stable view.
+            patches       => [ sort keys %patches_notified ],
         };
+    }
+
+    # patched($patch_id, deprecated => $bool) -> a boolean: should the workflow
+    # take the "with change" branch? (spec section 10.4 versioning; MUST-match
+    # sdk-python workflow_patch). The answer is memoized per run so it is stable
+    # and the SetPatchMarker is emitted at most once. On a fresh (non-replay)
+    # execution the patch is always in use; during replay it is in use only when
+    # the server notified it (it was present in history). Emitting the marker
+    # tells the server this run took the patched branch.
+    method patched ($patch_id, %opts) {
+        my $deprecated = $opts{deprecated} ? 1 : 0;
+
+        # A previously-memoized answer wins (even when deprecating, we keep the
+        # memoized result and skip re-emitting the command — sdk-python parity).
+        if (exists $patches_memoized{$patch_id}) {
+            return $patches_memoized{$patch_id};
+        }
+
+        my $use_patch = (!$is_replaying || exists $patches_notified{$patch_id})
+            ? 1 : 0;
+        $patches_memoized{$patch_id} = $use_patch;
+
+        if ($use_patch) {
+            push @commands,
+                Temporalio::Workflow::Commands::set_patch_marker(
+                    $patch_id, $deprecated);
+        }
+        return $use_patch;
     }
 
     # --- activity scheduling (spec section 10.2 / 10.3) ----------------------
@@ -333,6 +391,12 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'cancel_workflow') {
             return $self->_apply_cancel_workflow($job->cancel_workflow);
         }
+        if ($variant eq 'update_random_seed') {
+            return $self->_apply_update_random_seed($job->update_random_seed);
+        }
+        if ($variant eq 'notify_has_patch') {
+            return $self->_apply_notify_has_patch($job->notify_has_patch);
+        }
         # SignalWorkflow / QueryWorkflow / RemoveFromCache (handled by the
         # dispatcher fast path) and friends land in later phases.
         warn "Temporalio::Workflow::Runner: ignoring unhandled activation job"
@@ -457,6 +521,26 @@ class Temporalio::Workflow::Runner {
         if (defined $main_run_future && !$main_run_future->is_ready) {
             $main_run_future->cancel;
         }
+        return;
+    }
+
+    # UpdateRandomSeed { randomness_seed } — re-seed the deterministic RNG (spec
+    # section 10.4; MUST-match sdk-python _apply_update_random_seed, which calls
+    # self._random.seed(seed)). Math::Random::ISAAC::XS has no in-place reseed,
+    # so replace the generator with a freshly-seeded one — equivalent for the
+    # determinism contract (subsequent draws are seeded from the new value).
+    method _apply_update_random_seed ($job) {
+        $rng = _make_rng($job->randomness_seed // 0);
+        return;
+    }
+
+    # NotifyHasPatch { patch_id } — record that the server reports this patch
+    # present in history (spec section 10.3 "record in workflow info"; MUST-match
+    # sdk-python _apply_notify_has_patch, which adds to self._patches_notified).
+    # Sent pre-emptively, so during replay patched($id) returns true for a
+    # notified id. The id is also surfaced in workflow info.
+    method _apply_notify_has_patch ($job) {
+        $patches_notified{ $job->patch_id } = 1;
         return;
     }
 
@@ -669,14 +753,14 @@ class Temporalio::Workflow::Runner {
         });
     }
 
-    # A self-contained deterministic PRNG seeded from randomness_seed. The
-    # contract this phase needs (spec section 10.4 / T-wf-10): same seed ->
-    # same sequence, different seed -> different sequence, no OS entropy. This
-    # is a SplitMix64-style generator; P3.8 replaces it with the spec-mandated
-    # Math::Random::ISAAC::XS primitive (not yet a declared/installed dep).
-    # File-scope sub inside the class block so it is callable from methods.
+    # The spec-mandated deterministic PRNG (spec section 10.4): a
+    # Math::Random::ISAAC::XS instance seeded from the activation's
+    # randomness_seed. The contract (T-wf-10): same seed -> same sequence,
+    # different seed -> different sequence, no OS entropy. ISAAC exposes irand
+    # (32-bit unsigned) and rand (float in [0,1)). File-scope sub inside the
+    # class block so it is callable from methods.
     sub _make_rng ($seed) {
-        return Temporalio::Workflow::Runner::_RNG->new($seed);
+        return Math::Random::ISAAC::XS->new(int($seed // 0));
     }
 
     # Activity cancellation_type: spec string -> ActivityCancellationType enum
@@ -747,43 +831,6 @@ package Temporalio::Workflow::Runner::_TimerFuture {
     }
 }
 
-# Minimal deterministic RNG (see _make_rng). Kept in its own package — a
-# `feature 'class'` file may declare only one `class :isa` once
-# Future::AsyncAwait is loaded (lessons.md), and this is a plain blessed
-# generator anyway.
-package Temporalio::Workflow::Runner::_RNG {
-    use v5.38;
-    use warnings;
-
-    use constant MASK32 => 0xFFFFFFFF;
-
-    # A 32-bit xorshift generator (Marsaglia). It uses only XOR and bit
-    # shifts — no 64-bit multiply — so every step is exact in native Perl
-    # integer arithmetic (a 64-bit multiply would overflow to a double and
-    # silently lose the low bits). The contract this phase needs is
-    # determinism: same seed -> same sequence, different seed -> different
-    # sequence, no OS entropy (spec section 10.4 / T-wf-10). P3.8 swaps in the
-    # spec-mandated Math::Random::ISAAC::XS primitive.
-    sub new ($class, $seed) {
-        # Fold the (up to 64-bit) seed into a non-zero 32-bit state. A zero
-        # state is a fixed point for xorshift, so force it to 1.
-        my $n     = int($seed // 0);
-        my $state = (($n & MASK32) ^ (($n >> 32) & MASK32)) & MASK32;
-        $state ||= 1;
-        return bless { state => $state }, $class;
-    }
-
-    # irand: next 32-bit unsigned integer.
-    sub irand ($self) {
-        my $x = $self->{state};
-        $x = ($x ^ ($x << 13)) & MASK32;
-        $x = ($x ^ ($x >> 17)) & MASK32;
-        $x = ($x ^ ($x << 5))  & MASK32;
-        $self->{state} = $x;
-        return $x;
-    }
-}
-
 1;
 
 __END__
@@ -821,11 +868,15 @@ to the active runner.
 =head2 Determinism
 
 C<now>/C<time> derive from the activation timestamp, never the OS clock.
-C<random> returns a generator seeded from the C<InitializeWorkflow> job's
-C<randomness_seed> (not the run id), so two runs with the same seed produce the
-same sequence (spec test T-wf-10). The skeleton ships a self-contained
-SplitMix64-style generator; P3.8 replaces it with the spec-mandated
-C<Math::Random::ISAAC::XS> primitive.
+C<random> returns a L<Math::Random::ISAAC::XS> generator seeded from the
+C<InitializeWorkflow> job's C<randomness_seed> (not the run id), so two runs
+with the same seed produce the same sequence (spec test T-wf-10). An
+C<UpdateRandomSeed> activation job re-seeds the generator. C<logger> returns a
+L<Temporalio::Workflow::Logger> that suppresses output while replaying (T-wf-9),
+and C<patched> / C<deprecate_patch> implement safe workflow versioning: on a
+fresh run they emit a C<SetPatchMarker> command and return true; during replay
+they return true only when the server sent a C<NotifyHasPatch> for the id. Each
+patch answer is memoized so it is deterministic across the run.
 
 =head2 Scope
 

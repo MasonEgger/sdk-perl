@@ -213,9 +213,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P3.7.3 Verify
 
 ### P3.8 Determinism primitives
-- [ ] P3.8.1 RED: sdk/t/replay/determinism.t (UpdateRandomSeed, T-wf-9 logger, NotifyHasPatch)
-- [ ] P3.8.2 GREEN: random/logger/patch handlers
-- [ ] P3.8.3 Verify
+- [x] P3.8.1 RED: sdk/t/replay/determinism.t (UpdateRandomSeed, T-wf-9 logger, NotifyHasPatch)
+- [x] P3.8.2 GREEN: random/logger/patch handlers
+- [x] P3.8.3 Verify
 
 ### P3.9 End-to-end + hello-world
 - [ ] P3.9.1 RED: sdk/t/integration/end_to_end.t (greeting, timer, activity failure)

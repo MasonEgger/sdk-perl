@@ -25,6 +25,11 @@ requires 'Devel::StackTrace';
 # the activation timestamp, never the OS clock (spec section 10.4).
 requires 'DateTime';
 
+# Deterministic workflow RNG: Temporalio::Workflow::random returns a
+# Math::Random::ISAAC::XS instance seeded from the activation's randomness_seed
+# (spec section 10.4 / T-wf-10).
+requires 'Math::Random::ISAAC::XS';
+
 # Logging interop (spec section 16.4)
 requires 'Log::Any';
 

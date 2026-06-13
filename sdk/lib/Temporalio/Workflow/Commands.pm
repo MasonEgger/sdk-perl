@@ -85,6 +85,21 @@ sub cancel_timer ($seq) {
     return _command_class()->new({ cancel_timer => { seq => $seq } });
 }
 
+# set_patch_marker { patch_id, deprecated } — emitted the first time the
+# workflow body calls Temporalio::Workflow::patched($id) (or deprecate_patch)
+# and the patch is in use (spec section 10.3 step / versioning; MUST-match
+# sdk-python workflow_patch which sets command.set_patch_marker.patch_id /
+# .deprecated). The runner owns the use_patch / memoization logic; this builder
+# just wraps the marker fields in the command oneof.
+sub set_patch_marker ($patch_id, $deprecated = 0) {
+    return _command_class()->new({
+        set_patch_marker => {
+            patch_id   => $patch_id,
+            deprecated => ($deprecated ? 1 : 0),
+        },
+    });
+}
+
 1;
 
 __END__
