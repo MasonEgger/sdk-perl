@@ -136,11 +136,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.10.5 Verify
 
 ### P1.11 result + describe/cancel/terminate + list/count
-- [ ] P1.11.1 RED: sdk/t/unit/workflow_handle_result.t (§7.6 terminal-event table)
-- [ ] P1.11.2 GREEN: handle methods + list/count iterators
-- [ ] P1.11.3 RED: integration (T-cli-result-3, terminate-1, describe-1, cancel-1, list-1)
-- [ ] P1.11.4 GREEN: wire until green
-- [ ] P1.11.5 Verify — **Phase 1 acceptance green** (reference-worker cases → P3.9)
+- [x] P1.11.1 RED: sdk/t/unit/workflow_handle_result.t (§7.6 terminal-event table)
+- [x] P1.11.2 GREEN: handle methods + list/count iterators
+- [x] P1.11.3 RED: integration (T-cli-result-3, terminate-1, describe-1, cancel-1, list-1)
+- [x] P1.11.4 GREEN: wire until green
+- [x] P1.11.5 Verify — **Phase 1 acceptance green** (reference-worker cases → P3.9)
 
 ## Phase 2 — Worker + activities
 

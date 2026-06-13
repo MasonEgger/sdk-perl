@@ -18,6 +18,7 @@ use Temporalio::Client::KeepAliveConfig ();
 use Temporalio::Client::RetryConfig ();
 use Temporalio::Client::TlsConfig ();
 use Temporalio::Client::WorkflowHandle ();
+use Temporalio::Client::WorkflowExecutionIterator ();
 use Temporalio::Common::TypedSearchAttributes ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
@@ -137,6 +138,36 @@ class Temporalio::Client {
             run_id                 => $response->run_id,
             first_execution_run_id => $response->run_id,
         );
+    }
+
+    # list_workflows($query, page_size => 100) — returns an async iterator
+    # yielding WorkflowExecutionInfo records page-by-page (spec section 7.4;
+    # sdk-python _impl.py list_workflows 391-394). No RPC until the first
+    # ->next is awaited.
+    method list_workflows ($query = undef, %opts) {
+        return Temporalio::Client::_WorkflowExecutionIterator->new(
+            client    => $self,
+            query     => $query,
+            page_size => $opts{page_size},
+        );
+    }
+
+    # count_workflows($query) — async; returns { count => N, groups => [...] }
+    # (spec section 7.4; sdk-python _impl.py count_workflows 396-409).
+    async method count_workflows ($query = undef, %opts) {
+        my $request = Temporalio::Core::Proto::resolve(
+            'temporal.api.workflowservice.v1.CountWorkflowExecutionsRequest')
+            ->new({
+                namespace => $namespace,
+                query     => $query // '',
+            });
+        my $response =
+            await $self->_rpc_call('CountWorkflowExecutions', $request);
+        my $groups = $response->groups;
+        return {
+            count  => $response->count // 0,
+            groups => [ defined $groups ? @$groups : () ],
+        };
     }
 
     # _build_start_workflow_request($workflow_or_string, \@args, %kwargs) —
@@ -333,11 +364,18 @@ class Temporalio::Client {
                      . '(a bare untyped hashref is not accepted — spec 7.4)');
     }
 
+    # Detect Data::UUID once at load time, NOT lazily on first call: the first
+    # _new_uuid call now happens inside an async (Future::AsyncAwait) frame
+    # (WorkflowHandle->cancel/signal), and a failed `require` there leaves $@
+    # set in a way the async error-detection re-raises. `local $@` keeps the
+    # probe self-contained regardless.
+    my $HAVE_DATA_UUID = do { local $@; eval { require Data::UUID; 1 } ? 1 : 0 };
+
     # A v4-ish UUID for request_id. The server treats request_id as an opaque
     # idempotency token; any unique value works. Uses Data::UUID if present,
     # else a random fallback in canonical 8-4-4-4-12 form.
     sub _new_uuid () {
-        state $have_uuid = eval { require Data::UUID; 1 } ? 1 : 0;
+        my $have_uuid = $HAVE_DATA_UUID;
         if ($have_uuid) {
             return lc(Data::UUID->new->create_str);
         }

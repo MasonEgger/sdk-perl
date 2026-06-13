@@ -2,6 +2,8 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- A lazy `state $x = eval { require Foo; 1 } ? 1 : 0` probe re-raises its failed `require` when the FIRST call lands inside a Future::AsyncAwait async frame (the async error-detection sees the leftover $@) — compute load-detection at module load time in a `my $HAVE_FOO = do { local $@; eval {...} }` instead of lazily per-call (2026-06-12)
+- Unit-testing a method that `await`s an `async` collaborator: the mock for that collaborator MUST return a Future (`Future->done($v)` / `Future->fail($e)`), not the bare value — a plain return dies with "Can't locate object method AWAIT_IS_READY via package <the returned value's class>" (2026-06-12)
 - Generated Protobuf message accessors (Temporalio::Proto::*) are READ-ONLY — `$msg->field($x)` silently no-ops (no error), so build every field via `Class->new(\%fields)`; collect variant-only fields (e.g. SignalWithStart's signal_name/signal_input) into an extras hash and merge into the constructor args rather than setting them after construction (2026-06-12)
 - `feature 'class'` only generates a NAMED-param constructor (no BUILDARGS), so a spec-mandated positional `->new(\@x)` needs a glob wrapper: capture `Class->can('new')`, then `*Class::new = sub ($c,$arg){ ...validate...; $gen->($c, field => $arg) }` after the `class {}` block (`no warnings 'redefine'`) (2026-06-12)
 - Messages delivered only inside a google.protobuf.Any (google.rpc.Status, temporal.api.errordetails.v1.*) are never imported by the service protos, so import-driven schema loading misses them — parse them as explicit roots, and note sdk-rust vendors google/rpc in a standalone proto root OUTSIDE api_upstream (2026-06-12)
@@ -10,8 +12,6 @@
 - The C bridge header alone under-specifies semantics — read the bridge's .rs conversion code too (testing.rs: an EMPTY download_version becomes `Fixed("")` not SDK-default, so pass the literal 'default'; `ephemeral_server_free` must wait for the shutdown callback because the async block borrows the server box; the spawned CLI inherits stdout/stderr) (2026-06-12)
 - A bare `class` file (no preceding `package` statement) compiles file-scope subs into `main::`, so calls from inside the class block fail with "Undefined subroutine &Class::_helper" — define every helper sub INSIDE the `class { }` block (2026-06-12)
 - An installed (non-checkout) Protobuf dist cannot auto-resolve its bundled WKTs — Parser.pm's share lookup is checkout-relative but installs land in auto/share/dist/Protobuf — so pass `File::ShareDir::dist_dir('Protobuf') . '/proto'` as an explicit include path (2026-06-12)
-- cbindgen tagged unions (#[repr(C)] Rust enums with payload) lay out as {4-byte C-enum tag, pad to union alignment, union sized by largest member}; Perl-side hand-pack is `pack('L x4', $tag) . $variant` zero-padded to the union size — and verify hand-packed layouts with a shim echo function built on #[repr(C)] mirrors copied verbatim from the owning crate (compiler-guaranteed layout, no server needed) (2026-06-11)
-- Linux::FD::Event flags use long literals (`'non-blocking'`, `'close-on-exec'`) — spec §4.2's `'nonblock'` sketch is rejected with "No such flag"; spike CPAN flag/option literals in a one-liner before coding against spec sketches (2026-06-11)
 
 ## Tooling
 - `[@Starter::Git]` uses Git::GatherDir, which gathers only git-TRACKED files — `git add` a new distribution's files before its first `dzil test` or the build dir will be missing them (symptom: `[AlienBuild] No alienfile!`) (2026-06-11)
@@ -32,6 +32,7 @@
 - cbindgen renders opaque `_private: [u8; 0]` structs as zero-size definitions; borrowed foreign types need `[export] exclude` + `after_includes` forward typedefs to coexist with the owning header (2026-06-11)
 
 ## Perl
+- A lazy `state $x = eval { require Foo; 1 } ? 1 : 0` probe re-raises its failed `require` when the FIRST call lands inside a Future::AsyncAwait async frame (the async error-detection sees the leftover $@) — compute load-detection at module load time in a `my $HAVE_FOO = do { local $@; eval {...} }` instead of lazily per-call (2026-06-12)
 - With Future::AsyncAwait loaded (0.71, perl 5.38.2), only ONE `class X :isa(Y)` declaration parses per file (the next gets leaked attribute-parser state) — one `:isa` class per file; subclasses can return `Future->done/fail` directly instead of `async` sugar (2026-06-12)
 - Hand-pack C tagged unions as `pack('L x4', $tag) . $variant` zero-padded to the union size (largest member); validate every offset via a shim echo function over #[repr(C)] mirror structs copied from the owning crate (2026-06-11)
 - Linux::FD::Event flags use long literals (`'non-blocking'`, `'close-on-exec'`) — spec §4.2's `'nonblock'` sketch is rejected; spike CPAN flag literals before coding against spec sketches (2026-06-11)
@@ -44,6 +45,7 @@
 - An alienfile local-path override needs a NON-EMPTY stub download dir (else Extract::Directory dies "no files extracted") plus an `install_prop->{download_detail}{$path} = { protocol => 'file' }` entry so the digest stage accepts the trusted local fetch (2026-06-11)
 
 ## Testing
+- Unit-testing a method that `await`s an `async` collaborator: the mock for that collaborator MUST return a Future (`Future->done($v)` / `Future->fail($e)`), not the bare value — a plain return dies with "Can't locate object method AWAIT_IS_READY via package <the returned value's class>" (2026-06-12)
 - `prove t` is non-recursive by default; this repo's `sdk/.proverc` adds `--recurse` so subdirectory tests run under the documented command (2026-06-11)
 - Test names must stay ASCII — Test2's TAP handle is not UTF-8 even though test files `use utf8` (2026-06-11)
 - Test2::V1 bare `use` exports only `T2()`; use `T2->method` style per spec §12.1, and emulate `require_ok` with `eval { require M; 1 }` into a lexical (2026-06-10)

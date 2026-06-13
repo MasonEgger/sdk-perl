@@ -94,8 +94,34 @@ draft has been removed; spec.md is the sole contract.)
   this differs from sdk-python's json/plain for str, by design — the wire
   payload is the SDK's own converter output. T-cli-start-1..4 green
   (start_workflow_request.t unit + start_workflow.t integration, run live
-  against the dev server). Next: P1.11 WorkflowHandle->result +
-  describe/cancel/terminate + list/count.
+  against the dev server). P1.11 complete: `Client::WorkflowHandle` gained
+  the behavioural methods — `result` long-polls GetWorkflowExecutionHistory
+  with the CLOSE_EVENT filter (history_event_filter_type 2, introspected) and
+  maps the §7.6 terminal event (MUST-match, verified against sdk-python
+  client/_workflow.py result lines 186-316: Completed→decoded payload;
+  Failed→WorkflowFailure wrapping data_converter->from_failure; TimedOut→
+  WorkflowFailure cause Timeout; Canceled→cause Cancelled; Terminated→cause
+  Terminated w/ reason; ContinuedAsNew→follow new_execution_run_id when
+  follow_runs else WorkflowContinuedAsNew) — plus describe/cancel/terminate/
+  signal/query/fetch_history_events (request shapes from sdk-python _impl.py
+  cancel/describe/terminate/signal/query 344-534, threading
+  first_execution_run_id). New async page iterators:
+  `Client::_HistoryEventIterator` (GetWorkflowExecutionHistory by
+  next_page_token) backs result + fetch_history_events;
+  `Client::_WorkflowExecutionIterator` backs `Client->list_workflows`
+  (ListWorkflowExecutions paging); `Client->count_workflows` returns
+  { count, groups }. NOTE: Terminated carries `reason` only (no `details`
+  field) — do NOT pass details to its constructor. NOTE: `_new_uuid`'s
+  Data::UUID probe moved to a load-time `my $HAVE_DATA_UUID` with `local $@`
+  — a lazy `state` probe whose `require` fails inside an async frame
+  (cancel/signal) gets the failure re-raised by Future::AsyncAwait. Unit
+  (workflow_handle_result.t, mocked _rpc_call over Future->done/fail) +
+  integration (T-cli-result-3/terminate-1/describe-1/cancel-1/list-1, run
+  live, no worker — terminate/timeout drive the terminal event server-side,
+  cancel verified via a cancel-requested history event). **Phase 1
+  acceptance green** except the reference-worker cases (T-cli-result-1/2/4/5,
+  signal/query against a running worker) deferred to P3.9. Next: Phase 2
+  (P2.1 Activity definitions + registry).
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 

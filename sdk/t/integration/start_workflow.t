@@ -98,6 +98,123 @@ T2->subtest('a second start of a running id raises WorkflowAlreadyStarted (T-cli
         && $err->can('workflow_id');
 });
 
+# A unique workflow id, distinct from $wf_id, for each of the P1.11 cases.
+sub unique_id ($prefix) {
+    return "perl-sdk-$prefix-" . $$ . '-' . int(rand(1_000_000));
+}
+
+# Drain an async iterator to a list (each ->next resolves a Future).
+sub drain ($iter, $max = 1000) {
+    my @out;
+    while (@out < $max) {
+        my $item = await_future($iter->next);
+        last unless defined $item;
+        push @out, $item;
+    }
+    return @out;
+}
+
+T2->subtest('result on a run-timeout=1 workflow with no worker raises WorkflowFailure cause Timeout (T-cli-result-3)' => sub {
+    my $handle = await_future($client->start_workflow(
+        'NoSuchWorkflowType',
+        [],
+        id          => unique_id('timeout'),
+        task_queue  => 'perl-sdk-demo',
+        run_timeout => 1,                  # 1s; no worker ever picks it up
+    ));
+    my $err = exception_from(sub { await_future($handle->result, 30) });
+    T2->ok(
+        Scalar::Util::blessed($err)
+            && $err->isa('Temporalio::Exception::WorkflowFailure'),
+        'timed-out workflow -> WorkflowFailure',
+    ) or T2->diag('got: ' . ($err // 'no exception'));
+    T2->ok(
+        Scalar::Util::blessed($err) && Scalar::Util::blessed($err->cause)
+            && $err->cause->isa('Temporalio::Exception::Timeout'),
+        'cause is a Timeout',
+    ) if Scalar::Util::blessed($err) && $err->can('cause');
+});
+
+T2->subtest('terminate then result raises WorkflowFailure cause Terminated with reason (T-cli-terminate-1)' => sub {
+    my $handle = await_future($client->start_workflow(
+        'NoSuchWorkflowType', [],
+        id => unique_id('terminate'), task_queue => 'perl-sdk-demo',
+    ));
+    await_future($handle->terminate(reason => 'stop please'));
+    my $err = exception_from(sub { await_future($handle->result, 30) });
+    T2->ok(
+        Scalar::Util::blessed($err)
+            && $err->isa('Temporalio::Exception::WorkflowFailure'),
+        'terminated workflow -> WorkflowFailure',
+    ) or T2->diag('got: ' . ($err // 'no exception'));
+    if (Scalar::Util::blessed($err) && $err->can('cause')) {
+        my $cause = $err->cause;
+        T2->ok(
+            Scalar::Util::blessed($cause)
+                && $cause->isa('Temporalio::Exception::Terminated'),
+            'cause is Terminated',
+        );
+        T2->is($cause->reason, 'stop please', 'terminate reason preserved')
+            if Scalar::Util::blessed($cause) && $cause->can('reason');
+    }
+});
+
+T2->subtest('describe returns populated workflow_execution_info (T-cli-describe-1)' => sub {
+    my $id = unique_id('describe');
+    my $handle = await_future($client->start_workflow(
+        'NoSuchWorkflowType', [],
+        id => $id, task_queue => 'perl-sdk-demo',
+    ));
+    my $desc = await_future($handle->describe);
+    my $info = $desc->workflow_execution_info;
+    T2->ok(defined $info, 'describe carries workflow_execution_info');
+    T2->is($info->execution->workflow_id, $id, 'info has the workflow id')
+        if defined $info;
+    T2->is($info->status, 1, 'status is RUNNING (no worker)')
+        if defined $info;          # WORKFLOW_EXECUTION_STATUS_RUNNING == 1
+});
+
+T2->subtest('cancel records a cancel-requested event in history (T-cli-cancel-1)' => sub {
+    my $id = unique_id('cancel');
+    my $handle = await_future($client->start_workflow(
+        'NoSuchWorkflowType', [],
+        id => $id, task_queue => 'perl-sdk-demo',
+    ));
+    await_future($handle->cancel(reason => 'never mind'));
+    # No worker processes the cancel, but the server records a
+    # WorkflowExecutionCancelRequested event — observable via fetch_history.
+    my @events = drain($handle->fetch_history_events);
+    my $found = grep {
+        ($_->which_attributes // '')
+            eq 'workflow_execution_cancel_requested_event_attributes'
+    } @events;
+    T2->ok($found, 'history contains a cancel-requested event');
+});
+
+T2->subtest('list_workflows iterates 3 started workflows (T-cli-list-1)' => sub {
+    my $wf_type = 'PerlSdkListType' . $$;
+    my %ids;
+    for (1 .. 3) {
+        my $id = unique_id('list');
+        $ids{$id} = 1;
+        await_future($client->start_workflow(
+            $wf_type, [],
+            id => $id, task_queue => 'perl-sdk-demo',
+        ));
+    }
+    # Visibility is eventually consistent — poll the list query a few times.
+    my @seen;
+    for my $attempt (1 .. 10) {
+        my $iter = $client->list_workflows(qq{WorkflowType = "$wf_type"});
+        @seen = grep { $ids{$_} }
+            map { $_->execution->workflow_id } drain($iter);
+        last if @seen >= 3;
+        $loop->await($loop->timeout_future(after => 1));
+    }
+    T2->is(scalar(@seen), 3, 'list_workflows iterated all 3 started workflows')
+        or T2->diag('saw: ' . join(', ', @seen));
+});
+
 $client->connection->close if defined $client;
 $server->shutdown;
 $runtime->shutdown;
