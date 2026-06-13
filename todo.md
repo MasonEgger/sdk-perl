@@ -227,9 +227,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 4 — Signals & queries
 
 ### P4.1 Signals in the runner
-- [ ] P4.1.1 RED: sdk/t/replay/signals.t (T-wf-3, queueing, async handler tracking)
-- [ ] P4.1.2 GREEN: SignalWorkflow + pending_signals + handler tracking
-- [ ] P4.1.3 Verify
+- [x] P4.1.1 RED: sdk/t/replay/signals.t (T-wf-3, queueing, async handler tracking)
+- [x] P4.1.2 GREEN: SignalWorkflow + pending_signals + handler tracking
+- [x] P4.1.3 Verify
 
 ### P4.2 Queries
 - [ ] P4.2.1 RED: sdk/t/replay/queries.t (T-wf-4, dying handler, queries-last)

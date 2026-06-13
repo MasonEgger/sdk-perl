@@ -136,6 +136,28 @@ class Temporalio::Workflow::Runner {
     # routes it (task-fail by default, workflow-fail when configured — T-wf-13).
     field $nondeterminism_error;
 
+    # Signals delivered before a matching handler exists (spec section 10.3
+    # T-wf-3 QUEUEING; MUST-match sdk-python self._buffered_signals): a hash
+    # keyed by signal name -> arrayref of SignalWorkflow jobs awaiting a handler.
+    # Signals routed here include those arriving before the instance is created
+    # (the named/dynamic handler is a METHOD on the instance) and those whose
+    # name has no named handler and no dynamic handler. They are drained, in
+    # arrival order, once a matching handler becomes available (after
+    # InitializeWorkflow creates the instance, or for a later-registered dynamic
+    # handler). Workflow-scoped (persists across activations until drained).
+    field %buffered_signals;
+
+    # In-progress signal-handler Futures (spec section 10.3 ASYNC HANDLER
+    # TRACKING; MUST-match sdk-python self._in_progress_signals): a hash keyed by
+    # a monotonic handler id -> the handler's Future. An async :Signal handler
+    # may await timers/activities; its Future is tracked here and pumped like any
+    # other workflow Future. The workflow is NOT considered complete while any
+    # handler Future is still pending — _all_handlers_finished gates
+    # CompleteWorkflowExecution. The id is removed when the handler Future
+    # becomes ready.
+    field %in_progress_handlers;
+    field $handler_seq = 0;   # monotonic handler id source.
+
     ADJUST {
         $payload_converter //= Temporalio::Converter::Payload->default;
         $failure_converter //= Temporalio::Converter::Failure->default;
@@ -342,17 +364,24 @@ class Temporalio::Workflow::Runner {
         # contrast, is run-scoped and persists across activations.
         $nondeterminism_error = undef;
 
-        # Step 4: apply jobs under the dynamically-scoped runner context so the
-        # workflow body's Temporalio::Workflow:: calls resolve to this runner.
+        # Step 3-5: order the jobs into the de-facto Temporal sets, apply each
+        # set under the dynamically-scoped runner context (so the body's and the
+        # handlers' Temporalio::Workflow:: calls resolve to this runner), and
+        # pump after each set (spec section 10.3 step 3; MUST-match sdk-python's
+        # four ordered job sets applied with a _run_once between them).
+        #   (0) patch notifications, (1) signals (+ updates, Phase 4+),
+        #   (2) all other non-query jobs (incl. InitializeWorkflow),
+        #   (3) queries last.
+        # Signals (set 1) run BEFORE InitializeWorkflow (set 2): a signal that
+        # arrives in the init activation has no instance to dispatch against yet,
+        # so _apply_signal_workflow buffers it; _apply_initialize then drains the
+        # buffer once the instance exists (T-wf-3 visibility).
         dynamically $Temporalio::Workflow::Runner::CURRENT = $self;
-        for my $job ($activation->jobs->@*) {
-            $self->_apply_job($job);
+        for my $job_set ($self->_ordered_job_sets($activation)) {
+            next unless @$job_set;
+            $self->_apply_job($_) for @$job_set;
+            $self->_pump;
         }
-
-        # Step 5: pump (drive ready continuations). The skeleton's only Future
-        # is the main run Future, which Future::AsyncAwait resolves
-        # synchronously for a body with no pending workflow Futures.
-        $self->_pump;
 
         # Steps 6-7: drain the command buffer into a completion proto.
         return $self->_build_completion;
@@ -366,11 +395,14 @@ class Temporalio::Workflow::Runner {
     # MUST-match sdk-python _handle_cache_eviction (deletes the run from
     # _running_workflows after cancelling its tasks).
     method evict () {
-        for my $future (values %pending_activities, values %pending_timers) {
+        for my $future (values %pending_activities, values %pending_timers,
+            values %in_progress_handlers)
+        {
             $future->cancel unless $future->is_ready;
         }
-        %pending_activities = ();
-        %pending_timers     = ();
+        %pending_activities  = ();
+        %pending_timers      = ();
+        %in_progress_handlers = ();
         if (defined $main_run_future && !$main_run_future->is_ready) {
             $main_run_future->cancel;
         }
@@ -397,11 +429,34 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'notify_has_patch') {
             return $self->_apply_notify_has_patch($job->notify_has_patch);
         }
-        # SignalWorkflow / QueryWorkflow / RemoveFromCache (handled by the
-        # dispatcher fast path) and friends land in later phases.
+        if ($variant eq 'signal_workflow') {
+            return $self->_apply_signal_workflow($job->signal_workflow);
+        }
+        # QueryWorkflow (P4.2) / RemoveFromCache (handled by the dispatcher fast
+        # path) and friends land in later phases.
         warn "Temporalio::Workflow::Runner: ignoring unhandled activation job"
            . " variant '$variant'\n";
         return;
+    }
+
+    # Order an activation's jobs into the de-facto Temporal job sets (spec
+    # section 10.3 step 3; MUST-match sdk-python activate()'s four sets). Each
+    # returned arrayref is applied as a unit with a pump between sets. Within a
+    # set, activation order is preserved.
+    #   set 0: NotifyHasPatch
+    #   set 1: SignalWorkflow (+ updates in a later phase)
+    #   set 2: every other non-query job (incl. InitializeWorkflow)
+    #   set 3: QueryWorkflow (last; P4.2)
+    method _ordered_job_sets ($activation) {
+        my @sets = ([], [], [], []);
+        for my $job ($activation->jobs->@*) {
+            my $variant = $job->which_variant // '';
+            if    ($variant eq 'notify_has_patch') { push $sets[0]->@*, $job }
+            elsif ($variant eq 'signal_workflow')  { push $sets[1]->@*, $job }
+            elsif ($variant eq 'query_workflow')   { push $sets[3]->@*, $job }
+            else                                   { push $sets[2]->@*, $job }
+        }
+        return @sets;
     }
 
     method _apply_initialize ($init) {
@@ -419,6 +474,13 @@ class Temporalio::Workflow::Runner {
         $instance = $workflow_class->new;
         my $run_ref = $workflow_class->_workflow_defs->{run};
         $main_run_future = $instance->$run_ref(@args);
+
+        # Drain any signals buffered before the instance existed (spec section
+        # 10.3 T-wf-3 QUEUEING; MUST-match sdk-python draining _buffered_signals
+        # once a handler is available). The :Run body was just kicked off above,
+        # so a drained signal handler's state mutation is visible to the run
+        # continuation when it next makes progress.
+        $self->_drain_buffered_signals;
         return;
     }
 
@@ -544,6 +606,114 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
+    # SignalWorkflow { signal_name, input } — route the signal to the matching
+    # :Signal handler, the dynamic catch-all handler if no named match, or buffer
+    # it (spec section 10.3; MUST-match sdk-python _apply_signal_workflow). The
+    # handler is a METHOD on the instance, so a signal arriving before the
+    # instance exists (e.g. ordered before InitializeWorkflow in the init
+    # activation) is buffered and drained right after _apply_initialize creates
+    # the instance. A signal whose name has no named handler and no dynamic
+    # handler is buffered too (T-wf-3 QUEUEING), held in arrival order until a
+    # matching handler appears (or indefinitely in this static model — it never
+    # fails the workflow).
+    method _apply_signal_workflow ($job) {
+        my $name = $job->signal_name // '';
+
+        # No instance yet: the handler can only run against the instance the
+        # InitializeWorkflow job creates. Buffer for the post-init drain.
+        if (!defined $instance) {
+            push $buffered_signals{$name}->@*, $job;
+            return;
+        }
+
+        my ($handler, $is_dynamic) = $self->_resolve_signal_handler($name);
+        if (!defined $handler) {
+            # No named or dynamic handler: buffer (a dynamic handler may be
+            # registered later; sdk-python keeps these for a later-added handler).
+            push $buffered_signals{$name}->@*, $job;
+            return;
+        }
+
+        $self->_dispatch_signal($handler, $is_dynamic, $job);
+        return;
+    }
+
+    # Resolve a signal handler by name (spec section 10.3): the named :Signal
+    # handler if one matches, else the dynamic catch-all if registered. Returns
+    # ($methodref, $is_dynamic) or (undef) when neither exists. MUST-match
+    # sdk-python's `self._signals.get(name) or self._signals.get(None)`.
+    method _resolve_signal_handler ($name) {
+        my $defs = $workflow_class->_workflow_defs;
+        if (my $named = $defs->{signals}{$name}) {
+            return ($named, 0);
+        }
+        if (my $dynamic = $defs->{dynamic}{signal}) {
+            return ($dynamic, 1);
+        }
+        return (undef);
+    }
+
+    # Invoke a resolved signal handler (spec section 10.3 ASYNC HANDLER
+    # TRACKING). Named handlers are called with the decoded args; a dynamic
+    # handler is called with ($name, @args) (mirrors sdk-python's dynamic signal
+    # (name, args)). The handler may be sync OR async, so run it through
+    # Future->call(sub { Future->wrap(...) }) — Future->wrap passes a returned
+    # Future through and normalises a plain return into a done Future, while
+    # Future->call routes a synchronous die into a failed Future. The resulting
+    # Future is tracked in the in-progress-handlers set until it is ready, so the
+    # workflow is not considered complete while the handler is still running.
+    method _dispatch_signal ($handler, $is_dynamic, $job) {
+        my @args = map { $payload_converter->from_payload($_) }
+            (($job->input // [])->@*);
+        my $name = $job->signal_name // '';
+
+        my $future = Future->call(sub {
+            return Future->wrap(
+                $is_dynamic
+                    ? $instance->$handler($name, @args)
+                    : $instance->$handler(@args)
+            );
+        });
+
+        # An already-ready handler (a synchronous handler that returned or threw)
+        # needs no tracking. A pending (async) handler is tracked and removed
+        # from the in-progress set when it becomes ready.
+        if (!$future->is_ready) {
+            my $id = ++$handler_seq;
+            $in_progress_handlers{$id} = $future;
+            $future->on_ready(sub { delete $in_progress_handlers{$id} });
+        }
+        return;
+    }
+
+    # Drain the buffered-signal queue (spec section 10.3 T-wf-3 QUEUEING;
+    # MUST-match sdk-python draining _buffered_signals when a handler appears).
+    # Called after _apply_initialize creates the instance. Signals whose name now
+    # resolves to a handler (named or dynamic) are dispatched in arrival order
+    # and removed from the buffer; a signal with still no handler stays buffered.
+    method _drain_buffered_signals {
+        return unless defined $instance;
+        for my $name (keys %buffered_signals) {
+            my ($handler, $is_dynamic) = $self->_resolve_signal_handler($name);
+            next unless defined $handler;   # still no handler: keep buffered.
+            my $jobs = delete $buffered_signals{$name};
+            for my $job (@$jobs) {
+                $self->_dispatch_signal($handler, $is_dynamic, $job);
+            }
+        }
+        return;
+    }
+
+    # The names of signals still buffered (spec section 10.3 QUEUEING). Test
+    # introspection helper — sorted for a stable view.
+    method _buffered_signal_names { return [ sort keys %buffered_signals ] }
+
+    # True when no signal handler is still in-flight (spec section 10.3 ASYNC
+    # HANDLER TRACKING; MUST-match sdk-python workflow_all_handlers_finished).
+    # Gates CompleteWorkflowExecution: the workflow is not considered complete
+    # while a handler Future is pending.
+    method _all_handlers_finished { return %in_progress_handlers ? 0 : 1 }
+
     # Stash a non-determinism error (spec section 10.3 / T-wf-13) for the outcome
     # decision table. Built as a Temporalio::Exception::Nondeterminism so the
     # decision table can recognize it and route it by the
@@ -600,6 +770,17 @@ class Temporalio::Workflow::Runner {
         if (defined $main_run_future && $main_run_future->is_ready) {
             if (my @failure = $main_run_future->failure) {
                 return $self->_outcome_for_failure($failure[0]);
+            }
+            # ASYNC HANDLER TRACKING (spec section 10.3): even when :Run has
+            # returned, the workflow is NOT considered complete while a signal
+            # handler Future is still in-flight. Emit only the buffered commands
+            # this activation; a later activation that resolves the handler
+            # Future re-pumps and then emits CompleteWorkflowExecution. (For
+            # well-behaved workflows the body itself awaits the handler's effect,
+            # so the run Future is not ready first — this gate is the safety net
+            # mirroring sdk-python's all-handlers-finished accounting.)
+            unless ($self->_all_handlers_finished) {
+                return $self->_successful_completion;
             }
             # Success: the run method returned a value.
             my $result = ($main_run_future->result)[0];
