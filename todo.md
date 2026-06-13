@@ -255,9 +255,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P5.1.3 Verify
 
 ### P5.2 RPC special-case audit
-- [ ] P5.2.1 RED: sdk/t/integration/error_paths.t (T-cli-result-2/4/5)
-- [ ] P5.2.2 GREEN: mapping fixes
-- [ ] P5.2.3 Verify
+- [x] P5.2.1 RED: sdk/t/integration/error_paths.t (T-cli-result-2/4/5)
+- [x] P5.2.2 GREEN: mapping fixes
+- [x] P5.2.3 Verify
 
 ### P5.3 POD + author tests + README
 - [ ] P5.3.1 RED: xt/pod-coverage.t + xt/pod-syntax.t
