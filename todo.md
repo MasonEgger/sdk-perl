@@ -145,9 +145,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 2 — Worker + activities
 
 ### P2.1 Activity definitions + registry
-- [ ] P2.1.1 RED: sdk/t/unit/activity_definition.t (T-act-1..4, T-wkr-2)
-- [ ] P2.1.2 GREEN: Activity.pm/Definition/Attributes/FunctionDefinition + registry
-- [ ] P2.1.3 Verify
+- [x] P2.1.1 RED: sdk/t/unit/activity_definition.t (T-act-1..4, T-wkr-2)
+- [x] P2.1.2 GREEN: Activity.pm/Definition/Attributes/FunctionDefinition + registry
+- [x] P2.1.3 Verify
 
 ### P2.2 Worker construction + validate
 - [ ] P2.2.1 RED: sdk/t/unit/worker_new.t (T-wkr-1, kwargs→options echo)
