@@ -218,11 +218,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P3.8.3 Verify
 
 ### P3.9 End-to-end + hello-world
-- [ ] P3.9.1 RED: sdk/t/integration/end_to_end.t (greeting, timer, activity failure)
-- [ ] P3.9.2 GREEN: integration fixes only
-- [ ] P3.9.3 examples/hello-world/
-- [ ] P3.9.4 REFACTOR: promote reusable test glue
-- [ ] P3.9.5 Verify — **Phase 3 acceptance green**
+- [x] P3.9.1 RED: sdk/t/integration/end_to_end.t (greeting, timer, activity failure)
+- [x] P3.9.2 GREEN: integration fixes only
+- [x] P3.9.3 examples/hello-world/
+- [x] P3.9.4 REFACTOR: promote reusable test glue
+- [x] P3.9.5 Verify — **Phase 3 acceptance green**
 
 ## Phase 4 — Signals & queries
 

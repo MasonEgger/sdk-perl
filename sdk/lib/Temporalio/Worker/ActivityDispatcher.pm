@@ -189,10 +189,15 @@ class Temporalio::Worker::ActivityDispatcher {
     }
 
     # Invoke the activity callable. A `code` ref may be async (returns a Future)
-    # or sync (returns a plain value); wrapping in Future->call lets the caller
-    # `await` uniformly and routes a synchronous die into the Future.
+    # or sync (returns a plain value). Future->call routes a synchronous die into
+    # the Future, but it REQUIRES its block to return a Future — a plain return
+    # value makes it die ("Expected ... to return a Future"). Wrapping the call
+    # in Future->wrap normalises both shapes: a returned Future passes through
+    # unchanged, a plain value (or list) becomes an immediately-done Future. So
+    # async-returning bodies and plain-value bodies both resolve uniformly, and a
+    # synchronous die still becomes a failed Future the caller can convert.
     method _invoke ($code, @args) {
-        return Future->call(sub { $code->(@args) });
+        return Future->call(sub { Future->wrap($code->(@args)) });
     }
 
     # Run a sync activity in the fork pool (spec section 9.4). Builds the
