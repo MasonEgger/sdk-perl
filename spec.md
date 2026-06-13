@@ -2226,6 +2226,23 @@ Aggregated from the phased roadmap + specific test IDs above.
 - README with installation instructions, quickstart, link to this spec.
 - `Temporalio::SDK::VERSION` = `0.1.0`.
 
+### v0.1.0 acceptance status (2026-06-13)
+
+**All phases P0–P5 are implemented and accepted.** The full TDD plan
+(`plan.md`, steps P0.1–P5.5) is complete; `todo.md` has zero unchecked
+items. The three distributions — `Alien-Temporalio-Core`,
+`Alien-Temporalio-PerlBridge`, and `Temporalio-SDK` — and the Rust shim
+crate (`temporalio-perl-bridge`) all declare a consistent dist version of
+`0.1.0`, guarded by `sdk/t/unit/version.t`. `Alien::Temporalio::Core->version`
+deliberately reports the pinned upstream sdk-core release (`0.4.0`, derived
+from the alienfile `$pinned_tag`), which is tracked independently of the
+Perl dist version. All three risk spikes are CLOSED (proto loading,
+`feature 'class'` × `Attribute::Handlers`, `TemporalCoreWorkerOptions`
+marshalling). POD coverage is enforced in `xt/`, the
+`examples/hello-world/` example is runnable, and the GitHub Actions CI
+matrix (spec §14) is in place. Tagging and any release to `main` are
+performed manually by the maintainer; this SDK does not push to `main`.
+
 ---
 
 ## 12. Test infrastructure

@@ -270,7 +270,7 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P5.4.2 Verify: green on feature branch
 
 ### P5.5 v0.1.0 release prep
-- [ ] P5.5.1 RED: version-agreement test
-- [ ] P5.5.2 GREEN: set versions across dists
-- [ ] P5.5.3 Update spec §11 + plan Current Status
-- [ ] P5.5.4 Verify: full sweep green
+- [x] P5.5.1 RED: version-agreement test
+- [x] P5.5.2 GREEN: set versions across dists
+- [x] P5.5.3 Update spec §11 + plan Current Status
+- [x] P5.5.4 Verify: full sweep green

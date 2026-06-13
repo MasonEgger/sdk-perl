@@ -7,6 +7,20 @@ draft has been removed; spec.md is the sole contract.)
 
 ## Current Status
 
+- **v0.1.0 COMPLETE (P0.1–P5.5, 2026-06-13).** Every step in this plan is
+  implemented and `todo.md` has zero unchecked items. All five phase gates
+  (spec §11) are accepted: distributions scaffolded and building, the FFI +
+  callback bridge live, client/worker/workflow/signals-queries end-to-end
+  against the ephemeral dev server, the full exception hierarchy and
+  cancellation round-tripping, POD coverage enforced in `xt/`, a runnable
+  `examples/hello-world/`, the GitHub Actions CI matrix (spec §14), and a
+  consistent `0.1.0` dist version across all three distributions plus the
+  Rust shim crate (guarded by `sdk/t/unit/version.t`).
+  `Alien::Temporalio::Core->version` reports the pinned upstream sdk-core
+  release (`0.4.0`), tracked independently of the Perl dist version. Tagging
+  and release to `main` are performed manually by the maintainer.
+- The historical phase-by-phase detail below is retained as the build record.
+
 - **Phase 0: COMPLETE (P0.1–P0.11, 2026-06-12).** Acceptance per spec §11
   is green: distributions scaffolded, shim + Aliens build, FFI attaches,
   Runtime lifecycle works, protos vendored and loaded
@@ -120,8 +134,8 @@ draft has been removed; spec.md is the sole contract.)
   live, no worker — terminate/timeout drive the terminal event server-side,
   cancel verified via a cancel-requested history event). **Phase 1
   acceptance green** except the reference-worker cases (T-cli-result-1/2/4/5,
-  signal/query against a running worker) deferred to P3.9. Next: Phase 2
-  (P2.1 Activity definitions + registry).
+  signal/query against a running worker) handled in P3.9. (Phases 2–5 then
+  completed through P5.5 — see the v0.1.0 COMPLETE summary at the top.)
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 
