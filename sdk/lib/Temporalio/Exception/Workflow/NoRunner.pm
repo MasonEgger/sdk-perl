@@ -14,6 +14,8 @@ class Temporalio::Exception::Workflow::NoRunner :isa(Temporalio::Exception) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Exception::Workflow::NoRunner - Raised when a Temporalio::Workflow::* function runs outside a workflow.
@@ -21,5 +23,11 @@ Temporalio::Exception::Workflow::NoRunner - Raised when a Temporalio::Workflow::
 =head1 DESCRIPTION
 
 Raised when a C<Temporalio::Workflow::*> context function is called outside a workflow body — the deterministic workflow runner is not active. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::Workflow::NoRunner.
 
 =cut

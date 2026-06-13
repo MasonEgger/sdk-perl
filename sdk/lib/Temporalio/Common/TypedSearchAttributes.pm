@@ -81,6 +81,8 @@ class Temporalio::Common::TypedSearchAttributes {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Common::TypedSearchAttributes - typed search-attribute collection
@@ -109,5 +111,15 @@ v0.1 accepts only typed input. A bare untyped hashref — or any pair whose
 key is not a L<Temporalio::Common::SearchAttributeKey> — raises
 L<Temporalio::Exception::Argument>: there is no silent type guessing (spec
 section 7.4).
+
+=head1 METHODS
+
+=head2 pairs
+
+Returns the list of contained [key, value] pairs.
+
+=head2 to_proto
+
+Builds and returns the C<temporal.api.common.v1.SearchAttributes> proto message from the contained key/value pairs.
 
 =cut

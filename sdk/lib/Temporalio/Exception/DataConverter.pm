@@ -24,4 +24,10 @@ Raised when payload conversion fails: no registered converter handled a
 value, a payload carries an unknown encoding, or serialization itself
 failed. See L<Temporalio::Exception> for the shared fields and behavior.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::DataConverter.
+
 =cut

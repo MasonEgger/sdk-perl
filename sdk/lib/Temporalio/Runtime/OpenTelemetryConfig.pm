@@ -102,4 +102,86 @@ pinned C header (cumulative=1/delta=2, grpc=1/http=2), seconds converted to
 milliseconds, and headers/overrides encoded as newline-delimited maps;
 backing buffers are pushed onto C<@keep>.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Runtime::OpenTelemetryConfig->new(
+        url => ...,
+        headers => ...,
+        metric_periodicity => ...,
+        metric_temporality => ...,
+        durations_as_seconds => ...,
+        protocol => ...,
+        histogram_bucket_overrides => ...,
+    );
+
+Constructs a Temporalio::Runtime::OpenTelemetryConfig. Named parameters:
+
+=over 4
+
+=item C<url>
+
+(required)
+
+=item C<headers>
+
+(optional, default C<undef>)
+
+=item C<metric_periodicity>
+
+(optional, default C<undef>)
+
+=item C<metric_temporality>
+
+(optional, default C<'cumulative'>)
+
+=item C<durations_as_seconds>
+
+(optional, default C<0>)
+
+=item C<protocol>
+
+(optional, default C<'grpc'>)
+
+=item C<histogram_bucket_overrides>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 durations_as_seconds
+
+Accessor returning the C<durations_as_seconds> value.
+
+=head2 headers
+
+Accessor returning the C<headers> value.
+
+=head2 histogram_bucket_overrides
+
+Accessor returning the C<histogram_bucket_overrides> value.
+
+=head2 metric_periodicity
+
+Accessor returning the C<metric_periodicity> value.
+
+=head2 metric_temporality
+
+Accessor returning the C<metric_temporality> value.
+
+=head2 protocol
+
+Accessor returning the C<protocol> value.
+
+=head2 to_ffi
+
+Returns the FFI OpenTelemetry-options record for this config.
+
+=head2 url
+
+Accessor returning the C<url> value.
+
 =cut

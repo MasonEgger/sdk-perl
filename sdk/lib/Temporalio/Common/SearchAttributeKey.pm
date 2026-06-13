@@ -126,6 +126,8 @@ class Temporalio::Common::SearchAttributeKey {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Common::SearchAttributeKey - typed search-attribute key
@@ -156,5 +158,79 @@ of strings (any non-string element raises
 L<Temporalio::Exception::Argument>). Datetime values are passed through as
 the caller's ISO-8601 string — the same form sdk-python emits via
 C<datetime.isoformat()>.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Common::SearchAttributeKey->new(
+        name => ...,
+        metadata_type => ...,
+        indexed_value_type => ...,
+    );
+
+Constructs a Temporalio::Common::SearchAttributeKey. Named parameters:
+
+=over 4
+
+=item C<name>
+
+(required)
+
+=item C<metadata_type>
+
+(required)
+
+=item C<indexed_value_type>
+
+(required)
+
+=back
+
+=head1 METHODS
+
+=head2 bool
+
+Class method constructing a boolean-typed search attribute key with the given name.
+
+=head2 datetime
+
+Class method constructing a datetime-typed search attribute key.
+
+=head2 double
+
+Class method constructing a double-typed search attribute key.
+
+=head2 encode_value
+
+Encodes a Perl value for this key into the proto-typed metadata/data form used in C<SearchAttributes>.
+
+=head2 indexed_value_type
+
+Accessor returning the C<indexed_value_type> value.
+
+=head2 int
+
+Class method constructing an integer-typed search attribute key.
+
+=head2 keyword
+
+Class method constructing a keyword-typed search attribute key.
+
+=head2 keyword_list
+
+Class method constructing a keyword-list-typed search attribute key.
+
+=head2 metadata_type
+
+Accessor returning the C<metadata_type> value.
+
+=head2 name
+
+Accessor returning the C<name> value.
+
+=head2 text
+
+Class method constructing a text-typed search attribute key.
 
 =cut

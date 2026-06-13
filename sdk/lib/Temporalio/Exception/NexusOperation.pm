@@ -33,4 +33,64 @@ Temporalio::Exception::NexusOperation - Failure wrapping a Nexus operation execu
 
 Wraps a Nexus operation execution failure; the underlying error is the C<cause>. Maps to the C<nexus_operation_execution_failure_info> Failure proto variant. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::NexusOperation->new(
+        scheduled_event_id => ...,
+        endpoint => ...,
+        service => ...,
+        operation => ...,
+        operation_token => ...,
+    );
+
+Constructs a Temporalio::Exception::NexusOperation. Named parameters:
+
+=over 4
+
+=item C<scheduled_event_id>
+
+(optional, default C<undef>)
+
+=item C<endpoint>
+
+(optional, default C<undef>)
+
+=item C<service>
+
+(optional, default C<undef>)
+
+=item C<operation>
+
+(optional, default C<undef>)
+
+=item C<operation_token>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 endpoint
+
+Accessor returning the C<endpoint> value.
+
+=head2 operation
+
+Accessor returning the C<operation> value.
+
+=head2 operation_token
+
+Accessor returning the C<operation_token> value.
+
+=head2 scheduled_event_id
+
+Accessor returning the C<scheduled_event_id> value.
+
+=head2 service
+
+Accessor returning the C<service> value.
+
 =cut

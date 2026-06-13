@@ -146,6 +146,8 @@ sub set_patch_marker ($patch_id, $deprecated = 0) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Workflow::Commands - builders for coresdk WorkflowCommand protos
@@ -240,5 +242,11 @@ omitted for a void return) or C<< failure => $failure >> for a dying handler
 delivered as this command, never as a workflow or task failure.
 
 =back
+
+=head1 METHODS
+
+=head2 set_patch_marker
+
+Records a patch marker command for the given patch id (used by C<patched>/C<deprecate_patch>).
 
 =cut

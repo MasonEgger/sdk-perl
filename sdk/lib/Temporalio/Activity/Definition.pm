@@ -50,6 +50,8 @@ class Temporalio::Activity::Definition {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Activity::Definition - base class for class-based activities
@@ -101,5 +103,11 @@ Keyword form.
 
 Class method returning the per-class hash of activity type name to
 C<< { code => $methodref, no_thread_cancellation => 0|1 } >>.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Activity::Definition.
 
 =cut

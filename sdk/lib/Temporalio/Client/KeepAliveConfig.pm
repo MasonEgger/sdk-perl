@@ -51,4 +51,41 @@ within C<timeout> seconds or the connection is closed. Defaults match the
 reference SDKs (30/15). C<to_ffi> builds the
 C<TemporalCoreClientKeepAliveOptions> record in milliseconds.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Client::KeepAliveConfig->new(
+        interval => ...,
+        timeout => ...,
+    );
+
+Constructs a Temporalio::Client::KeepAliveConfig. Named parameters:
+
+=over 4
+
+=item C<interval>
+
+(optional, default C<30>)
+
+=item C<timeout>
+
+(optional, default C<15>)
+
+=back
+
+=head1 METHODS
+
+=head2 interval
+
+Accessor returning the C<interval> value.
+
+=head2 timeout
+
+Accessor returning the C<timeout> value.
+
+=head2 to_ffi
+
+Returns the FFI representation of this keep-alive config consumed by the connect call.
+
 =cut

@@ -366,6 +366,8 @@ class Temporalio::Core::Callback {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Core::Callback - FFI completion to Perl Future bridge
@@ -414,5 +416,37 @@ client layer maps failures per spec section 7.5); C<server_start> resolves
 with a C<< { handle, target } >> hashref. Byte arrays are freed through
 the bridge once consumed. A completion whose callback id has no pending
 Future is warned about and dropped, never fatal.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Core::Callback.
+
+=head1 METHODS
+
+=head2 close
+
+Tears down the callback dispatcher and its signal handle.
+
+=head2 drain
+
+Drains the runtime's completion queue, resolving the Futures of any callbacks the shim has signalled.
+
+=head2 issue_async
+
+Issues an async bridge call, registering a callback that the shim trampoline will resolve by pushing onto the runtime queue; returns a L<Future>.
+
+=head2 read_handle
+
+Accessor returning the C<read_handle> value.
+
+=head2 rpc_error_for
+
+Maps a bridge failure byte-array into the appropriate L<Temporalio::Exception::RpcError> subclass.
+
+=head2 signal_fd
+
+Accessor returning the C<signal_fd> value.
 
 =cut

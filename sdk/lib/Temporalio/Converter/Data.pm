@@ -187,6 +187,8 @@ class Temporalio::Converter::Data {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Converter::Data - the top-level data conversion facade
@@ -260,5 +262,43 @@ A raising codec or payload converter propagates as
 L<Temporalio::Exception::DataConverter>: an existing DataConverter
 passes through unchanged, another Temporalio exception is attached as
 the C<cause>, and anything else is folded into the message.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Converter::Data->new(
+        payload_converter => ...,
+        failure_converter => ...,
+        payload_codecs => ...,
+    );
+
+Constructs a Temporalio::Converter::Data. Named parameters:
+
+=over 4
+
+=item C<payload_converter>
+
+(optional, default C<undef>)
+
+=item C<failure_converter>
+
+(optional, default C<undef>)
+
+=item C<payload_codecs>
+
+(optional, default C<[]>)
+
+=back
+
+=head1 METHODS
+
+=head2 codec_decode
+
+Async. Decodes payloads through the configured payload codec, returning a L<Future> of the decoded payloads.
+
+=head2 codec_encode
+
+Async. Encodes payloads through the configured L<Temporalio::Converter::PayloadCodec>, returning a L<Future> of the encoded payloads.
 
 =cut

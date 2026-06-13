@@ -58,6 +58,8 @@ class Temporalio::Converter::Payload::JsonProtobuf
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Converter::Payload::JsonProtobuf - the json/protobuf encoding
@@ -74,5 +76,11 @@ L<Temporalio::Core::Proto> and materializes a fully-blessed instance,
 raising L<Temporalio::Exception::DataConverter> when the metadata is
 missing. C<encoding> returns C<json/protobuf>. See
 L<Temporalio::Converter::Payload> for the converter contract.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Converter::Payload::JsonProtobuf.
 
 =cut

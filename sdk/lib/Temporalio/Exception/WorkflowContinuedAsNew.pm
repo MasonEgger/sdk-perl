@@ -25,4 +25,28 @@ Temporalio::Exception::WorkflowContinuedAsNew - Raised by result(follow_runs => 
 
 Raised by C<< $handle->result(follow_runs => 0) >> when the workflow run continued-as-new instead of completing. C<new_run_id> identifies the successor run. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::WorkflowContinuedAsNew->new(
+        new_run_id => ...,
+    );
+
+Constructs a Temporalio::Exception::WorkflowContinuedAsNew. Named parameters:
+
+=over 4
+
+=item C<new_run_id>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 new_run_id
+
+Accessor returning the C<new_run_id> value.
+
 =cut

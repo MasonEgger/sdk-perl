@@ -25,4 +25,28 @@ Temporalio::Exception::ResetWorkflow - Failure recorded when a workflow executio
 
 Recorded when a workflow execution is reset. C<last_heartbeat_details> is an arrayref of decoded payload values. Maps to the C<reset_workflow_failure_info> Failure proto variant. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::ResetWorkflow->new(
+        last_heartbeat_details => ...,
+    );
+
+Constructs a Temporalio::Exception::ResetWorkflow. Named parameters:
+
+=over 4
+
+=item C<last_heartbeat_details>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 last_heartbeat_details
+
+Accessor returning the C<last_heartbeat_details> value.
+
 =cut

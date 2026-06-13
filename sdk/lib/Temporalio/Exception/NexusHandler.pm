@@ -27,4 +27,37 @@ Temporalio::Exception::NexusHandler - Failure raised by a Nexus handler (spec se
 
 Raised when a Nexus handler fails. C<type> is the Nexus spec error type string (e.g. C<BAD_REQUEST>); C<retry_behavior> is the raw NexusHandlerErrorRetryBehavior enum value. Maps to the C<nexus_handler_failure_info> Failure proto variant. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::NexusHandler->new(
+        type => ...,
+        retry_behavior => ...,
+    );
+
+Constructs a Temporalio::Exception::NexusHandler. Named parameters:
+
+=over 4
+
+=item C<type>
+
+(optional, default C<undef>)
+
+=item C<retry_behavior>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 retry_behavior
+
+Accessor returning the C<retry_behavior> value.
+
+=head2 type
+
+Accessor returning the C<type> value.
+
 =cut

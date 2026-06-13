@@ -260,10 +260,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P5.2.3 Verify
 
 ### P5.3 POD + author tests + README
-- [ ] P5.3.1 RED: xt/pod-coverage.t + xt/pod-syntax.t
-- [ ] P5.3.2 GREEN: hand-written POD everywhere
-- [ ] P5.3.3 README.md (root + sdk/)
-- [ ] P5.3.4 Verify: prove -lj4 xt t
+- [x] P5.3.1 RED: xt/pod-coverage.t + xt/pod-syntax.t
+- [x] P5.3.2 GREEN: hand-written POD everywhere
+- [x] P5.3.3 README.md (root + sdk/)
+- [x] P5.3.4 Verify: prove -lj4 xt t
 
 ### P5.4 CI matrix
 - [ ] P5.4.1 .github/workflows/ci.yml per spec §14

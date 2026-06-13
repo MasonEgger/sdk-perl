@@ -73,6 +73,8 @@ class Temporalio::Converter::Payload {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Converter::Payload - payload converter base class and composite
@@ -130,5 +132,23 @@ L<Temporalio::Exception::Runtime>.
 =head2 default
 
 Class method returning the default composite described above.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Converter::Payload->new(
+        converters => ...,
+    );
+
+Constructs a Temporalio::Converter::Payload. Named parameters:
+
+=over 4
+
+=item C<converters>
+
+(optional, default C<[]>)
+
+=back
 
 =cut

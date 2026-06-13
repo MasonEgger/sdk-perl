@@ -45,4 +45,32 @@ C<priority_key> means higher priority; an undef key leaves the proto field
 unset so the server uses the task-queue default. C<to_proto> builds the
 C<temporal.api.common.v1.Priority> message.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Common::Priority->new(
+        priority_key => ...,
+    );
+
+Constructs a Temporalio::Common::Priority. Named parameters:
+
+=over 4
+
+=item C<priority_key>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 priority_key
+
+Accessor returning the C<priority_key> value.
+
+=head2 to_proto
+
+Builds and returns the C<temporal.api.common.v1.Priority> proto message for this priority.
+
 =cut

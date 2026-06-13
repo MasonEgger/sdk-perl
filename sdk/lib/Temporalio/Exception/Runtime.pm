@@ -24,4 +24,10 @@ Raised for L<Temporalio::Runtime> lifecycle errors such as failed C
 runtime construction or use after shutdown. See L<Temporalio::Exception>
 for the shared fields and behavior.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::Runtime.
+
 =cut

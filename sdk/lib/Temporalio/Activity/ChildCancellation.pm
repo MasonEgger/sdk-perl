@@ -38,6 +38,8 @@ class Temporalio::Activity::ChildCancellation {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Activity::ChildCancellation - fork-safe cancellation for sync activities
@@ -51,5 +53,37 @@ plain Perl flag, initialized from the C<cancelled> value the parent serialized
 into the L<Temporalio::Activity::Invocation>, and exposes the same
 C<is_cancelled> / C<cancel> / C<cancelled> surface as the real token so an
 activity body can interrogate it uniformly.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Activity::ChildCancellation->new(
+        cancelled => ...,
+    );
+
+Constructs a Temporalio::Activity::ChildCancellation. Named parameters:
+
+=over 4
+
+=item C<cancelled>
+
+(optional, default C<0>)
+
+=back
+
+=head1 METHODS
+
+=head2 cancel
+
+Marks this child cancellation token as cancelled, signalling the activity body to abort.
+
+=head2 cancelled
+
+Accessor returning the truthy cancelled flag.
+
+=head2 is_cancelled
+
+Returns true once cancel has been requested.
 
 =cut

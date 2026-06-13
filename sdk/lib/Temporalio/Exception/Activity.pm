@@ -37,4 +37,82 @@ Temporalio::Exception::Activity - Failure wrapping an activity execution failure
 
 Wraps an activity execution failure; the underlying activity error is the C<cause>. C<retry_state> is the lowercased suffix of the Temporal RetryState enum (e.g. C<in_progress>, C<non_retryable_failure>). Maps to the C<activity_failure_info> Failure proto variant. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::Activity->new(
+        activity_id => ...,
+        activity_type => ...,
+        attempt => ...,
+        identity => ...,
+        retry_state => ...,
+        started_event_id => ...,
+        scheduled_event_id => ...,
+    );
+
+Constructs a Temporalio::Exception::Activity. Named parameters:
+
+=over 4
+
+=item C<activity_id>
+
+(optional, default C<undef>)
+
+=item C<activity_type>
+
+(optional, default C<undef>)
+
+=item C<attempt>
+
+(optional, default C<undef>)
+
+=item C<identity>
+
+(optional, default C<undef>)
+
+=item C<retry_state>
+
+(optional, default C<undef>)
+
+=item C<started_event_id>
+
+(optional, default C<undef>)
+
+=item C<scheduled_event_id>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 activity_id
+
+Accessor returning the C<activity_id> value.
+
+=head2 activity_type
+
+Accessor returning the C<activity_type> value.
+
+=head2 attempt
+
+Accessor returning the C<attempt> value.
+
+=head2 identity
+
+Accessor returning the C<identity> value.
+
+=head2 retry_state
+
+Accessor returning the C<retry_state> value.
+
+=head2 scheduled_event_id
+
+Accessor returning the C<scheduled_event_id> value.
+
+=head2 started_event_id
+
+Accessor returning the C<started_event_id> value.
+
 =cut

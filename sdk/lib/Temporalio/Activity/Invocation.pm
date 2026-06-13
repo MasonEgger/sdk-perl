@@ -71,6 +71,8 @@ class Temporalio::Activity::Invocation {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Activity::Invocation - serializable cross-fork activity invocation
@@ -102,5 +104,73 @@ state that is not fork-safe (FFI pointers, the eventfd-backed callback queue).
 The parent does all protobuf and codec work; the child only runs the Perl
 body. L</freeze> / L</thaw> use L<Storable> to round-trip the record across
 the L<IO::Async::Function> channel.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Activity::Invocation->new(
+        activity_type => ...,
+        args => ...,
+        info => ...,
+        task_token => ...,
+        cancelled => ...,
+    );
+
+Constructs a Temporalio::Activity::Invocation. Named parameters:
+
+=over 4
+
+=item C<activity_type>
+
+(required)
+
+=item C<args>
+
+(optional, default C<[]>)
+
+=item C<info>
+
+(optional, default C<{}>)
+
+=item C<task_token>
+
+(required)
+
+=item C<cancelled>
+
+(optional, default C<0>)
+
+=back
+
+=head1 METHODS
+
+=head2 activity_type
+
+Accessor returning the C<activity_type> value.
+
+=head2 args
+
+Accessor returning the C<args> value.
+
+=head2 freeze
+
+Serialises the invocation to a plain hashref suitable for passing across the fork-pool boundary to a sync-activity worker.
+
+=head2 info
+
+Accessor returning the C<info> value.
+
+=head2 is_cancelled
+
+Returns true once cancellation has been requested for this invocation.
+
+=head2 task_token
+
+Accessor returning the C<task_token> value.
+
+=head2 thaw
+
+Class method reconstructing an invocation from the frozen hashref produced by C<freeze> inside the worker child.
 
 =cut

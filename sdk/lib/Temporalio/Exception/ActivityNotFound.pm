@@ -22,4 +22,10 @@ Temporalio::Exception::ActivityNotFound - Raised when a referenced activity does
 
 Raised when a referenced activity does not exist (or has already completed). See L<Temporalio::Exception::NotFound>. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::ActivityNotFound.
+
 =cut

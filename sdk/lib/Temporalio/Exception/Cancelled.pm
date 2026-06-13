@@ -25,4 +25,28 @@ Temporalio::Exception::Cancelled - Failure indicating a workflow, activity, or o
 
 Indicates cancellation of a workflow, activity, or other operation. Maps to the C<canceled_failure_info> variant of the Temporal Failure proto. C<details> is an arrayref of decoded payload values. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::Cancelled->new(
+        details => ...,
+    );
+
+Constructs a Temporalio::Exception::Cancelled. Named parameters:
+
+=over 4
+
+=item C<details>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 details
+
+Accessor returning the C<details> value.
+
 =cut

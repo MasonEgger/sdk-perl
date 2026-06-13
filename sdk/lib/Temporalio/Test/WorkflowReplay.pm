@@ -89,6 +89,8 @@ class Temporalio::Test::WorkflowReplay {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Test::WorkflowReplay - server-free replay harness for workflows
@@ -146,5 +148,48 @@ The backing L<Temporalio::Workflow::Runner> (C<undef> before the first
 C<push_activation>).
 
 =back
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Test::WorkflowReplay->new(
+        workflow_class => ...,
+        payload_converter => ...,
+        workflow_failure_exception_types => ...,
+        nondeterminism_as_workflow_fail => ...,
+    );
+
+Constructs a Temporalio::Test::WorkflowReplay. Named parameters:
+
+=over 4
+
+=item C<workflow_class>
+
+(required)
+
+=item C<payload_converter>
+
+(optional, default C<undef>)
+
+=item C<workflow_failure_exception_types>
+
+(optional, default C<[]>)
+
+=item C<nondeterminism_as_workflow_fail>
+
+(optional, default C<0>)
+
+=back
+
+=head1 METHODS
+
+=head2 commands_of
+
+Returns the commands emitted in the completion for the activation at the given index.
+
+=head2 push_activation_completion
+
+Feeds one activation into the runner under test and records the resulting completion for assertion.
 
 =cut

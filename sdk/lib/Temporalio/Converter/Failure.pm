@@ -398,6 +398,8 @@ class Temporalio::Converter::Failure {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Converter::Failure - exception / Failure proto converter
@@ -462,5 +464,25 @@ to C<APPLICATION_ERROR_CATEGORY_UNSPECIFIED> and
 C<APPLICATION_ERROR_CATEGORY_BENIGN> respectively.
 
 =back
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Converter::Failure.
+
+=head1 METHODS
+
+=head2 default
+
+Class method returning the default failure converter instance.
+
+=head2 from_failure
+
+Reconstructs a L<Temporalio::Exception> subclass from a C<temporal.api.failure.v1.Failure> proto, recursing through the cause chain.
+
+=head2 to_failure
+
+Converts a L<Temporalio::Exception> into a C<temporal.api.failure.v1.Failure> proto message, recursing through the cause chain.
 
 =cut

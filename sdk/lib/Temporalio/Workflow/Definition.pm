@@ -153,6 +153,8 @@ class Temporalio::Workflow::Definition {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Workflow::Definition - base class for class-based workflows
@@ -229,5 +231,29 @@ C<queries>, C<updates>, C<validators>, C<init>, C<dynamic>).
 The resolved workflow type name (C<undef> if the class has no C<:Run>).
 
 =back
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Workflow::Definition.
+
+=head1 METHODS
+
+=head2 Init
+
+Marks the annotated method as the workflow initializer (C<:Init>). Base-class attribute handler; see spec section 10.1.
+
+=head2 Query
+
+Marks the annotated method as a query handler (C<:Query>). Base-class attribute handler.
+
+=head2 Signal
+
+Marks the annotated method as a signal handler (C<:Signal>). Base-class attribute handler.
+
+=head2 Update
+
+Marks the annotated method as an update handler (C<:Update>). Base-class attribute handler.
 
 =cut

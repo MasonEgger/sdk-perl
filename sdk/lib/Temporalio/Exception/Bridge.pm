@@ -24,4 +24,10 @@ Raised when the sdk-core C bridge reports a failure, typically decoded
 from a bridge failure byte array in an async completion. See
 L<Temporalio::Exception> for the shared fields and behavior.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::Bridge.
+
 =cut

@@ -75,4 +75,54 @@ L<Devel::StackTrace> captured at construction unless one is supplied.
 Stringification is overloaded to render the message followed by the full
 cause chain.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception->new(
+        message => ...,
+        stack_trace => ...,
+        cause => ...,
+    );
+
+Constructs a Temporalio::Exception. Named parameters:
+
+=over 4
+
+=item C<message>
+
+(required)
+
+=item C<stack_trace>
+
+(optional, default C<undef>)
+
+=item C<cause>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 as_string
+
+Renders the message followed by the recursively stringified cause chain. Also invoked by string overloading.
+
+=head2 cause
+
+Accessor returning the C<cause> value.
+
+=head2 message
+
+Accessor returning the C<message> value.
+
+=head2 stack_trace
+
+Accessor returning the C<stack_trace> value.
+
+=head2 throw
+
+Class method that constructs an instance from the given fields and C<die>s with it in one step.
+
 =cut

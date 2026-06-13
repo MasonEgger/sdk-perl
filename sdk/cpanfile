@@ -49,4 +49,8 @@ on 'test' => sub {
 
 on 'develop' => sub {
     requires 'Test2::Plugin::DieOnFail';
+    # Author POD tests (xt/pod-syntax.t, xt/pod-coverage.t) — spec section 16.7.
+    requires 'Test::Pod', '1.41';
+    requires 'Test::Pod::Coverage', '1.08';
+    requires 'Pod::Coverage';
 };

@@ -22,4 +22,10 @@ Temporalio::Exception::NotFound - Base not-found failure (spec section 6.2); see
 
 Base class for not-found failures. The specific subclasses are L<Temporalio::Exception::WorkflowNotFound>, L<Temporalio::Exception::ActivityNotFound>, and L<Temporalio::Exception::NamespaceNotFound>. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::NotFound.
+
 =cut

@@ -34,6 +34,8 @@ class Temporalio::Converter::Payload::BinaryNull
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Converter::Payload::BinaryNull - the binary/null encoding
@@ -46,5 +48,11 @@ C<from_payload> returns C<undef>, raising
 L<Temporalio::Exception::DataConverter> if the payload unexpectedly
 carries data. C<encoding> returns C<binary/null>. See
 L<Temporalio::Converter::Payload> for the converter contract.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Converter::Payload::BinaryNull.
 
 =cut

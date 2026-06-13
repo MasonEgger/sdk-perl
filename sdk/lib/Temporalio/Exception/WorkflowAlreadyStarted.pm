@@ -29,4 +29,46 @@ Temporalio::Exception::WorkflowAlreadyStarted - Failure raised when starting a w
 
 Raised by C<start_workflow> when a workflow with the same id is already running and the id-reuse/conflict policy rejects the new start. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::WorkflowAlreadyStarted->new(
+        workflow_id => ...,
+        workflow_type => ...,
+        run_id => ...,
+    );
+
+Constructs a Temporalio::Exception::WorkflowAlreadyStarted. Named parameters:
+
+=over 4
+
+=item C<workflow_id>
+
+(optional, default C<undef>)
+
+=item C<workflow_type>
+
+(optional, default C<undef>)
+
+=item C<run_id>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 run_id
+
+Accessor returning the C<run_id> value.
+
+=head2 workflow_id
+
+Accessor returning the C<workflow_id> value.
+
+=head2 workflow_type
+
+Accessor returning the C<workflow_type> value.
+
 =cut

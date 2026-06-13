@@ -285,6 +285,8 @@ class Temporalio::Worker::ActivityDispatcher {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Worker::ActivityDispatcher - run activity tasks and report results
@@ -340,5 +342,76 @@ Both the completer and the heartbeat recorder are injected so the dispatcher
 is unit-testable without a live worker; L<Temporalio::Worker> supplies real
 ones over the callback bridge. Completion building is delegated to
 L<Temporalio::Worker::ActivityCompletion>.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Worker::ActivityDispatcher->new(
+        registry => ...,
+        data_converter => ...,
+        task_queue => ...,
+        client => ...,
+        loop => ...,
+        pool => ...,
+        completer => ...,
+        heartbeat_recorder => ...,
+    );
+
+Constructs a Temporalio::Worker::ActivityDispatcher. Named parameters:
+
+=over 4
+
+=item C<registry>
+
+(required)
+
+=item C<data_converter>
+
+(required)
+
+=item C<task_queue>
+
+(required)
+
+=item C<client>
+
+(optional, default C<undef>)
+
+=item C<loop>
+
+(optional, default C<undef>)
+
+=item C<pool>
+
+(optional, default C<undef>)
+
+=item C<completer>
+
+(required)
+
+=item C<heartbeat_recorder>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 data_converter
+
+Accessor returning the C<data_converter> value.
+
+=head2 dispatch_task
+
+Async. Dispatches one polled activity task to its registered definition and returns a L<Future> resolving to the activity completion.
+
+=head2 is_running
+
+Returns true while there are in-flight activity tasks.
+
+=head2 registry
+
+Accessor returning the C<registry> value.
 
 =cut

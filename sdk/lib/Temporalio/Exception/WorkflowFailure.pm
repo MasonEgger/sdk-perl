@@ -22,6 +22,8 @@ class Temporalio::Exception::WorkflowFailure :isa(Temporalio::Exception) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Exception::WorkflowFailure - top-level workflow failure wrapper
@@ -33,5 +35,11 @@ workflow (an application error, cancellation, timeout, ...) is always the
 C<cause>. Constructing an instance without a C<cause> raises
 L<Temporalio::Exception::Argument>. See L<Temporalio::Exception> for the
 shared C<message>, C<stack_trace>, and C<cause> fields.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::WorkflowFailure.
 
 =cut

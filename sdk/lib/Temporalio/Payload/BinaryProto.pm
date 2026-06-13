@@ -48,4 +48,28 @@ proto wire form (C<binary/protobuf> encoding) instead of the default
 canonical-JSON form (C<json/protobuf>). C<message> returns the wrapped
 message instance.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Payload::BinaryProto->new(
+        message => ...,
+    );
+
+Constructs a Temporalio::Payload::BinaryProto. Named parameters:
+
+=over 4
+
+=item C<message>
+
+(required)
+
+=back
+
+=head1 METHODS
+
+=head2 message
+
+Accessor returning the C<message> value.
+
 =cut

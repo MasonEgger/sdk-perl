@@ -31,6 +31,8 @@ class Temporalio::Converter::PayloadCodec {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Converter::PayloadCodec - abstract payload codec base class
@@ -83,5 +85,11 @@ Transform outbound payloads.
 =head2 decode($payloads)
 
 Invert C<encode> on inbound payloads.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Converter::PayloadCodec.
 
 =cut

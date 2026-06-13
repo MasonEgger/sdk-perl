@@ -22,4 +22,10 @@ Temporalio::Exception::Heartbeat - Raised when the bridge reports a problem reco
 
 Raised from the activity context C<heartbeat()> call when the bridge reports a problem recording the heartbeat. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::Heartbeat.
+
 =cut

@@ -50,6 +50,8 @@ class Temporalio::Cancellation {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Cancellation - cancellation token over TemporalCoreCancellationToken
@@ -99,5 +101,11 @@ bridge structs that carry a cancellation token.
 C<DESTROY> frees the core token via C<temporal_core_cancellation_token_free>
 (skipped during global destruction, where teardown order is undefined and
 the process is exiting anyway).
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Cancellation.
 
 =cut

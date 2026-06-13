@@ -42,6 +42,8 @@ class Temporalio::Activity::FunctionDefinition {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Activity::FunctionDefinition - function-based activity definition
@@ -68,5 +70,56 @@ just like a class-based activity.
 C<name> (the activity type) and C<code> (the callable) are required; an
 empty name or a non-code C<code> raises L<Temporalio::Exception::Argument>.
 C<no_thread_cancellation> defaults to false.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Activity::FunctionDefinition->new(
+        name => ...,
+        code => ...,
+        no_thread_cancellation => ...,
+        sync => ...,
+    );
+
+Constructs a Temporalio::Activity::FunctionDefinition. Named parameters:
+
+=over 4
+
+=item C<name>
+
+(required)
+
+=item C<code>
+
+(required)
+
+=item C<no_thread_cancellation>
+
+(optional, default C<0>)
+
+=item C<sync>
+
+(optional, default C<0>)
+
+=back
+
+=head1 METHODS
+
+=head2 code
+
+Accessor returning the C<code> value.
+
+=head2 name
+
+Accessor returning the C<name> value.
+
+=head2 no_thread_cancellation
+
+Accessor returning the C<no_thread_cancellation> value.
+
+=head2 sync
+
+Accessor returning the C<sync> value.
 
 =cut

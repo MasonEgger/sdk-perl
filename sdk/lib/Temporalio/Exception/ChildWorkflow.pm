@@ -37,4 +37,82 @@ Temporalio::Exception::ChildWorkflow - Failure wrapping a child workflow executi
 
 Wraps a child workflow execution failure; the underlying error is the C<cause>. C<retry_state> is the lowercased suffix of the Temporal RetryState enum. Maps to the C<child_workflow_execution_failure_info> Failure proto variant. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::ChildWorkflow->new(
+        namespace => ...,
+        workflow_id => ...,
+        run_id => ...,
+        workflow_type => ...,
+        retry_state => ...,
+        initiated_event_id => ...,
+        started_event_id => ...,
+    );
+
+Constructs a Temporalio::Exception::ChildWorkflow. Named parameters:
+
+=over 4
+
+=item C<namespace>
+
+(optional, default C<undef>)
+
+=item C<workflow_id>
+
+(optional, default C<undef>)
+
+=item C<run_id>
+
+(optional, default C<undef>)
+
+=item C<workflow_type>
+
+(optional, default C<undef>)
+
+=item C<retry_state>
+
+(optional, default C<undef>)
+
+=item C<initiated_event_id>
+
+(optional, default C<undef>)
+
+=item C<started_event_id>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 initiated_event_id
+
+Accessor returning the C<initiated_event_id> value.
+
+=head2 namespace
+
+Accessor returning the C<namespace> value.
+
+=head2 retry_state
+
+Accessor returning the C<retry_state> value.
+
+=head2 run_id
+
+Accessor returning the C<run_id> value.
+
+=head2 started_event_id
+
+Accessor returning the C<started_event_id> value.
+
+=head2 workflow_id
+
+Accessor returning the C<workflow_id> value.
+
+=head2 workflow_type
+
+Accessor returning the C<workflow_type> value.
+
 =cut

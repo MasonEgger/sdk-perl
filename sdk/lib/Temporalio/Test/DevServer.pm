@@ -175,6 +175,8 @@ class Temporalio::Test::DevServer {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Test::DevServer - ephemeral Temporal dev server for tests
@@ -234,5 +236,44 @@ calls return immediately.
 =head2 is_shutdown
 
 True once C<shutdown> has run.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Test::DevServer->new(
+        runtime => ...,
+        handle => ...,
+        target => ...,
+        shutdown_timeout => ...,
+    );
+
+Constructs a Temporalio::Test::DevServer. Named parameters:
+
+=over 4
+
+=item C<runtime>
+
+(required)
+
+=item C<handle>
+
+(required)
+
+=item C<target>
+
+(required)
+
+=item C<shutdown_timeout>
+
+(optional, default C<30>)
+
+=back
+
+=head1 METHODS
+
+=head2 start
+
+Class method (async) that boots a C<temporal server start-dev> instance on a free port and returns a L<Future> resolving to the dev-server handle.
 
 =cut

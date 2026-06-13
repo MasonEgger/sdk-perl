@@ -103,4 +103,59 @@ C<client_key> must be supplied together. C<to_ffi(\@keep)> builds the
 C<TemporalCoreClientTlsOptions> record (C<server_name> lands in the
 C<domain> member), pushing backing buffers onto C<@keep>.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Client::TlsConfig->new(
+        ca_cert => ...,
+        client_cert => ...,
+        client_key => ...,
+        server_name => ...,
+    );
+
+Constructs a Temporalio::Client::TlsConfig. Named parameters:
+
+=over 4
+
+=item C<ca_cert>
+
+(optional, default C<undef>)
+
+=item C<client_cert>
+
+(optional, default C<undef>)
+
+=item C<client_key>
+
+(optional, default C<undef>)
+
+=item C<server_name>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 ca_cert
+
+Accessor returning the C<ca_cert> value.
+
+=head2 client_cert
+
+Accessor returning the C<client_cert> value.
+
+=head2 client_key
+
+Accessor returning the C<client_key> value.
+
+=head2 server_name
+
+Accessor returning the C<server_name> value.
+
+=head2 to_ffi
+
+Returns the C<Temporalio::Core::FFI::ClientTlsOptions> record built from this config, passed to C<client_connect>.
+
 =cut

@@ -23,4 +23,10 @@ Temporalio::Exception::Argument - invalid argument to an SDK method
 Raised when a caller passes an invalid argument to a Perl-level SDK
 method. See L<Temporalio::Exception> for the shared fields and behavior.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::Argument.
+
 =cut

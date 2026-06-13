@@ -76,6 +76,8 @@ class Temporalio::Workflow::Logger {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Workflow::Logger - replay-aware logger for workflow code
@@ -97,27 +99,40 @@ regardless of replay state.
 The logger carries the workflow run id and type as structured context (via
 C<context>) so downstream handlers can attribute each line to its workflow.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $log = Temporalio::Workflow::Logger->new(runner => $runner, logger => $log_any);
+
+Constructs the logger. C<runner> (required) is the owning
+L<Temporalio::Workflow::Runner>, consulted for replay state on every call.
+C<logger> (optional) is the underlying L<Log::Any> logger; it defaults to a
+logger in the C<Temporalio::Workflow> category.
+
 =head1 METHODS
 
-=over 4
-
-=item C<base_logger>
+=head2 base_logger
 
 The underlying L<Log::Any> logger (for tests or advanced configuration).
 
-=item C<context>
+=head2 context
 
-A hashref of the workflow context (C<workflow_run_id>, C<workflow_type>)
-attached to records.
+Returns a hashref of the workflow context (C<workflow_run_id>,
+C<workflow_type>) attached to every record.
 
-=item C<info>, C<warn>, C<error>, C<debug>, C<trace>, ... (and the C<*f> variants)
+=head2 Logging level methods
 
-Log at the given level, suppressed while replaying.
+This logger mirrors the L<Log::Any> level API. The level emitters
 
-=item C<is_info>, C<is_warn>, ...
+    trace debug info notice warning warn error err
+    critical crit fatal alert emergency
 
-Always true (spec section 10.4) so user code can build messages.
-
-=back
+and their C<sprintf>-style C<*f> variants (C<infof>, C<debugf>, ...) each
+forward to the underlying logger B<only when the runner is not replaying>, so a
+line logged while re-applying history is not emitted twice (spec section 10.4 /
+test T-wf-9). The matching C<is_*> predicates (C<is_info>, C<is_debug>, ...)
+always return true so workflow code can build messages regardless of replay
+state.
 
 =cut

@@ -255,6 +255,8 @@ class Temporalio::Worker::WorkflowDispatcher {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Worker::WorkflowDispatcher - route workflow activations to per-run runners
@@ -310,5 +312,60 @@ C<WorkflowActivationCompletion>; its codec-encoded bytes are handed to the
 injected C<completer>. Making the completer injectable lets unit tests capture
 completions without a live worker; L<Temporalio::Worker> supplies a real one
 that issues C<worker_complete_workflow_activation> over the callback bridge.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Worker::WorkflowDispatcher->new(
+        registry => ...,
+        data_converter => ...,
+        task_queue => ...,
+        completer => ...,
+    );
+
+Constructs a Temporalio::Worker::WorkflowDispatcher. Named parameters:
+
+=over 4
+
+=item C<registry>
+
+(required)
+
+=item C<data_converter>
+
+(required)
+
+=item C<task_queue>
+
+(optional, default C<undef>)
+
+=item C<completer>
+
+(required)
+
+=back
+
+=head1 METHODS
+
+=head2 data_converter
+
+Accessor returning the C<data_converter> value.
+
+=head2 dispatch_task
+
+Async. Routes one polled workflow activation to the per-run L<Temporalio::Workflow::Runner> and returns a L<Future> resolving to the completion.
+
+=head2 has_runner
+
+Returns true if a runner exists for the given run id.
+
+=head2 registry
+
+Accessor returning the C<registry> value.
+
+=head2 runner
+
+Returns the L<Temporalio::Workflow::Runner> for the given run id, creating one if needed.
 
 =cut

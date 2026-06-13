@@ -54,6 +54,8 @@ sub _completion ($task_token, $result) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Worker::ActivityCompletion - build ActivityTaskCompletion protos
@@ -81,5 +83,19 @@ a C<temporal.api.common.v1.Payload> for the success result, a
 C<temporal.api.failure.v1.Failure> for failure/cancellation. Payload codec
 encoding (the worker boundary) is the caller's responsibility, so this module
 stays a pure proto-shaping helper reusable by the workflow side later.
+
+=head1 METHODS
+
+=head2 cancelled
+
+Class method building an activity-completion representing a cancellation.
+
+=head2 failure
+
+Class method building an activity-completion representing a failure with the given Failure proto.
+
+=head2 success
+
+Class method building an activity-completion representing a successful result with the given payload.
 
 =cut

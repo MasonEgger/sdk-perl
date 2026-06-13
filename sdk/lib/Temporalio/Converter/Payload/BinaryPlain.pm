@@ -50,6 +50,8 @@ class Temporalio::Converter::Payload::BinaryPlain
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Converter::Payload::BinaryPlain - the binary/plain encoding
@@ -63,5 +65,11 @@ to the C<json/plain> catch-all). C<to_payload> stores the bytes verbatim
 under encoding C<binary/plain>; C<from_payload> returns the data bytes as a
 plain scalar (not re-wrapped). C<encoding> returns C<binary/plain>. See
 L<Temporalio::Converter::Payload> for the converter contract.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Converter::Payload::BinaryPlain.
 
 =cut

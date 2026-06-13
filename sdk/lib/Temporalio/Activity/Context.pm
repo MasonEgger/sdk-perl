@@ -86,6 +86,8 @@ class Temporalio::Activity::Context {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Activity::Context - per-invocation activity execution context
@@ -141,5 +143,43 @@ The L<Temporalio::Cancellation> that fires when this activity is cancelled.
 
 Readers for the worker's client, the data converter, and the payload
 converter respectively.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Activity::Context->new(
+        info => ...,
+        cancellation => ...,
+        data_converter => ...,
+        client => ...,
+        heartbeat_recorder => ...,
+    );
+
+Constructs a Temporalio::Activity::Context. Named parameters:
+
+=over 4
+
+=item C<info>
+
+(required)
+
+=item C<cancellation>
+
+(required)
+
+=item C<data_converter>
+
+(required)
+
+=item C<client>
+
+(optional, default C<undef>)
+
+=item C<heartbeat_recorder>
+
+(required)
+
+=back
 
 =cut

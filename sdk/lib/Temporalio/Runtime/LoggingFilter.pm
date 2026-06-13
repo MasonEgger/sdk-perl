@@ -71,4 +71,41 @@ C<INFO>, C<WARN>, or C<ERROR>; anything else raises
 L<Temporalio::Exception::Argument>. Defaults (core C<WARN>, other C<ERROR>)
 match the reference SDKs.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Runtime::LoggingFilter->new(
+        core_level => ...,
+        other_level => ...,
+    );
+
+Constructs a Temporalio::Runtime::LoggingFilter. Named parameters:
+
+=over 4
+
+=item C<core_level>
+
+(optional, default C<'WARN'>)
+
+=item C<other_level>
+
+(optional, default C<'ERROR'>)
+
+=back
+
+=head1 METHODS
+
+=head2 core_level
+
+Accessor returning the C<core_level> value.
+
+=head2 other_level
+
+Accessor returning the C<other_level> value.
+
+=head2 to_string
+
+Returns the C<core_level,other_level> filter string consumed by sdk-core's tracing layer.
+
 =cut

@@ -20,6 +20,8 @@ BEGIN {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Payload - the Temporal payload record (metadata + data)

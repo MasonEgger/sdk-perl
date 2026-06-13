@@ -77,4 +77,10 @@ the C<Attribute::Handlers> C<$data> payload into an activity type name plus
 options. Supports the bare, positional-name, and keyword forms documented in
 spec section 9.1.
 
+=head1 METHODS
+
+=head2 parse_defn
+
+Attribute-handler entry point for the C<:Defn> activity-method attribute; registers the method as an activity definition. Internal mechanism (spec section 10.1).
+
 =cut

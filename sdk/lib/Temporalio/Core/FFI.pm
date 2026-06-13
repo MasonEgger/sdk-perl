@@ -612,6 +612,8 @@ for my $entry (@phase0_attach) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Core::FFI - FFI::Platypus bindings over the Temporal core C bridge
@@ -639,5 +641,16 @@ C<temporal_core_> / C<temporalio_perl_bridge_> prefixes.
 Structs passed by value are declared as L<FFI::Platypus::Record> classes
 under the C<Temporalio::Core::FFI::*> namespace. Both library load failures
 and attach failures (version skew) die at module load time.
+
+=head1 FUNCTIONS
+
+This module exposes the SDK-internal C ABI as plain package subroutines whose
+names drop the C<temporal_core_> / C<temporalio_perl_bridge_> prefixes (for
+example C<runtime_new>, C<client_connect>, C<worker_poll_workflow_activation>).
+They are an internal mechanism wrapped by the higher-level
+L<Temporalio::Runtime>, L<Temporalio::Client>, and L<Temporalio::Worker>
+classes and are not part of the public SDK surface; their contracts are the C
+header at the pinned sdk-rust tag. They are therefore excluded from POD
+coverage below.
 
 =cut

@@ -67,4 +67,68 @@ reference SDKs. C<to_ffi(\@keep)> produces the
 C<TemporalCorePrometheusOptions> record; backing buffers are pushed onto
 C<@keep> and must outlive any use of the record.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Runtime::PrometheusConfig->new(
+        bind_address => ...,
+        counters_total_suffix => ...,
+        unit_suffix => ...,
+        durations_as_seconds => ...,
+        histogram_bucket_overrides => ...,
+    );
+
+Constructs a Temporalio::Runtime::PrometheusConfig. Named parameters:
+
+=over 4
+
+=item C<bind_address>
+
+(required)
+
+=item C<counters_total_suffix>
+
+(optional, default C<0>)
+
+=item C<unit_suffix>
+
+(optional, default C<0>)
+
+=item C<durations_as_seconds>
+
+(optional, default C<0>)
+
+=item C<histogram_bucket_overrides>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 bind_address
+
+Accessor returning the C<bind_address> value.
+
+=head2 counters_total_suffix
+
+Accessor returning the C<counters_total_suffix> value.
+
+=head2 durations_as_seconds
+
+Accessor returning the C<durations_as_seconds> value.
+
+=head2 histogram_bucket_overrides
+
+Accessor returning the C<histogram_bucket_overrides> value.
+
+=head2 to_ffi
+
+Returns the FFI Prometheus-options record for this config.
+
+=head2 unit_suffix
+
+Accessor returning the C<unit_suffix> value.
+
 =cut

@@ -71,4 +71,77 @@ Durations are seconds; C<to_ffi> builds the
 C<TemporalCoreClientRetryOptions> record in milliseconds. Retries happen
 inside sdk-core, never in the Perl layer (spec section 7.5).
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Client::RetryConfig->new(
+        initial_interval => ...,
+        randomization_factor => ...,
+        multiplier => ...,
+        max_interval => ...,
+        max_elapsed_time => ...,
+        max_retries => ...,
+    );
+
+Constructs a Temporalio::Client::RetryConfig. Named parameters:
+
+=over 4
+
+=item C<initial_interval>
+
+(optional, default C<0.1>)
+
+=item C<randomization_factor>
+
+(optional, default C<0.2>)
+
+=item C<multiplier>
+
+(optional, default C<1.5>)
+
+=item C<max_interval>
+
+(optional, default C<5.0>)
+
+=item C<max_elapsed_time>
+
+(optional, default C<10.0>)
+
+=item C<max_retries>
+
+(optional, default C<10>)
+
+=back
+
+=head1 METHODS
+
+=head2 initial_interval
+
+Accessor returning the C<initial_interval> value.
+
+=head2 max_elapsed_time
+
+Accessor returning the C<max_elapsed_time> value.
+
+=head2 max_interval
+
+Accessor returning the C<max_interval> value.
+
+=head2 max_retries
+
+Accessor returning the C<max_retries> value.
+
+=head2 multiplier
+
+Accessor returning the C<multiplier> value.
+
+=head2 randomization_factor
+
+Accessor returning the C<randomization_factor> value.
+
+=head2 to_ffi
+
+Returns the C<Temporalio::Core::FFI::ClientRetryOptions> record built from this config, passed to C<client_connect>.
+
 =cut

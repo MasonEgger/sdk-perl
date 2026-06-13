@@ -22,4 +22,10 @@ Temporalio::Exception::WorkflowNotFound - Raised when a referenced workflow exec
 
 Raised when a referenced workflow execution does not exist. See L<Temporalio::Exception::NotFound>. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::WorkflowNotFound.
+
 =cut

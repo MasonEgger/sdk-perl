@@ -21,6 +21,8 @@ class Temporalio::Exception::Nondeterminism :isa(Temporalio::Exception) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Exception::Nondeterminism - workflow replay contradicted history
@@ -39,5 +41,11 @@ failure by default (the server retries the task), and only to
 C<FailWorkflowExecution> when the worker's C<nondeterminism_as_workflow_fail>
 option is set. See L<Temporalio::Exception> for the shared C<message>,
 C<stack_trace>, and C<cause> fields.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::Nondeterminism.
 
 =cut

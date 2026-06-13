@@ -208,4 +208,54 @@ owning L<Temporalio::Core::Callback> instance, and the wakeup fd read end.
 All raise L<Temporalio::Exception::Runtime> with C<"Runtime is shut down">
 after C<shutdown>.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Runtime->new(
+        telemetry => ...,
+        worker_heartbeat_interval => ...,
+        loop => ...,
+    );
+
+Constructs a Temporalio::Runtime. Named parameters:
+
+=over 4
+
+=item C<telemetry>
+
+(optional, default C<undef>)
+
+=item C<worker_heartbeat_interval>
+
+(optional, default C<60>)
+
+=item C<loop>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 default
+
+Class method returning the process-wide default runtime, creating it on first use.
+
+=head2 is_shutdown
+
+Accessor returning the C<is_shutdown> value.
+
+=head2 loop
+
+Accessor returning the C<loop> value.
+
+=head2 set_default
+
+Class method installing a runtime as the process-wide default.
+
+=head2 shutdown
+
+Shuts the runtime down, stopping its IO::Async loop and freeing the sdk-core runtime.
+
 =cut

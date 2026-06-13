@@ -61,6 +61,8 @@ class Temporalio::Common::RetryPolicy {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Common::RetryPolicy - retry policy for workflows and activities
@@ -89,5 +91,69 @@ the server derives it. The field defaults MUST match the reference SDKs
 (verified against sdk-python F<temporalio/common.py>): C<initial_interval>
 1s, C<backoff_coefficient> 2.0, C<maximum_interval> undef,
 C<maximum_attempts> 0 (unlimited), C<non_retryable_error_types> none.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Common::RetryPolicy->new(
+        initial_interval => ...,
+        backoff_coefficient => ...,
+        maximum_interval => ...,
+        maximum_attempts => ...,
+        non_retryable_error_types => ...,
+    );
+
+Constructs a Temporalio::Common::RetryPolicy. Named parameters:
+
+=over 4
+
+=item C<initial_interval>
+
+(optional, default C<1>)
+
+=item C<backoff_coefficient>
+
+(optional, default C<2.0>)
+
+=item C<maximum_interval>
+
+(optional, default C<undef>)
+
+=item C<maximum_attempts>
+
+(optional, default C<0>)
+
+=item C<non_retryable_error_types>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 backoff_coefficient
+
+Accessor returning the C<backoff_coefficient> value.
+
+=head2 initial_interval
+
+Accessor returning the C<initial_interval> value.
+
+=head2 maximum_attempts
+
+Accessor returning the C<maximum_attempts> value.
+
+=head2 maximum_interval
+
+Accessor returning the C<maximum_interval> value.
+
+=head2 non_retryable_error_types
+
+Accessor returning the C<non_retryable_error_types> value.
+
+=head2 to_proto
+
+Builds and returns the C<temporal.api.common.v1.RetryPolicy> proto message; second-valued intervals are split into C<google.protobuf.Duration> seconds and nanos.
 
 =cut

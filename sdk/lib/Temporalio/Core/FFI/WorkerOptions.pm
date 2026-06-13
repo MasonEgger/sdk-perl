@@ -191,6 +191,8 @@ sub build ($keep, %options) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Core::FFI::WorkerOptions - hand-packed TemporalCoreWorkerOptions builder
@@ -219,5 +221,11 @@ C<debug_worker_options> echo (spec section 11 risk spike 3).
 
 v0.1 always passes versioning C<None{build_id}>, four C<FixedSize> slot
 suppliers, and C<simple_maximum> poller behaviors per spec section 8.1.
+
+=head1 METHODS
+
+=head2 build
+
+Builds the by-value C<TemporalCoreWorkerOptions> record (with hand-packed tagged unions) from the SDK-level worker options.
 
 =cut

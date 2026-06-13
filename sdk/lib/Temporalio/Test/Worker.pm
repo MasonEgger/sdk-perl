@@ -61,6 +61,8 @@ class Temporalio::Test::Worker {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Test::Worker - drive a live worker from an integration test
@@ -87,5 +89,42 @@ crash promptly instead of hanging; C<shutdown> tears the worker down cleanly.
 This lives under C<Temporalio::Test::> alongside
 L<Temporalio::Test::DevServer> and L<Temporalio::Test::WorkflowReplay> — author
 glue, not part of the public SDK surface.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Test::Worker->new(
+        worker => ...,
+        loop => ...,
+    );
+
+Constructs a Temporalio::Test::Worker. Named parameters:
+
+=over 4
+
+=item C<worker>
+
+(required)
+
+=item C<loop>
+
+(required)
+
+=back
+
+=head1 METHODS
+
+=head2 await_result
+
+Async. Returns a L<Future> resolving once the worker's run loop has finished.
+
+=head2 shutdown
+
+Initiates worker shutdown and returns a L<Future> that completes once the poll loops drain.
+
+=head2 worker
+
+Accessor returning the C<worker> value.
 
 =cut

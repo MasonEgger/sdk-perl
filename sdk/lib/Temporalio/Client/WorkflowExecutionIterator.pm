@@ -66,6 +66,8 @@ class Temporalio::Client::_WorkflowExecutionIterator {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Client::_WorkflowExecutionIterator - async list-workflows iterator

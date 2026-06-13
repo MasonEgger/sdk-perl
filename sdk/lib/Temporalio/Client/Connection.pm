@@ -70,6 +70,8 @@ class Temporalio::Client::Connection {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Client::Connection - live connection handle to a Temporal server
@@ -93,5 +95,50 @@ via C<temporal_core_client_free> and is idempotent; afterwards C<ptr> and
 C<update_api_key> raise L<Temporalio::Exception::Runtime> with
 C<"Connection is closed">. C<DESTROY> frees with a warning — call
 C<close> explicitly.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Client::Connection->new(
+        runtime => ...,
+        ptr => ...,
+    );
+
+Constructs a Temporalio::Client::Connection. Named parameters:
+
+=over 4
+
+=item C<runtime>
+
+(required)
+
+=item C<ptr>
+
+(required)
+
+=back
+
+=head1 METHODS
+
+=head2 close
+
+Closes the underlying sdk-core connection and frees its C pointer.
+
+=head2 is_closed
+
+Accessor returning the C<is_closed> value.
+
+=head2 ptr
+
+Returns the raw C<TemporalCoreConnection*> pointer (for FFI calls). Internal.
+
+=head2 runtime
+
+Accessor returning the C<runtime> value.
+
+=head2 update_api_key
+
+Updates the API key applied to subsequent RPCs on this connection.
 
 =cut

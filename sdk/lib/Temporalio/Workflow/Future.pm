@@ -24,6 +24,8 @@ sub is_workflow_future { 1 }
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Workflow::Future - manually-resolved deterministic Future subclass

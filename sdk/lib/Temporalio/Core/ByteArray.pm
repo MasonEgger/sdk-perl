@@ -91,4 +91,45 @@ and is idempotent; C<DESTROY> frees as well. If the runtime was already
 destroyed, C<free> warns and skips the bridge call, marking the byte array
 freed.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Core::ByteArray->new(
+        ptr => ...,
+        runtime => ...,
+    );
+
+Constructs a Temporalio::Core::ByteArray. Named parameters:
+
+=over 4
+
+=item C<ptr>
+
+(required)
+
+=item C<runtime>
+
+(required)
+
+=back
+
+=head1 METHODS
+
+=head2 bytes
+
+Returns the wrapped bytes as a Perl byte string (copied out of the C buffer).
+
+=head2 free
+
+Frees the underlying C byte-array buffer. Single-shot; safe to call once.
+
+=head2 to_string
+
+Returns the wrapped bytes decoded as a string; alias for reading the buffer.
+
+=head2 wrap
+
+Class method wrapping an owned C<TemporalCoreByteArray*> pointer so its bytes can be read and the buffer freed on the C side.
+
 =cut

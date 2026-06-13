@@ -123,6 +123,8 @@ class Temporalio::Worker::ActivityRegistry {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Worker::ActivityRegistry - build the worker's activity registry
@@ -155,5 +157,37 @@ called directly.
 Duplicate activity type names raise L<Temporalio::Exception::Argument>, as
 does an entry that is neither a loadable Definition subclass name, a
 Definition instance, nor a FunctionDefinition (spec test T-wkr-2).
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Worker::ActivityRegistry->new(
+        activities => ...,
+    );
+
+Constructs a Temporalio::Worker::ActivityRegistry. Named parameters:
+
+=over 4
+
+=item C<activities>
+
+(optional, default C<[]>)
+
+=back
+
+=head1 METHODS
+
+=head2 definition
+
+Returns the activity definition registered under the given name, or undef.
+
+=head2 definitions
+
+Returns all registered activity definitions.
+
+=head2 has_sync_activities
+
+Returns true if any registered activity runs synchronously (and therefore needs the fork pool).
 
 =cut

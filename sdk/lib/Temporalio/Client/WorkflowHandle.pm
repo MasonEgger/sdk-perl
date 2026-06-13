@@ -329,6 +329,8 @@ class Temporalio::Client::WorkflowHandle {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Client::WorkflowHandle - handle to a Temporal workflow execution
@@ -394,5 +396,27 @@ C<details> through the data converter. C<signal> and C<query> send the named
 signal/query with converter-encoded arguments; a server-rejected query
 raises L<Temporalio::Exception::QueryRejected>. C<fetch_history_events>
 returns an async iterator over the workflow's history events.
+
+=head1 METHODS
+
+=head2 client
+
+Accessor returning the C<client> value.
+
+=head2 first_execution_run_id
+
+Accessor returning the C<first_execution_run_id> value.
+
+=head2 result_run_id
+
+Accessor returning the C<result_run_id> value.
+
+=head2 run_id
+
+Accessor returning the C<run_id> value.
+
+=head2 workflow_id
+
+Accessor returning the C<workflow_id> value.
 
 =cut

@@ -1347,6 +1347,8 @@ package Temporalio::Workflow::Runner::_ActivityFuture {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Workflow::Runner - the deterministic per-run workflow scheduler
@@ -1460,5 +1462,107 @@ C<_next_seq("timer")>; sdk-ruby C<@activity_counter> vs C<@timer_counter>), so a
 workflow's first activity and first timer are both seq 1. The command buffer, by
 contrast, holds only the current activation's commands (the worker returns one
 completion per activation).
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Workflow::Runner->new(
+        workflow_class => ...,
+        run_id => ...,
+        payload_converter => ...,
+        failure_converter => ...,
+        task_queue => ...,
+        workflow_failure_exception_types => ...,
+        nondeterminism_as_workflow_fail => ...,
+    );
+
+Constructs a Temporalio::Workflow::Runner. Named parameters:
+
+=over 4
+
+=item C<workflow_class>
+
+(required)
+
+=item C<run_id>
+
+(optional, default C<undef>)
+
+=item C<payload_converter>
+
+(optional, default C<undef>)
+
+=item C<failure_converter>
+
+(optional, default C<undef>)
+
+=item C<task_queue>
+
+(optional, default C<undef>)
+
+=item C<workflow_failure_exception_types>
+
+(optional, default C<[]>)
+
+=item C<nondeterminism_as_workflow_fail>
+
+(optional, default C<0>)
+
+=back
+
+=head1 METHODS
+
+=head2 activation_time
+
+Returns the timestamp of the activation currently being applied.
+
+=head2 evict
+
+Evicts the run from cache, cancelling any in-flight handler/awaitable Futures.
+
+=head2 info
+
+Returns the workflow info hash (run id, workflow type, etc.) for the run.
+
+=head2 is_replaying
+
+Returns true while the current activation is replaying history.
+
+=head2 logger
+
+Returns the run's replay-aware workflow logger.
+
+=head2 patched
+
+Implements the C<patched>/C<deprecate_patch> logic against history, emitting patch markers as needed.
+
+=head2 process_activation
+
+Applies one workflow activation (its jobs) against the workflow instance and returns the resulting completion (its buffered commands).
+
+=head2 random
+
+Returns the run's deterministic RNG seeded from the activation randomness seed.
+
+=head2 run_id
+
+Returns the run id of the workflow execution.
+
+=head2 schedule_activity
+
+Emits a ScheduleActivity command and returns the cancellable awaitable that resolves when the activity is resolved.
+
+=head2 start_timer
+
+Emits a StartTimer command and returns the cancellable awaitable that resolves when the timer fires.
+
+=head2 wait_condition
+
+Registers a predicate to be re-checked as activations are applied, returning an awaitable that resolves when it holds.
+
+=head2 workflow_type
+
+Returns the workflow type name of the execution.
 
 =cut

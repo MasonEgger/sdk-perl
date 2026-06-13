@@ -22,4 +22,10 @@ Temporalio::Exception::RpcResourceExhausted - gRPC resource-exhausted failure; s
 
 Raised for the gRPC C<RESOURCE_EXHAUSTED> status. See L<Temporalio::Exception::RpcError> for the shared fields. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Exception::RpcResourceExhausted.
+
 =cut

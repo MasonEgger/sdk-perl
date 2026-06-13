@@ -61,6 +61,8 @@ class Temporalio::Worker::PollLoop {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Worker::PollLoop - poll a task queue and dispatch tasks
@@ -90,5 +92,47 @@ never tears down the worker (spec section 8.4 failure modes).
 Making the poll source injectable lets unit tests feed crafted C<ActivityTask>
 protos (and the shutdown sentinel) without a live server; the worker supplies a
 real source that issues C<worker_poll_activity_task> over the callback bridge.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Worker::PollLoop->new(
+        poll_source => ...,
+        dispatcher => ...,
+        loop => ...,
+    );
+
+Constructs a Temporalio::Worker::PollLoop. Named parameters:
+
+=over 4
+
+=item C<poll_source>
+
+(required)
+
+=item C<dispatcher>
+
+(required)
+
+=item C<loop>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 dispatcher
+
+Accessor returning the C<dispatcher> value.
+
+=head2 poll_source
+
+Accessor returning the C<poll_source> value.
+
+=head2 run
+
+Async. Drives the poll/complete loop for one task source, dispatching each polled task; returns a L<Future> that completes on shutdown.
 
 =cut

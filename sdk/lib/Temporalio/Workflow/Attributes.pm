@@ -111,6 +111,8 @@ sub _basename ($pkg) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Workflow::Attributes - parse workflow attribute payloads
@@ -123,5 +125,15 @@ options (spec section 10.1). Supports the bare, positional-name, and keyword
 (C<name=...>, C<dynamic=...>) forms for C<:Signal>/C<:Query>/C<:Update>, and
 the workflow-type resolution for C<:Run> (basename for a method named C<run>,
 the method name otherwise, or an explicit override).
+
+=head1 METHODS
+
+=head2 parse_handler
+
+Attribute-handler entry point for the C<:Signal>/C<:Query>/C<:Update> workflow-method attributes. Internal mechanism (spec section 10.1).
+
+=head2 parse_run
+
+Attribute-handler entry point for the C<:Run> workflow-method attribute. Internal mechanism (spec section 10.1).
 
 =cut

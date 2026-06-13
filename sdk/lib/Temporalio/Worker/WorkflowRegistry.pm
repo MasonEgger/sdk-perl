@@ -107,4 +107,32 @@ test T-wkr-2, workflow side), as does an entry that is not the name of a
 loadable C<Temporalio::Workflow::Definition> subclass, or a subclass with no
 C<:Run> method.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Worker::WorkflowRegistry->new(
+        workflows => ...,
+    );
+
+Constructs a Temporalio::Worker::WorkflowRegistry. Named parameters:
+
+=over 4
+
+=item C<workflows>
+
+(optional, default C<[]>)
+
+=back
+
+=head1 METHODS
+
+=head2 definition
+
+Returns the workflow definition registered under the given workflow type, or undef.
+
+=head2 definitions
+
+Returns all registered workflow definitions.
+
 =cut

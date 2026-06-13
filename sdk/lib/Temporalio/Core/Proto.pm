@@ -190,6 +190,8 @@ sub _build_messages ($schema, $prefix, $messages) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Core::Proto - load vendored Temporal protos, generate message classes
@@ -234,5 +236,23 @@ name. C<schema> returns the resolved L<Protobuf::Schema> behind the generated
 classes, and C<json> returns a process-shared L<Protobuf::JSON> codec over it
 (used for the C<json/protobuf> payload encoding). All entry points load the
 protos on first use.
+
+=head1 METHODS
+
+=head2 json
+
+Returns the JSON descriptor / mapping used when resolving messages.
+
+=head2 load
+
+Loads and parses the vendored proto trees, generating the C<Temporalio::Proto::*> message classes. Idempotent.
+
+=head2 resolve
+
+Resolves a fully-qualified proto message name (e.g. C<temporal.api.common.v1.Payload>) to its generated Perl class, triggering the one-time vendored-proto load on first use.
+
+=head2 schema
+
+Returns the parsed proto schema object backing message resolution.
 
 =cut

@@ -114,6 +114,8 @@ class Temporalio::Runtime::TelemetryConfig {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Runtime::TelemetryConfig - telemetry configuration for the core runtime
@@ -141,5 +143,69 @@ L<Temporalio::Exception::Argument> (T-rt-4), because the C bridge accepts
 only one of OpenTelemetry/Prometheus. C<to_ffi(\@keep)> builds the
 C<TemporalCoreTelemetryOptions> record tree (logging and metrics records by
 pointer), pushing every nested record and backing buffer onto C<@keep>.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Runtime::TelemetryConfig->new(
+        logging => ...,
+        metrics => ...,
+        global_tags => ...,
+        attach_service_name => ...,
+        metric_prefix => ...,
+    );
+
+Constructs a Temporalio::Runtime::TelemetryConfig. Named parameters:
+
+=over 4
+
+=item C<logging>
+
+(optional, default C<Temporalio::Runtime::LoggingConfig->default>)
+
+=item C<metrics>
+
+(optional, default C<undef>)
+
+=item C<global_tags>
+
+(optional, default C<undef>)
+
+=item C<attach_service_name>
+
+(optional, default C<1>)
+
+=item C<metric_prefix>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 attach_service_name
+
+Accessor returning the C<attach_service_name> value.
+
+=head2 global_tags
+
+Accessor returning the C<global_tags> value.
+
+=head2 logging
+
+Accessor returning the C<logging> value.
+
+=head2 metric_prefix
+
+Accessor returning the C<metric_prefix> value.
+
+=head2 metrics
+
+Accessor returning the C<metrics> value.
+
+=head2 to_ffi
+
+Returns the FFI telemetry-options record aggregating logging and metrics for this config.
 
 =cut

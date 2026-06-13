@@ -86,4 +86,40 @@ produces the C<TemporalCoreLoggingOptions> record with C<forward_to> NULL
 (log forwarding is deferred past v0.1, spec section 15); buffers backing the
 record are pushed onto C<@keep> and must outlive any use of the record.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Runtime::LoggingConfig->new(
+        filter => ...,
+    );
+
+Constructs a Temporalio::Runtime::LoggingConfig. Named parameters:
+
+=over 4
+
+=item C<filter>
+
+(optional, default C<Temporalio::Runtime::LoggingFilter->new>)
+
+=back
+
+=head1 METHODS
+
+=head2 default
+
+Class method returning the default logging config.
+
+=head2 filter
+
+Accessor returning the C<filter> value.
+
+=head2 filter_string
+
+Returns the resolved core/other-level filter string passed to sdk-core.
+
+=head2 to_ffi
+
+Returns the FFI logging-options record for this config.
+
 =cut

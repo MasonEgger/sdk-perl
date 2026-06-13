@@ -83,6 +83,8 @@ class Temporalio::Client::_HistoryEventIterator {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Client::_HistoryEventIterator - async history-event page iterator

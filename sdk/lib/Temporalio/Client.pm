@@ -631,6 +631,8 @@ class Temporalio::Client {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Client - client for a Temporal server
@@ -685,5 +687,101 @@ table in L<Temporalio::Core::Callback>.
 
 Workflow operations (C<start_workflow> and friends, spec section 7.4)
 arrive in later plan steps.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Client->new(
+        connection => ...,
+        namespace => ...,
+        identity => ...,
+        data_converter => ...,
+        runtime => ...,
+    );
+
+Constructs a Temporalio::Client. Named parameters:
+
+=over 4
+
+=item C<connection>
+
+(required)
+
+=item C<namespace>
+
+(required)
+
+=item C<identity>
+
+(required)
+
+=item C<data_converter>
+
+(required)
+
+=item C<runtime>
+
+(required)
+
+=back
+
+=head1 METHODS
+
+=head2 connect
+
+Class method (async): connects to a Temporal server at the given target and returns a L<Future> resolving to a new client. Accepts namespace, identity, tls, retry config and runtime options.
+
+=head2 connection
+
+Accessor returning the C<connection> value.
+
+=head2 count_workflows
+
+Async. Returns a L<Future> resolving to the count of executions matching the given visibility query.
+
+=head2 data_converter
+
+Accessor returning the C<data_converter> value.
+
+=head2 default_identity
+
+Class method returning the default client identity string (C<pid@hostname>) used when none is supplied.
+
+=head2 execute_workflow
+
+Async. Starts a workflow and awaits its result in one call, returning a L<Future> that resolves to the workflow's return value.
+
+=head2 get_workflow_handle
+
+Returns a L<Temporalio::Client::WorkflowHandle> for an existing workflow id (optionally pinned to a run id) without making an RPC.
+
+=head2 identity
+
+Accessor returning the C<identity> value.
+
+=head2 list_workflows
+
+Async. Returns a L<Future> resolving to a L<Temporalio::Client::WorkflowExecutionIterator> over executions matching the given visibility query.
+
+=head2 namespace
+
+Accessor returning the C<namespace> value.
+
+=head2 runtime
+
+Accessor returning the C<runtime> value.
+
+=head2 signal_with_start_workflow
+
+Async. Atomically signals a workflow, starting it first if it is not already running; returns a L<Future> resolving to a workflow handle.
+
+=head2 start_workflow
+
+Async. Starts a workflow execution and returns a L<Future> resolving to a L<Temporalio::Client::WorkflowHandle>.
+
+=head2 update_api_key
+
+Updates the API key sent on subsequent RPCs for this client's connection.
 
 =cut

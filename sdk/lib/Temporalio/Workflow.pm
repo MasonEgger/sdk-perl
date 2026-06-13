@@ -208,6 +208,8 @@ sub _workflow_type_name ($workflow) {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Workflow - entry point for workflow authors
@@ -236,5 +238,63 @@ timers (C<start_timer>, C<sleep>), C<wait_condition> (suspend the body until a
 predicate holds, optionally with a timeout), and C<continue_as_new>. Each looks
 up the active runner and raises L<Temporalio::Exception::Workflow::NoRunner> when
 called outside a workflow body.
+
+=head1 METHODS
+
+=head2 continue_as_new
+
+Ends the current run and continues the workflow as a new execution with the given arguments/options.
+
+=head2 deprecate_patch
+
+Marks a patch id as deprecated, recording a deprecation marker so the branch can later be removed.
+
+=head2 execute_activity
+
+Async. Schedules an activity and awaits its result, returning an awaitable resolving to the activity's return value.
+
+=head2 info
+
+Returns the L<Temporalio::Workflow::Info> for the running workflow.
+
+=head2 is_replaying
+
+Returns true while the workflow is replaying history.
+
+=head2 logger
+
+Returns the replay-aware L<Temporalio::Workflow::Logger> for the running workflow.
+
+=head2 now
+
+Returns the deterministic current time as a L<DateTime> at the activation timestamp (never the OS clock).
+
+=head2 patched
+
+Returns true if the given patch id is active, recording a patch marker for deterministic versioning.
+
+=head2 random
+
+Returns the workflow's deterministic RNG (seeded from the activation randomness seed).
+
+=head2 sleep
+
+Async. Durably sleeps for the given duration via a workflow timer; returns an awaitable that resolves when the timer fires.
+
+=head2 start_activity
+
+Schedules an activity and returns its awaitable handle without awaiting it.
+
+=head2 start_timer
+
+Starts a workflow timer for the given duration and returns its awaitable without awaiting it.
+
+=head2 time
+
+Returns the deterministic current time as epoch seconds at the activation timestamp.
+
+=head2 wait_condition
+
+Async. Suspends until the given predicate becomes true (re-checked on each activation), with an optional timeout.
 
 =cut

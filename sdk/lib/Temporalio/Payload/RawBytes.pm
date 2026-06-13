@@ -25,6 +25,8 @@ class Temporalio::Payload::RawBytes {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Payload::RawBytes - mark a scalar as raw bytes for conversion
@@ -43,5 +45,29 @@ unambiguously that the value is raw bytes and must use the C<binary/plain>
 encoding — useful when the scalar would otherwise be claimed by another
 converter (for example a UTF-8-flagged string). C<bytes> returns the
 wrapped scalar.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Payload::RawBytes->new(
+        bytes => ...,
+    );
+
+Constructs a Temporalio::Payload::RawBytes. Named parameters:
+
+=over 4
+
+=item C<bytes>
+
+(required)
+
+=back
+
+=head1 METHODS
+
+=head2 bytes
+
+Accessor returning the C<bytes> value.
 
 =cut

@@ -60,6 +60,8 @@ class Temporalio::Converter::Payload::Json
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Converter::Payload::Json - the json/plain catch-all encoding
@@ -77,5 +79,11 @@ L<Temporalio::Exception::DataConverter> naming the class). Encode/decode
 failures raise L<Temporalio::Exception::DataConverter>. C<encoding>
 returns C<json/plain>. See L<Temporalio::Converter::Payload> for the
 converter contract.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+Constructs a Temporalio::Converter::Payload::Json.
 
 =cut

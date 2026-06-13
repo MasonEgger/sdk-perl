@@ -27,4 +27,37 @@ Temporalio::Exception::Server - Failure originating inside the Temporal server (
 
 Indicates a failure originating inside the Temporal server itself. Maps to the C<server_failure_info> Failure proto variant. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::Server->new(
+        non_retryable => ...,
+        details => ...,
+    );
+
+Constructs a Temporalio::Exception::Server. Named parameters:
+
+=over 4
+
+=item C<non_retryable>
+
+(optional, default C<0>)
+
+=item C<details>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 details
+
+Accessor returning the C<details> value.
+
+=head2 non_retryable
+
+Accessor returning the C<non_retryable> value.
+
 =cut

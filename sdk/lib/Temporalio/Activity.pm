@@ -38,6 +38,8 @@ sub heartbeat (@details) { context()->heartbeat(@details) }
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Activity - entry point for activity authors
@@ -61,5 +63,19 @@ L<Temporalio::Activity::Definition> so the C<:isa> base resolves and the
 C<:Defn> attribute handler is in scope. The activity-context functional
 surface (C<Temporalio::Activity::context>, etc. — spec section 9.3) is added
 in a later phase.
+
+=head1 METHODS
+
+=head2 context
+
+Returns the current L<Temporalio::Activity::Context>; dies if called outside an activity.
+
+=head2 heartbeat
+
+Records an activity heartbeat with the given details, relaying it through the activity context to sdk-core.
+
+=head2 info
+
+Returns the L<Temporalio::Activity::Info> for the currently executing activity (from the activity context); dies if called outside an activity.
 
 =cut

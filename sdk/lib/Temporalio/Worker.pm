@@ -480,6 +480,8 @@ class Temporalio::Worker {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Worker - poll a task queue and dispatch workflows and activities
@@ -543,5 +545,43 @@ driving them that await would deadlock. The full graceful sequence
 (initiate, drain in-flight activities up to C<graceful_shutdown_period>,
 finalize, free) is issued from C<run> once the poll loops have drained;
 C<run> and those loops arrive in later plan steps (P2.4 / P3.6).
+
+=head1 METHODS
+
+=head2 activity_registry
+
+Accessor returning the C<activity_registry> value.
+
+=head2 client
+
+Accessor returning the C<client> value.
+
+=head2 is_shutdown
+
+Accessor returning the C<is_shutdown> value.
+
+=head2 run
+
+Async. Runs the worker: starts the workflow and activity poll loops and returns a L<Future> that completes when the worker is shut down.
+
+=head2 shutdown
+
+Initiates a graceful shutdown of the worker's poll loops.
+
+=head2 task_queue
+
+Accessor returning the C<task_queue> value.
+
+=head2 validate
+
+Async. Validates the worker against the server (task-queue reachability) before polling; returns a L<Future>.
+
+=head2 workflow_registry
+
+Accessor returning the C<workflow_registry> value.
+
+=head2 workflows
+
+Accessor returning the C<workflows> value.
 
 =cut

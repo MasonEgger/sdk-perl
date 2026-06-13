@@ -25,4 +25,28 @@ Temporalio::Exception::QueryRejected - Raised when a workflow query is rejected 
 
 Raised when a workflow query is rejected by the configured C<reject_condition>. C<status> is the workflow execution status string that triggered the rejection. See L<Temporalio::Exception> for the shared C<message>, C<stack_trace>, and C<cause> fields.
 
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Exception::QueryRejected->new(
+        status => ...,
+    );
+
+Constructs a Temporalio::Exception::QueryRejected. Named parameters:
+
+=over 4
+
+=item C<status>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 status
+
+Accessor returning the C<status> value.
+
 =cut

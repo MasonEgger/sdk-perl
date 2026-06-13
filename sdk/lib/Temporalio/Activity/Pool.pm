@@ -199,6 +199,8 @@ class Temporalio::Activity::Pool {
 
 __END__
 
+=encoding utf8
+
 =head1 NAME
 
 Temporalio::Activity::Pool - sync-activity fork pool
@@ -259,5 +261,58 @@ L<Temporalio::Activity::Invocation> — plain data with the activity type,
 B<already-converted> args, the info hashref, the task token, and the cancelled
 flag. No live core pointers, cancellation tokens, or data converters cross the
 fork boundary.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $obj = Temporalio::Activity::Pool->new(
+        loop => ...,
+        max_workers => ...,
+        registry => ...,
+        inherited_fhs => ...,
+        activity_modules => ...,
+        heartbeat_relay => ...,
+    );
+
+Constructs a Temporalio::Activity::Pool. Named parameters:
+
+=over 4
+
+=item C<loop>
+
+(required)
+
+=item C<max_workers>
+
+(optional, default C<4>)
+
+=item C<registry>
+
+(optional, default C<undef>)
+
+=item C<inherited_fhs>
+
+(optional, default C<[]>)
+
+=item C<activity_modules>
+
+(optional, default C<[]>)
+
+=item C<heartbeat_relay>
+
+(optional, default C<undef>)
+
+=back
+
+=head1 METHODS
+
+=head2 close
+
+Shuts the fork pool down, stopping all worker children.
+
+=head2 invoke
+
+Dispatches an activity invocation onto the fork pool, returning a L<Future> that resolves with the activity result (or fails with the activity error).
 
 =cut
