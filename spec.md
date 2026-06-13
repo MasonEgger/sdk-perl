@@ -2243,6 +2243,80 @@ marshalling). POD coverage is enforced in `xt/`, the
 matrix (spec §14) is in place. Tagging and any release to `main` are
 performed manually by the maintainer; this SDK does not push to `main`.
 
+### v0.2 — feature parity with the mature SDKs
+
+v0.2 brings the SDK to feature parity with the Python and Ruby SDKs:
+every capability they expose that v0.1 deferred, except the items still
+listed in §15 (Sessions, prebuilt binaries, CPAN publication, Windows).
+Each phase below is authored into a detailed contract section (§17+,
+Public API + behavioral contract + failure modes + `T-*` test IDs,
+mirroring the reference SDKs per §0) before its TDD plan is generated.
+Target version `Temporalio::SDK::VERSION` = `0.2.0`.
+
+#### Phase 6 — Workflow feature parity
+
+- **Child workflows**: `Temporalio::Workflow::start_child_workflow` /
+  `execute_child_workflow` emit `StartChildWorkflowExecution`; a
+  `ChildWorkflowHandle` (id, first-execution run id, `signal`, result)
+  resolves on `ResolveChildWorkflowExecutionStart` /
+  `ResolveChildWorkflowExecution`; parent-close policy
+  (TERMINATE / ABANDON / REQUEST_CANCEL), cancellation type, and
+  id-reuse/conflict honored. T-child-*.
+- **Workflow updates**: `:Update` + `:UpdateValidator` dispatched on the
+  `DoUpdate` job (validate → accept/reject → execute, results via
+  `UpdateResponse`); client `execute_update` / `start_update` +
+  `UpdateHandle`; in-flight updates gate workflow completion like async
+  signals. T-upd-*, T-cli-update-*.
+- **External workflow handles**: `get_external_workflow_handle` →
+  `signal` / `cancel` (Signal/RequestCancel ExternalWorkflowExecution).
+  T-ext-*.
+
+#### Phase 7 — Activity feature parity
+
+- **Local activities**: `execute_local_activity` / `start_local_activity`
+  in the runner (local-retry/backoff, `ScheduleLocalActivity`), executed
+  on the worker's local-activity path. T-local-*.
+- **Async activity completion**: an activity signals "completes
+  asynchronously"; a client async-activity handle (by task token or
+  ids) supports heartbeat / complete / fail / cancel out of band.
+  T-async-act-*.
+
+#### Phase 8 — Scheduling
+
+- **Schedules**: client `create_schedule` / `list_schedules` /
+  `get_schedule_handle`; `ScheduleHandle` (describe, update, delete,
+  trigger, pause, unpause, backfill); schedule spec (calendar/interval),
+  policy, and start-workflow action. T-sched-*.
+
+#### Phase 9 — Nexus
+
+- **Caller side**: `start_nexus_operation` / `execute_nexus_operation`
+  from workflow code (`ScheduleNexusOperation`, `NexusOperationHandle`,
+  cancellation).
+- **Handler side**: Nexus service + operation definitions, operation
+  handler dispatch on the worker, sync and async operations. T-nexus-*.
+
+#### Phase 10 — Runtime, observability & worker hardening
+
+- **core → Perl log forwarding**: the seventh deep-copy shim trampoline
+  (§3); forwarded core logs surface through a Perl logger. T-log-fwd-*.
+- **Custom metric meters**: `TemporalCoreCustomMetricMeter` callbacks
+  bridged to a Perl meter interface (counter / histogram / gauge), in
+  addition to the existing Prometheus/OTel exporters. T-meter-*.
+- **Advanced worker tuning**: custom slot suppliers, autoscaling pollers,
+  and deployment-based worker versioning (build IDs / worker
+  deployments). T-wkr-ver-*.
+- **Determinism enforcement**: detect and forbid illegal
+  non-deterministic calls in workflow context (Ruby-style illegal-call
+  detection; a Python-style import sandbox stays out of scope — §15).
+  T-det-*.
+
+#### v0.2 acceptance gate
+
+- All Phase 6–10 `T-*` IDs implemented; parity matrix green in CI.
+- Runnable examples for child workflows, updates, schedules, and Nexus.
+- `Temporalio::SDK::VERSION` = `0.2.0` (version-agreement test updated).
+
 ---
 
 ## 12. Test infrastructure
@@ -2360,24 +2434,24 @@ README documents this.
 
 ---
 
-## 15. Explicitly deferred to v0.2+ / phases 6+
+## 15. Explicitly deferred
 
-- Updates (`:Update`, `:UpdateValidator`).
-- Child workflows.
-- Async activity completion (`async_complete_activity`).
-- Schedules.
-- Sessions.
-- Local activities.
-- Nexus.
-- Prebuilt binary releases per triple (CPAN distribution still uses local
-  source build in v0.1).
-- Workflow sandbox.
-- Log forwarding (core → Perl logger; needs a seventh, deep-copy
-  trampoline in the shim — §3).
-- Custom metric meters (`TemporalCoreCustomMetricMeter` callbacks), custom
-  slot suppliers, autoscaling pollers, deployment-based worker versioning.
-- CPAN publication.
-- Windows support.
+Most of the original v0.1 deferrals — updates, child workflows, async
+activity completion, schedules, local activities, Nexus, log forwarding,
+custom metric meters, advanced worker tuning, and determinism
+enforcement — are claimed by the v0.2 feature-parity scope (§11, Phases
+6–10). The following remain deferred beyond v0.2:
+
+- **Sessions** (activity session pinning). A Go/Java-only concept; the
+  Python and Ruby SDKs do not expose it, so it is outside parity scope.
+- **Workflow sandbox** (Python-style import/global isolation). v0.2 does
+  determinism *enforcement* (illegal-call detection, Ruby-style); a full
+  import sandbox is a separate, larger effort.
+- **Prebuilt binary releases per triple.** Install builds `sdk-core` and
+  the shim from source; shipping precompiled per-platform libraries is a
+  separate packaging workstream.
+- **CPAN publication.** Install remains git-based.
+- **Windows support.** Best-effort CI only; not a supported target.
 
 ---
 
