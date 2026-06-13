@@ -7,9 +7,32 @@ use warnings;
 
 # A user activity module says `use Temporalio::Activity;` and then declares
 # `class My::Activity :isa(Temporalio::Activity::Definition)`. Loading the base
-# here means the author does not have to `use` it separately. The activity
-# context() functional surface (spec section 9.3) lands in P2.3.
+# here means the author does not have to `use` it separately.
 use Temporalio::Activity::Definition ();
+use Temporalio::Activity::Context ();
+use Temporalio::Exception::Runtime ();
+
+# The activity context() functional surface (spec section 9.3), mirroring the
+# reference SDKs' module-level functions (sdk-python activity.info/heartbeat,
+# sdk-ruby Activity::Context.current). The current context is the
+# dynamically-scoped $Temporalio::Activity::Context::CURRENT, set by the
+# dispatcher around the activity body. Calling these outside an activity raises.
+
+# context() -> the current Temporalio::Activity::Context. Raises if not in an
+# activity body.
+sub context () {
+    my $ctx = $Temporalio::Activity::Context::CURRENT;
+    Temporalio::Exception::Runtime->throw(
+        message => 'not in an activity context')
+        unless defined $ctx;
+    return $ctx;
+}
+
+# info() -> the current activity's info hashref.
+sub info () { context()->info }
+
+# heartbeat(@details) -> record a heartbeat on the current activity.
+sub heartbeat (@details) { context()->heartbeat(@details) }
 
 1;
 

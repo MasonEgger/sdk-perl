@@ -531,6 +531,14 @@ my @phase0_attach = (
       [ 'TemporalCoreWorker', 'opaque', 'opaque' ] => 'void' ],
     [ temporal_core_worker_free => 'worker_free',
       [ 'TemporalCoreWorker' ] => 'void' ],
+    # Activity heartbeat (spec section 9.3, T-act-7). SYNCHRONOUS, not a
+    # callback bridge call: the bridge serializes the coresdk.ActivityHeartbeat
+    # proto we pass as a ByteArrayRef and returns NULL on success or an owned
+    # TemporalCoreByteArray describing the error ("Returns error if any. Must be
+    # freed if returned." — header). The Perl side wraps the return with
+    # Temporalio::Core::ByteArray to read + free it.
+    [ temporal_core_worker_record_activity_heartbeat => 'worker_record_activity_heartbeat',
+      [ 'TemporalCoreWorker', 'TemporalCoreByteArrayRef' ] => 'TemporalCoreByteArray' ],
 
     # temporalio-perl-bridge
     [ temporalio_perl_bridge_queue_new => 'queue_new',

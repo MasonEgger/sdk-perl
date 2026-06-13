@@ -156,9 +156,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P2.2.4 Verify
 
 ### P2.3 Activity::Context + heartbeat
-- [ ] P2.3.1 RED: sdk/t/unit/activity_context.t (context scoping, heartbeat proto, T-act-7 unit)
-- [ ] P2.3.2 GREEN: Context.pm + heartbeat FFI attach
-- [ ] P2.3.3 Verify
+- [x] P2.3.1 RED: sdk/t/unit/activity_context.t (context scoping, heartbeat proto, T-act-7 unit)
+- [x] P2.3.2 GREEN: Context.pm + heartbeat FFI attach
+- [x] P2.3.3 Verify
 
 ### P2.4 Activity poll loop (async)
 - [ ] P2.4.1 RED: sdk/t/unit/activity_dispatch.t (T-act-5/8/9, cancel variant, codec, token map)
