@@ -64,8 +64,18 @@ draft has been removed; spec.md is the sole contract.)
   probe: sizeof 96) + client_rpc_call attach; google/rpc/status.proto
   newly vendored (sdk-rust's standalone google/ root — vendor-protos.pl
   updated) and parsed as an explicit proto root alongside
-  errordetails/v1/message.proto (both reachable only via Any). Next:
-  P1.9 common types (RetryPolicy/Priority/TypedSearchAttributes).
+  errordetails/v1/message.proto (both reachable only via Any). P1.9
+  complete: `Temporalio::Common::{RetryPolicy,Priority,SearchAttributeKey,
+  TypedSearchAttributes}` — RetryPolicy/Priority `to_proto` (seconds →
+  google.protobuf.Duration, defaults MUST-match sdk-python common.py:
+  initial 1s/backoff 2.0/max_interval None/attempts 0), the typed-SA
+  system (IndexedValueType numbers TEXT 1…KEYWORD_LIST 7, PascalCase
+  metadata.type, json/plain payload encoding verified against sdk-python
+  converter/_search_attributes.py), and the spec §7.4 untyped-input guard
+  (bare hashref / non-SearchAttributeKey pair → Exception::Argument; no
+  type guessing). TypedSearchAttributes->new is positional (\@pairs) via a
+  glob wrapper over the feature-class constructor. Next: P1.10
+  start_workflow + WorkflowHandle.
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 

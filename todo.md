@@ -124,9 +124,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.8.5 Verify
 
 ### P1.9 Common types
-- [ ] P1.9.1 RED: sdk/t/unit/common_types.t (RetryPolicy proto, SA typed keys, untyped → Argument)
-- [ ] P1.9.2 GREEN: RetryPolicy/Priority/SearchAttributeKey/TypedSearchAttributes
-- [ ] P1.9.3 Verify
+- [x] P1.9.1 RED: sdk/t/unit/common_types.t (RetryPolicy proto, SA typed keys, untyped → Argument)
+- [x] P1.9.2 GREEN: RetryPolicy/Priority/SearchAttributeKey/TypedSearchAttributes
+- [x] P1.9.3 Verify
 
 ### P1.10 start_workflow + WorkflowHandle
 - [ ] P1.10.1 RED: sdk/t/unit/start_workflow_request.t (kwargs→proto, policies, T-cli-start-3/4)
