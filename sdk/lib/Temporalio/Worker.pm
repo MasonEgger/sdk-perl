@@ -21,6 +21,8 @@ use Temporalio::Activity::Pool ();
 use Temporalio::Worker::ActivityDispatcher ();
 use Temporalio::Worker::ActivityRegistry ();
 use Temporalio::Worker::PollLoop ();
+use Temporalio::Worker::WorkflowDispatcher ();
+use Temporalio::Worker::WorkflowRegistry ();
 
 class Temporalio::Worker {
     # --- spec section 8.1 kwargs -----------------------------------------
@@ -57,6 +59,7 @@ class Temporalio::Worker {
     field $sync_activity_workers               :param = 4;
 
     field $activity_registry;
+    field $workflow_registry;
     field $activity_pool;    # Temporalio::Activity::Pool, built lazily in run
     field $worker_ptr;       # TemporalCoreWorker*, NULL until _ensure_worker
     field $worker_keep;      # @keep pinning the packed options buffer
@@ -74,14 +77,17 @@ class Temporalio::Worker {
 
         $activity_registry = Temporalio::Worker::ActivityRegistry->new(
             activities => $activities);
-        # Workflow registration (spec 8.6) needs Temporalio::Workflow::Definition,
-        # which lands in P3.1; v0.1 construction accepts and stores the list.
+        # Workflow registration (spec 8.6): resolve each class name to its
+        # workflow type, requiring one :Run and rejecting duplicates.
+        $workflow_registry = Temporalio::Worker::WorkflowRegistry->new(
+            workflows => $workflows);
     }
 
     method client             { $client }
     method task_queue         { $task_queue }
     method workflows          { $workflows }
     method activity_registry  { $activity_registry }
+    method workflow_registry  { $workflow_registry }
     method is_shutdown        { $is_shutdown }
 
     # _build_worker_options(\@keep) -> opaque pointer to the packed
@@ -188,35 +194,53 @@ class Temporalio::Worker {
     }
 
     # run (spec 8.2 steps 1-5): build + validate the worker if needed, then
-    # drive the activity poll loop (the workflow loop lands in P3.6). Returns
-    # when the loop drains — either because `shutdown` was called mid-run
-    # (initiate_shutdown makes core return the ShutDown sentinel from poll) or
-    # because core shut the worker down for another reason. On the way out it
-    # finalizes and frees the worker (the full graceful sequence deferred from
-    # `shutdown` per the P2.2 deadlock note). T-wkr-4: shutdown mid-run causes
-    # run to return; a second shutdown is a no-op.
+    # drive BOTH the activity poll loop (spec 8.4) and the workflow poll loop
+    # (spec 8.3) concurrently on the IO::Async loop. Returns when BOTH loops
+    # drain — either because `shutdown` was called mid-run (initiate_shutdown
+    # makes core return the ShutDown sentinel from both polls) or because core
+    # shut the worker down. On the way out it finalizes and frees the worker
+    # (the full graceful sequence deferred from `shutdown` per the P2.2 deadlock
+    # note). T-wkr-4: shutdown mid-run causes run to return; a second shutdown is
+    # a no-op.
     async method run () {
         $self->_assert_open;
         await $self->validate;     # _ensure_worker + pre-poll validate
         $is_running = 1;
 
-        my $runtime    = $self->_runtime;
-        my $dispatcher = $self->_build_activity_dispatcher;
-        my $poll_loop  = Temporalio::Worker::PollLoop->new(
-            dispatcher  => $dispatcher,
+        my $runtime           = $self->_runtime;
+        my $activity_dispatcher = $self->_build_activity_dispatcher;
+        my $activity_loop     = Temporalio::Worker::PollLoop->new(
+            dispatcher  => $activity_dispatcher,
             poll_source => sub { return $self->_poll_activity_task },
+            loop        => $runtime->loop,
+        );
+        my $workflow_dispatcher = $self->_build_workflow_dispatcher;
+        my $workflow_loop     = Temporalio::Worker::PollLoop->new(
+            dispatcher  => $workflow_dispatcher,
+            poll_source => sub { return $self->_poll_workflow_activation },
             loop        => $runtime->loop,
         );
 
         my $error;
         {
             local $@;
-            eval { await $poll_loop->run; 1 } or $error = $@;
+            # Drive both loops concurrently; each drains on its own ShutDown
+            # sentinel. wait_all waits for BOTH so neither loop is abandoned mid
+            # task (a still-running workflow/activity completion must be sent).
+            # wait_all never itself fails, so inspect each sub-future and surface
+            # the first failure after both have settled.
+            my $af = $activity_loop->run;
+            my $wf = $workflow_loop->run;
+            eval {
+                await Future->wait_all($af, $wf);
+                $_->is_failed and die(($_->failure)[0]) for $af, $wf;
+                1;
+            } or $error = $@;
         }
 
-        # The loop has drained (sentinel seen). Make sure shutdown was actually
-        # initiated (the loop may have exited because core shut down on its
-        # own), then finalize + free. _finalize_and_free is idempotent.
+        # Both loops have drained (sentinels seen). Make sure shutdown was
+        # actually initiated (a loop may have exited because core shut down on
+        # its own), then finalize + free. _finalize_and_free is idempotent.
         $self->_initiate_shutdown_once;
         await $self->_finalize_and_free;
 
@@ -278,6 +302,21 @@ class Temporalio::Worker {
         );
     }
 
+    # Build the workflow dispatcher with the real completer (worker_complete_
+    # workflow_activation over the callback bridge). The dispatcher caches one
+    # Workflow::Runner per run, applies the codec boundary, and tears down a run
+    # on RemoveFromCache (spec section 8.3).
+    method _build_workflow_dispatcher () {
+        return Temporalio::Worker::WorkflowDispatcher->new(
+            registry       => $workflow_registry,
+            data_converter => $client->data_converter,
+            task_queue     => $task_queue,
+            completer      => sub ($completion_bytes) {
+                return $self->_complete_workflow_activation($completion_bytes);
+            },
+        );
+    }
+
     # Issue worker_poll_activity_task over the callback bridge ('worker_poll'
     # kind): resolves with the serialized ActivityTask bytes, or undef on the
     # ShutDown sentinel.
@@ -306,6 +345,37 @@ class Temporalio::Worker {
                     $worker_ptr, $ref, $user_data, $trampoline);
             });
         # Hold @keep (and $ref) until the completion callback fires.
+        return $f->on_ready(sub { @keep = (); undef $ref });
+    }
+
+    # Issue worker_poll_workflow_activation over the callback bridge
+    # ('worker_poll' kind): resolves with the serialized WorkflowActivation
+    # bytes, or undef on the ShutDown sentinel (spec section 8.3 steps 1-2).
+    method _poll_workflow_activation () {
+        my $runtime = $self->_runtime;
+        return Temporalio::Core::Callback->issue_async(
+            $runtime, worker_poll => sub ($user_data, $trampoline) {
+                Temporalio::Core::FFI::worker_poll_workflow_activation(
+                    $worker_ptr, $user_data, $trampoline);
+            });
+    }
+
+    # Issue worker_complete_workflow_activation over the callback bridge
+    # ('worker' kind, fail-or-nothing). The completion bytes are passed as a
+    # ByteArrayRef; @keep pins the buffer through the call (spec section 8.3
+    # step 9).
+    method _complete_workflow_activation ($completion_bytes) {
+        my $runtime = $self->_runtime;
+        my @keep;
+        my ($data, $size) =
+            Temporalio::Core::FFI::keep_buffer(\@keep, $completion_bytes);
+        my $ref = Temporalio::Core::FFI::ByteArrayRef->new(
+            data => $data, size => $size);
+        my $f = Temporalio::Core::Callback->issue_async(
+            $runtime, worker => sub ($user_data, $trampoline) {
+                Temporalio::Core::FFI::worker_complete_workflow_activation(
+                    $worker_ptr, $ref, $user_data, $trampoline);
+            });
         return $f->on_ready(sub { @keep = (); undef $ref });
     }
 
@@ -428,17 +498,25 @@ Temporalio::Worker - poll a task queue and dispatch workflows and activities
     );
 
     await $worker->validate;     # reaches the server; raises on failure
-    # await $worker->run;        # poll loops land in P2.4/P3.6
+    # await $worker->run;        # drives the activity + workflow poll loops
     await $worker->shutdown;     # initiate -> finalize -> free; idempotent
 
 =head1 DESCRIPTION
 
 The Temporal worker (spec section 8). Construction (spec 8.1) builds the
 activity registry from the C<activities> list
-(L<Temporalio::Worker::ActivityRegistry>) and records the configuration; the
-C<workflows> list is accepted and stored (workflow registration lands with
-L<Temporalio::Workflow::Definition> in a later phase). A missing client or an
+(L<Temporalio::Worker::ActivityRegistry>) and the workflow registry from the
+C<workflows> list (L<Temporalio::Worker::WorkflowRegistry>, spec 8.6 — each
+class must declare one C<:Run>; duplicate types raise). A missing client or an
 empty task queue raises L<Temporalio::Exception::Argument>.
+
+C<run> (spec 8.2) drives the activity poll loop (spec 8.4) and the workflow
+poll loop (spec 8.3) concurrently on the runtime's IO::Async loop, each backed
+by a L<Temporalio::Worker::PollLoop> over its own poll source. The workflow
+loop hands activations to a L<Temporalio::Worker::WorkflowDispatcher> (run_id
+routing, per-run runner cache, codec boundary, RemoveFromCache eviction).
+C<run> returns once both loops drain their C<ShutDown> sentinels, then
+finalizes and frees the worker.
 
 The WorkerOptions are marshalled by L<Temporalio::Core::FFI::WorkerOptions>
 (the hand-packed C<TemporalCoreWorkerOptions> buffer proven in plan P0.10):

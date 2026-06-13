@@ -266,6 +266,25 @@ class Temporalio::Workflow::Runner {
         return $self->_build_completion;
     }
 
+    # evict (spec section 10.3 RemoveFromCache): tear the runner down. Cancel
+    # every pending activity/timer Future and the main run Future so no dangling
+    # continuation survives the run's removal from the dispatcher cache. The
+    # dispatcher drops the run_id -> runner mapping; no workflow code runs and an
+    # empty successful completion is returned (the §8.3 eviction fast path).
+    # MUST-match sdk-python _handle_cache_eviction (deletes the run from
+    # _running_workflows after cancelling its tasks).
+    method evict () {
+        for my $future (values %pending_activities, values %pending_timers) {
+            $future->cancel unless $future->is_ready;
+        }
+        %pending_activities = ();
+        %pending_timers     = ();
+        if (defined $main_run_future && !$main_run_future->is_ready) {
+            $main_run_future->cancel;
+        }
+        return;
+    }
+
     method _apply_job ($job) {
         my $variant = $job->which_variant // '';
         if ($variant eq 'initialize_workflow') {

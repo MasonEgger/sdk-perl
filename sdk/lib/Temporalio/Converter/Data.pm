@@ -63,6 +63,22 @@ class Temporalio::Converter::Data {
             message => "$what failed: $message");
     }
 
+    # codec_encode / codec_decode (\@payloads) -> Future(\@payloads): apply ONLY
+    # the codec chain over a list of Payloads, no value conversion. The workflow
+    # worker boundary (spec section 8.3 steps 5 + 8) encodes/decodes the payloads
+    # embedded in an activation/completion while the runner handles value
+    # conversion with the bare payload_converter. A no-codec converter passes the
+    # list through unchanged.
+    async method codec_encode ($payloads) {
+        return $payloads unless @$payload_codecs;
+        return await $self->_run_codecs(encode => $payloads);
+    }
+
+    async method codec_decode ($payloads) {
+        return $payloads unless @$payload_codecs;
+        return await $self->_run_codecs(decode => $payloads);
+    }
+
     # Run the codec chain over an arrayref of Payloads. Ordering is part of
     # the Temporal spec: encode applies codecs in list order, decode applies
     # them in REVERSE (the last codec on encode is the first on decode).

@@ -202,10 +202,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P3.5.3 Verify
 
 ### P3.6 Workflow poll loop + cache + eviction
-- [ ] P3.6.1 RED: sdk/t/unit/workflow_poll_loop.t (routing, T-wf-14, eviction-last, codec, shutdown)
-- [ ] P3.6.2 GREEN: WorkflowDispatcher.pm + workflow loop + RemoveFromCache teardown
-- [ ] P3.6.3 GREEN: Worker->run runs both loops
-- [ ] P3.6.4 Verify
+- [x] P3.6.1 RED: sdk/t/unit/workflow_poll_loop.t (routing, T-wf-14, eviction-last, codec, shutdown)
+- [x] P3.6.2 GREEN: WorkflowDispatcher.pm + workflow loop + RemoveFromCache teardown
+- [x] P3.6.3 GREEN: Worker->run runs both loops
+- [x] P3.6.4 Verify
 
 ### P3.7 Completion outcomes
 - [ ] P3.7.1 RED: sdk/t/replay/completion_outcomes.t (T-wf-12, T-wf-15a/b/c, T-wf-8, T-wf-13)

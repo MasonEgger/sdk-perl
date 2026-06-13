@@ -546,6 +546,17 @@ my @phase0_attach = (
     [ temporal_core_worker_complete_activity_task => 'worker_complete_activity_task',
       [ 'TemporalCoreWorker', 'TemporalCoreByteArrayRef', 'opaque', 'opaque' ]
         => 'void' ],
+    # Workflow poll/complete (spec section 8.3). Same shapes as the activity
+    # pair: poll uses the 'worker_poll' kind (a TemporalCoreWorkerPollCallback
+    # returning the serialized WorkflowActivation byte array, or null/null on
+    # ShutDown); complete uses the 'worker' kind (a TemporalCoreWorkerCallback,
+    # fail-or-nothing) and takes the serialized WorkflowActivationCompletion as a
+    # ByteArrayRef that must live through the callback.
+    [ temporal_core_worker_poll_workflow_activation => 'worker_poll_workflow_activation',
+      [ 'TemporalCoreWorker', 'opaque', 'opaque' ] => 'void' ],
+    [ temporal_core_worker_complete_workflow_activation => 'worker_complete_workflow_activation',
+      [ 'TemporalCoreWorker', 'TemporalCoreByteArrayRef', 'opaque', 'opaque' ]
+        => 'void' ],
     # Activity heartbeat (spec section 9.3, T-act-7). SYNCHRONOUS, not a
     # callback bridge call: the bridge serializes the coresdk.ActivityHeartbeat
     # proto we pass as a ByteArrayRef and returns NULL on success or an owned
