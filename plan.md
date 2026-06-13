@@ -43,8 +43,19 @@ draft has been removed; spec.md is the sole contract.)
   DataConverter); `Failure->default` added per spec §5.1. CAUTION: with
   Future::AsyncAwait loaded, only ONE `class X :isa(Y)` parses per file
   on perl 5.38.2 — keep one :isa class per file (the test codecs are
-  split into sdk/t/lib/TestCodec/*.pm for this reason). Next: P1.7
-  client connect + configs.
+  split into sdk/t/lib/TestCodec/*.pm for this reason). P1.7 complete:
+  `Temporalio::Client->connect` (async, T-cli-connect-1..4 live against
+  the dev server) + `Client::Connection` (ptr owner, update_api_key,
+  close/free) + Tls/Retry/KeepAlive configs (MUST-match defaults verified
+  against sdk-python service.py and sdk-ruby connection.rb; NOTE the
+  local sdk-rust checkout's `RetryOptions::default` drifted to multiplier
+  1.7 upstream — spec §7.2 and both reference SDKs say 1.5, spec wins);
+  ConnectionOptions/ClientTlsOptions/ClientRetryOptions/
+  ClientKeepAliveOptions records + client_connect/client_free/
+  client_update_api_key attaches in Core::FFI (metadata is a
+  ByteArrayRefArray — entry COUNT, not byte length; built via the new
+  `keep_byte_array_ref_array`). Next: P1.8 client_rpc_call + §7.5
+  error mapping.
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 

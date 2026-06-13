@@ -106,6 +106,87 @@ package Temporalio::Core::FFI::DevServerOptions {
     );
 }
 
+package Temporalio::Core::FFI::ClientTlsOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreClientTlsOptions (client.rs / header): four
+    # ByteArrayRef members flattened to (data, size) pairs. NULL refs mean
+    # "unset": system CA roots, no SNI override, no mTLS pair. The bridge
+    # requires client_cert and client_private_key to be both set or both
+    # NULL (Temporalio::Client::TlsConfig enforces this Perl-side).
+    record_layout_1(
+        opaque => 'server_root_ca_cert_data',
+        size_t => 'server_root_ca_cert_size',
+        opaque => 'domain_data',
+        size_t => 'domain_size',
+        opaque => 'client_cert_data',
+        size_t => 'client_cert_size',
+        opaque => 'client_private_key_data',
+        size_t => 'client_private_key_size',
+    );
+}
+
+package Temporalio::Core::FFI::ClientRetryOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreClientRetryOptions (client.rs / header):
+    #   { uint64_t initial_interval_millis; double randomization_factor;
+    #     double multiplier; uint64_t max_interval_millis;
+    #     uint64_t max_elapsed_time_millis; uintptr_t max_retries; }
+    # max_elapsed_time_millis 0 maps to None (unlimited) in the bridge.
+    record_layout_1(
+        uint64 => 'initial_interval_millis',
+        double => 'randomization_factor',
+        double => 'multiplier',
+        uint64 => 'max_interval_millis',
+        uint64 => 'max_elapsed_time_millis',
+        size_t => 'max_retries',
+    );
+}
+
+package Temporalio::Core::FFI::ClientKeepAliveOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreClientKeepAliveOptions
+    #   { uint64_t interval_millis; uint64_t timeout_millis; }
+    record_layout_1(
+        uint64 => 'interval_millis',
+        uint64 => 'timeout_millis',
+    );
+}
+
+package Temporalio::Core::FFI::ConnectionOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreConnectionOptions (client.rs / header): seven
+    # ByteArrayRef/MetadataRef members flattened to (data, size) pairs,
+    # then seven pointer members. NOTE: metadata and binary_metadata are
+    # TemporalCoreMetadataRef (= ByteArrayRefArray), so their _data points
+    # at a packed array of ByteArrayRef structs and their _size is the
+    # ENTRY COUNT, not a byte length — build them with
+    # Temporalio::Core::FFI::keep_byte_array_ref_array. Every member is
+    # 8-aligned on x86-64, so the record layout has no interior padding.
+    record_layout_1(
+        opaque => 'target_url_data',
+        size_t => 'target_url_size',
+        opaque => 'client_name_data',
+        size_t => 'client_name_size',
+        opaque => 'client_version_data',
+        size_t => 'client_version_size',
+        opaque => 'metadata_data',
+        size_t => 'metadata_size',
+        opaque => 'binary_metadata_data',
+        size_t => 'binary_metadata_size',
+        opaque => 'api_key_data',
+        size_t => 'api_key_size',
+        opaque => 'identity_data',
+        size_t => 'identity_size',
+        opaque => 'tls_options',
+        opaque => 'retry_options',
+        opaque => 'keep_alive_options',
+        opaque => 'http_connect_proxy_options',
+        opaque => 'grpc_override_callback',
+        opaque => 'grpc_override_callback_user_data',
+        opaque => 'dns_load_balancing_options',
+    );
+}
+
 package Temporalio::Core::FFI::LoggingOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreLoggingOptions
@@ -251,6 +332,10 @@ $ffi->type('opaque' => $_) for qw(
 
 # Record type aliases for the by-value structs declared above.
 $ffi->type('record(Temporalio::Core::FFI::ByteArrayRef)'         => 'TemporalCoreByteArrayRef');
+$ffi->type('record(Temporalio::Core::FFI::ClientTlsOptions)'       => 'TemporalCoreClientTlsOptions');
+$ffi->type('record(Temporalio::Core::FFI::ClientRetryOptions)'     => 'TemporalCoreClientRetryOptions');
+$ffi->type('record(Temporalio::Core::FFI::ClientKeepAliveOptions)' => 'TemporalCoreClientKeepAliveOptions');
+$ffi->type('record(Temporalio::Core::FFI::ConnectionOptions)'      => 'TemporalCoreConnectionOptions');
 $ffi->type('record(Temporalio::Core::FFI::TestServerOptions)'    => 'TemporalCoreTestServerOptions');
 $ffi->type('record(Temporalio::Core::FFI::DevServerOptions)'     => 'TemporalCoreDevServerOptions');
 $ffi->type('record(Temporalio::Core::FFI::LoggingOptions)'       => 'TemporalCoreLoggingOptions');
@@ -284,6 +369,23 @@ sub keep_buffer ($keep, $scalar) {
 sub keep_record ($keep, $record) {
     push @$keep, $record;
     return $ffi->cast('record(' . ref($record) . ')*' => 'opaque', $record);
+}
+
+# keep_byte_array_ref_array(\@keep, \@strings) — packs a contiguous array
+# of TemporalCoreByteArrayRef structs (one per string) into kept memory and
+# returns ($data_ptr, $count) for a TemporalCoreByteArrayRefArray member
+# (e.g. TemporalCoreMetadataRef, whose entries are each "key\nvalue").
+# pack('Q') assumes LP64 little-endian, the same x86-64 SysV assumption as
+# Temporalio::Core::FFI::WorkerOptions. Returns (undef, 0) for undef/empty.
+sub keep_byte_array_ref_array ($keep, $strings) {
+    return (undef, 0) unless defined $strings && @$strings;
+    my $elements = '';
+    for my $string (@$strings) {
+        my ($data, $size) = keep_buffer($keep, $string);
+        $elements .= pack('Q Q', $data, $size);
+    }
+    my ($elements_ptr) = keep_buffer($keep, $elements);
+    return ($elements_ptr, scalar @$strings);
 }
 
 # encode_newline_map($hashref) — encodes a hash as the C bridge's
@@ -335,6 +437,18 @@ my @phase0_attach = (
       [ 'TemporalCoreCancellationToken' ] => 'void' ],
     [ temporal_core_cancellation_token_free => 'cancellation_token_free',
       [ 'TemporalCoreCancellationToken' ] => 'void' ],
+    # Client connect/free/api-key rotation (spec section 7.3). The connect
+    # callback arguments are the shim trampoline pointer (connect kind) and
+    # the shim (queue, callback_id) user_data pair, both passed as opaque.
+    # Per client.rs: the runtime must live as long as the client, and the
+    # options struct must live through the callback.
+    [ temporal_core_client_connect => 'client_connect',
+      [ 'TemporalCoreRuntime', 'record(Temporalio::Core::FFI::ConnectionOptions)*',
+        'opaque', 'opaque' ] => 'void' ],
+    [ temporal_core_client_free => 'client_free',
+      [ 'TemporalCoreConnection' ] => 'void' ],
+    [ temporal_core_client_update_api_key => 'client_update_api_key',
+      [ 'TemporalCoreConnection', 'TemporalCoreByteArrayRef' ] => 'void' ],
     # Ephemeral dev server (spec section 12.2). The callback arguments are
     # the shim trampoline pointers (server_start / server_shutdown kinds),
     # passed as opaque; user_data is the shim (queue, callback_id) pair.

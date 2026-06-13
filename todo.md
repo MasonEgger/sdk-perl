@@ -110,11 +110,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.6.3 Verify
 
 ### P1.7 Client connect + configs + update_api_key
-- [ ] P1.7.1 RED: sdk/t/unit/client_config.t (PEM detection, defaults, identity)
-- [ ] P1.7.2 GREEN: TlsConfig/RetryConfig/KeepAliveConfig
-- [ ] P1.7.3 RED: sdk/t/integration/client_connect.t (T-cli-connect-1..4)
-- [ ] P1.7.4 GREEN: Client->connect + Connection.pm + FFI attaches
-- [ ] P1.7.5 Verify
+- [x] P1.7.1 RED: sdk/t/unit/client_config.t (PEM detection, defaults, identity)
+- [x] P1.7.2 GREEN: TlsConfig/RetryConfig/KeepAliveConfig
+- [x] P1.7.3 RED: sdk/t/integration/client_connect.t (T-cli-connect-1..4)
+- [x] P1.7.4 GREEN: Client->connect + Connection.pm + FFI attaches
+- [x] P1.7.5 Verify
 
 ### P1.8 client_rpc_call + error mapping
 - [ ] P1.8.1 RED: sdk/t/unit/rpc_mapping.t (§7.5 table-driven)
