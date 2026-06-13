@@ -250,9 +250,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 5 — Hardening
 
 ### P5.1 Cancellation end-to-end
-- [ ] P5.1.1 RED: sdk/t/integration/cancellation.t (cancel chain, abandon type)
-- [ ] P5.1.2 GREEN: propagation fixes
-- [ ] P5.1.3 Verify
+- [x] P5.1.1 RED: sdk/t/integration/cancellation.t (cancel chain, abandon type)
+- [x] P5.1.2 GREEN: propagation fixes
+- [x] P5.1.3 Verify
 
 ### P5.2 RPC special-case audit
 - [ ] P5.2.1 RED: sdk/t/integration/error_paths.t (T-cli-result-2/4/5)

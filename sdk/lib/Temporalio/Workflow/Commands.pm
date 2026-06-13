@@ -85,6 +85,19 @@ sub cancel_timer ($seq) {
     return _command_class()->new({ cancel_timer => { seq => $seq } });
 }
 
+# request_cancel_activity { seq } — emitted when a scheduled activity's
+# Workflow::Future is cancelled (spec section 10.3 / T-act-9; MUST-match
+# sdk-python _ActivityHandle._apply_cancel_command, which sets
+# command.request_cancel_activity.seq). $seq is the seq of the ScheduleActivity
+# being cancelled. Core forwards the cancellation to the activity per the
+# activity's ActivityCancellationType: TRY_CANCEL / WAIT_CANCELLATION_COMPLETED
+# tell the running activity to cancel; ABANDON never emits this command at all
+# (the workflow stops waiting without asking core to cancel the activity — see
+# Temporalio::Workflow::Runner::_ActivityFuture).
+sub request_cancel_activity ($seq) {
+    return _command_class()->new({ request_cancel_activity => { seq => $seq } });
+}
+
 # respond_to_query { query_id, succeeded|failed } — answers a QueryWorkflow job
 # (spec section 10.3; MUST-match sdk-python _apply_query_workflow which sets
 # command.respond_to_query.query_id and either .succeeded.response (one result
@@ -206,6 +219,16 @@ and the C<google.protobuf.Duration> conversion).
 C<CancelTimer { seq }> — emitted when a started timer's
 L<Temporalio::Workflow::Future> is cancelled. C<$seq> is the seq of the
 C<StartTimer> being cancelled.
+
+=item C<request_cancel_activity($seq)>
+
+C<RequestCancelActivity { seq }> — emitted when a scheduled activity's
+L<Temporalio::Workflow::Future> is cancelled (e.g. by a C<CancelWorkflow> job
+propagating down the cancellation tree). C<$seq> is the seq of the
+C<ScheduleActivity> being cancelled. Core forwards the request to the running
+activity according to the activity's C<ActivityCancellationType>; an
+C<abandon>-typed activity never emits this command (the workflow stops waiting
+without asking core to cancel the activity).
 
 =item C<respond_to_query($query_id, %parts)>
 

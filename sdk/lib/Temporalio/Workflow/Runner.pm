@@ -93,6 +93,19 @@ class Temporalio::Workflow::Runner {
     # join analogous maps.
     field %pending_activities;
 
+    # Activity seqs whose Future was cancelled before/while a ResolveActivity
+    # arrived (spec section 10.3 cancel chain / T-act-9). When a CancelWorkflow
+    # propagates down the tree, each in-flight activity Future is cancelled: it
+    # emits RequestCancelActivity (unless ABANDON) and fails its Future with
+    # Cancelled immediately so the awaiting body completes cancelled in the same
+    # activation (mirroring sdk-python's asyncio.shield: the await raises
+    # CancelledError while the underlying op resolves later). Core still sends a
+    # later ResolveActivity{cancelled} for the same seq; this set lets
+    # _apply_resolve_activity treat that as a tolerated STALE resolution rather
+    # than an unknown-seq non-determinism error (the same way _apply_fire_timer
+    # tolerates a stale FireTimer for a cancelled timer). Run-scoped.
+    field %cancelled_activity_seqs;
+
     # Pending timer Futures keyed by their StartTimer seq: { seq => $future }.
     # Resolved imperatively when the matching FireTimer job arrives (P3.5), or
     # removed and failed-as-cancelled when the timer Future is cancelled.
@@ -309,9 +322,32 @@ class Temporalio::Workflow::Runner {
         push @commands,
             Temporalio::Workflow::Commands::schedule_activity(\%fields);
 
+        # ABANDON (ActivityCancellationType=2): on cancel, the workflow stops
+        # waiting WITHOUT asking core to cancel the activity — so the Future's
+        # cancel emits NO RequestCancelActivity (proto comment: "Do not request
+        # cancellation of the activity and immediately report cancellation to
+        # the workflow"). TRY_CANCEL (0) / WAIT_CANCELLATION_COMPLETED (1) emit
+        # RequestCancelActivity so core forwards the cancel to the running
+        # activity (MUST-match sdk-python _ActivityHandle._apply_cancel_command).
+        my $is_abandon = $fields{cancellation_type} == 2 ? 1 : 0;
+
         # Register the pending Future the body awaits; the runner resolves it
-        # imperatively from the ResolveActivity job (never via IO::Async).
-        my $future = Temporalio::Workflow::Future->new;
+        # imperatively from the ResolveActivity job (never via IO::Async). The
+        # _ActivityFuture cancel hook emits RequestCancelActivity (unless
+        # abandon), records the seq as cancelled (so a later stale
+        # ResolveActivity{cancelled} from core is tolerated, not flagged as
+        # non-determinism), de-registers the pending entry, and fails the Future
+        # with Cancelled — the await raises Cancelled in the same activation.
+        my $future = Temporalio::Workflow::Runner::_ActivityFuture->_new_activity(
+            seq       => $seq,
+            on_cancel => sub {
+                return unless delete $pending_activities{$seq};
+                $cancelled_activity_seqs{$seq} = 1;
+                push @commands,
+                    Temporalio::Workflow::Commands::request_cancel_activity($seq)
+                    unless $is_abandon;
+            },
+        );
         $pending_activities{$seq} = $future;
         return $future;
     }
@@ -606,6 +642,13 @@ class Temporalio::Workflow::Runner {
         my $seq    = $job->seq;
         my $future = delete $pending_activities{$seq};
         unless (defined $future) {
+            # A seq we already cancelled (its Future was failed Cancelled when
+            # the cancel chain ran) gets a tolerated STALE ResolveActivity from
+            # core afterwards — drop it, exactly as _apply_fire_timer drops a
+            # stale FireTimer for a cancelled timer (spec section 10.3 cancel
+            # chain / T-act-9). Not a non-determinism error.
+            return if delete $cancelled_activity_seqs{$seq};
+
             # An unknown seq is a non-determinism error (spec section 10.3 /
             # T-wf-13): the activation references a command this workflow never
             # emitted. Stash it (do NOT die here — the dynamically-scoped
@@ -674,19 +717,23 @@ class Temporalio::Workflow::Runner {
     method _apply_cancel_workflow ($job) {
         $cancel_requested = 1;
 
-        # Fail every pending activity Future with Cancelled so the await site
-        # raises a proper Temporal cancellation (a natively-cancelled Future
-        # would surface a bare "was cancelled" string, losing the exception
-        # identity — same reasoning as the timer Future override). Timer Futures
-        # carry their own cancel override (emits CancelTimer + fails Cancelled),
-        # so ->cancel them. Continuations run synchronously at resolve time, so
-        # the body observes the cancellation before _pump/_build_completion.
+        # Propagate the cancellation down the tree (spec section 10.3 cancel
+        # chain / T-act-9; MUST-match sdk-python _apply_cancel_workflow ->
+        # primary task cancel -> the await in each child op raises CancelledError
+        # and its handle emits the per-op cancel command). Cancel every pending
+        # activity Future via its own cancel hook: that emits RequestCancelActivity
+        # (so core forwards the cancel to the running activity — unless the
+        # activity is ABANDON-typed, which never asks core to cancel) and then
+        # fails the Future with Cancelled, so the awaiting body raises a proper
+        # Temporal cancellation (a natively-cancelled Future would surface a bare
+        # "was cancelled" string, losing the exception identity). Timer Futures
+        # carry the analogous override (emit CancelTimer + fail Cancelled).
+        # Continuations run synchronously at resolve time, so the body observes
+        # the cancellation before _pump/_build_completion.
         for my $seq (keys %pending_activities) {
-            my $future = delete $pending_activities{$seq};
+            my $future = $pending_activities{$seq};
             next if !defined $future || $future->is_ready;
-            $future->fail(Temporalio::Exception::Cancelled->new(
-                message => 'Workflow execution cancelled',
-            ));
+            $future->cancel;
         }
         for my $seq (keys %pending_timers) {
             my $future = $pending_timers{$seq};
@@ -1250,6 +1297,47 @@ package Temporalio::Workflow::Runner::_TimerFuture {
         }
         $self->fail(Temporalio::Exception::Cancelled->new(
             message => 'Timer cancelled',
+        ));
+        return $self;
+    }
+}
+
+# A Workflow::Future for activities whose ->cancel maps to a Temporalio::
+# Exception::Cancelled FAILURE (not Future's native cancelled state), mirroring
+# _TimerFuture. The on_cancel callback (supplied by schedule_activity) emits
+# RequestCancelActivity (unless the activity is ABANDON-typed), records the seq
+# as cancelled so a later stale ResolveActivity{cancelled} is tolerated, and
+# de-registers the pending entry. The cancel then fails the Future with
+# Cancelled so the awaiting body raises a proper Temporal cancellation
+# (a natively-cancelled CPAN Future would surface a bare "was cancelled" string,
+# losing the exception identity — same reasoning as the timer override). This
+# is the activity end of the spec section 10.3 cancel chain (T-act-9).
+package Temporalio::Workflow::Runner::_ActivityFuture {
+    use v5.38;
+    use warnings;
+
+    use parent -norequire, 'Temporalio::Workflow::Future';
+    use Temporalio::Exception::Cancelled ();
+
+    # _new_activity(seq => $seq, on_cancel => $cb) -> a pending activity future.
+    # The on_cancel callback runs exactly once, on the first ->cancel of a
+    # still-pending activity.
+    sub _new_activity ($class, %args) {
+        my $self = $class->new;
+        $self->{_activity_on_cancel} = $args{on_cancel};
+        return $self;
+    }
+
+    # cancel: run the stored callback (emit RequestCancelActivity unless abandon,
+    # record the cancelled seq, de-register) then fail the future with Cancelled.
+    # A no-op once the future is ready (already resolved or already cancelled).
+    sub cancel ($self) {
+        return $self if $self->is_ready;
+        if (my $cb = delete $self->{_activity_on_cancel}) {
+            $cb->();
+        }
+        $self->fail(Temporalio::Exception::Cancelled->new(
+            message => 'Activity cancelled',
         ));
         return $self;
     }

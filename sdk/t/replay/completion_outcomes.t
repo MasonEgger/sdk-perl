@@ -174,11 +174,16 @@ T2->subtest('continue_as_new -> ContinueAsNewWorkflowExecution (T-wf-8)' => sub 
 });
 
 # ---------------------------------------------------------------------------
-# T-wf-12: a CancelWorkflow job cancels the pending activity Future, the
-# Cancelled propagates out of :Run, and the outcome is CancelWorkflowExecution
-# (de facto spec: NOT FailWorkflowExecution).
+# T-wf-12 / T-act-9: a CancelWorkflow job cancels the pending activity Future,
+# which propagates the cancellation down the tree — emitting a
+# RequestCancelActivity for the in-flight activity (so core forwards the cancel
+# to the running activity) — and the Cancelled then propagates out of :Run, so
+# the outcome is CancelWorkflowExecution (de facto spec: NOT
+# FailWorkflowExecution). Both commands land in the same activation completion,
+# mirroring sdk-python's asyncio.shield: the await raises CancelledError (-> the
+# workflow completes cancelled) while the activity cancel command is emitted.
 # ---------------------------------------------------------------------------
-T2->subtest('CancelWorkflow -> CancelWorkflowExecution (T-wf-12)' => sub {
+T2->subtest('CancelWorkflow -> RequestCancelActivity + CancelWorkflowExecution (T-wf-12 / T-act-9)' => sub {
     my $harness = Temporalio::Test::WorkflowReplay->new(
         workflow_class => 'WfDef::CancelAwaiter',
     );
@@ -192,15 +197,59 @@ T2->subtest('CancelWorkflow -> CancelWorkflowExecution (T-wf-12)' => sub {
     T2->is($first[0]->which_variant, 'schedule_activity',
         'first activation schedules the activity');
 
-    # Second activation: CancelWorkflow cancels the pending activity Future.
+    # Second activation: CancelWorkflow cancels the pending activity Future,
+    # which emits RequestCancelActivity (the cancel chain) and raises Cancelled
+    # in the body -> CancelWorkflowExecution.
     my @second = $harness->push_activation(activation({
         run_id => 'r1',
         timestamp => { seconds => 2 },
         jobs => [ { cancel_workflow => {} } ],
     }));
-    T2->is(scalar @second, 1, 'one command after cancellation');
-    T2->is($second[0]->which_variant, 'cancel_workflow_execution',
+    my %variants = map { $_->which_variant => 1 } @second;
+    T2->ok($variants{request_cancel_activity},
+        'cancel chain emits RequestCancelActivity for the in-flight activity');
+    T2->ok($variants{cancel_workflow_execution},
         'CancelWorkflowExecution (not a failure)');
+
+    # The RequestCancelActivity targets the activity's seq (1 — first activity).
+    my ($rca) = grep { $_->which_variant eq 'request_cancel_activity' } @second;
+    T2->is($rca->request_cancel_activity->seq, 1,
+        'RequestCancelActivity carries the activity seq');
+});
+
+# ---------------------------------------------------------------------------
+# T-act-9 (abandon): an ABANDON-typed activity does NOT emit
+# RequestCancelActivity on a CancelWorkflow — the workflow stops waiting
+# immediately without asking core to cancel the activity (proto: "Do not
+# request cancellation of the activity and immediately report cancellation to
+# the workflow"). The workflow still completes cancelled.
+# ---------------------------------------------------------------------------
+T2->subtest('CancelWorkflow with abandon activity -> no RequestCancelActivity (T-act-9 abandon)' => sub {
+    my $harness = Temporalio::Test::WorkflowReplay->new(
+        workflow_class => 'WfDef::AbandonAwaiter',
+    );
+
+    my @first = $harness->push_activation(activation({
+        run_id => 'r1',
+        timestamp => { seconds => 1 },
+        jobs => [ { initialize_workflow => { workflow_type => 'run' } } ],
+    }));
+    T2->is($first[0]->which_variant, 'schedule_activity',
+        'first activation schedules the abandon activity');
+    # The ScheduleActivity carries cancellation_type ABANDON (enum 2).
+    T2->is($first[0]->schedule_activity->cancellation_type, 2,
+        'ScheduleActivity carries cancellation_type ABANDON (2)');
+
+    my @second = $harness->push_activation(activation({
+        run_id => 'r1',
+        timestamp => { seconds => 2 },
+        jobs => [ { cancel_workflow => {} } ],
+    }));
+    my %variants = map { $_->which_variant => 1 } @second;
+    T2->ok(!$variants{request_cancel_activity},
+        'abandon: no RequestCancelActivity is emitted');
+    T2->ok($variants{cancel_workflow_execution},
+        'abandon: workflow still completes CancelWorkflowExecution');
 });
 
 # ---------------------------------------------------------------------------
