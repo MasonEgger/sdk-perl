@@ -186,10 +186,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P3.2.3 Verify
 
 ### P3.3 Runner core + replay harness
-- [ ] P3.3.1 RED: sdk/t/replay/runner_basics.t (trivial complete, now/time, NoRunner, seed T-wf-10)
-- [ ] P3.3.2 GREEN: Runner.pm skeleton + Commands.pm + Test/WorkflowReplay.pm
-- [ ] P3.3.3 REFACTOR: pump loop per §10.3
-- [ ] P3.3.4 Verify
+- [x] P3.3.1 RED: sdk/t/replay/runner_basics.t (trivial complete, now/time, NoRunner, seed T-wf-10)
+- [x] P3.3.2 GREEN: Runner.pm skeleton + Commands.pm + Test/WorkflowReplay.pm
+- [x] P3.3.3 REFACTOR: pump loop per §10.3
+- [x] P3.3.4 Verify
 
 ### P3.4 execute_activity + ResolveActivity
 - [ ] P3.4.1 RED: sdk/t/replay/activities.t (T-wf-1/2/7, seq allocation)

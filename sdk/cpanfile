@@ -21,6 +21,10 @@ recommends 'Linux::FD';
 # Exceptions (spec section 16.1)
 requires 'Devel::StackTrace';
 
+# Deterministic workflow clock: Temporalio::Workflow::now returns a DateTime at
+# the activation timestamp, never the OS clock (spec section 10.4).
+requires 'DateTime';
+
 # Logging interop (spec section 16.4)
 requires 'Log::Any';
 
