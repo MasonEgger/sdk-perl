@@ -9,6 +9,8 @@ use warnings;
 # `class My::Workflow :isa(Temporalio::Workflow::Definition)`. Loading the base
 # here means the author does not have to `use` it separately, and the
 # :Run/:Signal/:Query/:Update/:Init attribute handlers are in scope.
+use Scalar::Util ();
+
 use Temporalio::Workflow::Definition ();
 use Temporalio::Exception::Workflow::NoRunner ();
 
@@ -51,6 +53,47 @@ sub random { return _runner()->random }
 # info -> the WorkflowInfo hashref (run_id, workflow_type, ... grows in later
 # phases as more fields are threaded through the activation).
 sub info { return _runner()->info }
+
+# --- activity invocation (spec section 10.2) --------------------------------
+
+# Resolve the first positional argument of execute_activity/start_activity to
+# an activity-type name string. Accepts a plain string (used verbatim), a
+# Temporalio::Activity::FunctionDefinition (->name), or an activity definition
+# class/object exposing _activity_type / activity_type. Mirrors the reference
+# SDKs, which accept a name, a function, or a definition.
+sub _activity_type_name ($activity) {
+    if (Scalar::Util::blessed($activity)) {
+        return $activity->name if $activity->can('name');
+        return $activity->activity_type if $activity->can('activity_type');
+    }
+    # A plain string (the common case) is the activity type verbatim.
+    return $activity;
+}
+
+# execute_activity($activity, %opts) -> Future of the activity result. Emits a
+# ScheduleActivity command and returns the Workflow::Future the runner resolves
+# from the matching ResolveActivity job. `await` it to get the result (or have
+# the activity failure raised). %opts are the spec section 10.2 kwargs (args,
+# the four timeouts, retry_policy, task_queue, activity_id, cancellation_type,
+# headers, ...).
+sub execute_activity ($activity, %opts) {
+    return _runner()->schedule_activity(
+        activity_type => _activity_type_name($activity),
+        %opts,
+    );
+}
+
+# start_activity($activity, %opts) -> the activity handle (a Workflow::Future).
+# Same scheduling as execute_activity; returned without awaiting so the caller
+# can start several activities concurrently before awaiting them. (The richer
+# ActivityHandle surface — cancel, result — is a Workflow::Future today; it
+# grows in a later phase.)
+sub start_activity ($activity, %opts) {
+    return _runner()->schedule_activity(
+        activity_type => _activity_type_name($activity),
+        %opts,
+    );
+}
 
 1;
 

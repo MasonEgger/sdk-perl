@@ -45,6 +45,18 @@ sub cancel_workflow_execution () {
     return _command_class()->new({ cancel_workflow_execution => {} });
 }
 
+# schedule_activity { ... } — emitted when the workflow body calls
+# Temporalio::Workflow::execute_activity / start_activity (spec section 10.2).
+# $fields is the already-assembled ScheduleActivity field hashref (seq,
+# activity_id, activity_type, task_queue, arguments, the four timeout Durations,
+# retry_policy, cancellation_type, headers, ...). The runner builds the field
+# set (it owns seq allocation, timeout conversion, and the default task queue);
+# this builder just wraps it in the command oneof so the construction site
+# stays consistent with the other command builders.
+sub schedule_activity ($fields) {
+    return _command_class()->new({ schedule_activity => $fields });
+}
+
 1;
 
 __END__
@@ -69,10 +81,9 @@ with exactly one variant set; the L<Temporalio::Workflow::Runner> buffers them
 during an activation and drains the buffer into the
 C<WorkflowActivationCompletion> it returns to the worker.
 
-The set grows as later phases land: C<schedule_activity> (P3.4),
-C<start_timer> / C<cancel_timer> (P3.5),
+The set grows as later phases land: C<start_timer> / C<cancel_timer> (P3.5),
 C<continue_as_new_workflow_execution> (P3.7), and so on. This module hosts the
-completion-outcome commands needed by the runner skeleton.
+completion-outcome commands and C<schedule_activity> (P3.4).
 
 =head1 FUNCTIONS
 
@@ -93,6 +104,13 @@ C<temporal.api.failure.v1.Failure> proto.
 
 C<CancelWorkflowExecution {}> — the cancellation outcome (de facto Temporal
 spec: a C<Cancelled> escape after C<CancelWorkflow> is NOT a failure).
+
+=item C<schedule_activity($fields)>
+
+C<ScheduleActivity { ... }> — emitted when the workflow body calls
+C<Temporalio::Workflow::execute_activity> / C<start_activity>. C<$fields> is
+the assembled C<ScheduleActivity> field hashref (the runner owns seq
+allocation, timeout conversion, and the default task queue).
 
 =back
 

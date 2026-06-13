@@ -11,7 +11,9 @@ use Scalar::Util ();
 use Syntax::Keyword::Dynamically;
 
 use Temporalio::Workflow::Commands ();
+use Temporalio::Workflow::Future ();
 use Temporalio::Converter::Payload ();
+use Temporalio::Converter::Failure ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Workflow::NoRunner ();
 
@@ -41,10 +43,32 @@ class Temporalio::Workflow::Runner {
     # harness uses the default composite; a worker injects its data converter.
     field $payload_converter :param = undef;
 
+    # Failure converter for ResolveActivity{failed/cancelled} job failures
+    # (maps the Failure proto to a Temporalio::Exception::* at the await site).
+    field $failure_converter :param = undef;
+
+    # The workflow's own task queue — the default task queue for scheduled
+    # activities when execute_activity/start_activity does not override it
+    # (MUST-match sdk-python: ScheduleActivity.task_queue defaults to the
+    # workflow execution's task queue). The replay harness leaves it undef.
+    field $task_queue :param = undef;
+
     field $instance;                 # the workflow Definition instance
     field $workflow_type;            # resolved run type name
     field @commands;                 # outbound WorkflowCommand buffer
     field $main_run_future;          # the Future returned by :Run
+
+    # Sequence counter for command emission (spec section 10.3): workflow-scoped,
+    # monotonic, starting at 1. Allocated when a ScheduleActivity (P3.4) /
+    # StartTimer (P3.5) / ... command is emitted, and matched on the
+    # corresponding ResolveActivity / FireTimer job.
+    field $seq_counter = 0;
+
+    # Pending activity Futures keyed by their command seq: { seq => $future }.
+    # The Workflow::Future for each in-flight activity, resolved imperatively
+    # when its ResolveActivity job arrives (P3.4). Timers (P3.5) and child
+    # workflows (Phase 6+) join analogous maps.
+    field %pending_activities;
 
     # Activation context (set per activation; never the OS clock).
     field $activation_seconds = 0;
@@ -57,6 +81,7 @@ class Temporalio::Workflow::Runner {
 
     ADJUST {
         $payload_converter //= Temporalio::Converter::Payload->default;
+        $failure_converter //= Temporalio::Converter::Failure->default;
         # Lazily load the workflow class if the caller has not already (the
         # replay harness accepts a class name without requiring it first).
         if (!$workflow_class->can('_workflow_type')) {
@@ -86,6 +111,79 @@ class Temporalio::Workflow::Runner {
         };
     }
 
+    # --- activity scheduling (spec section 10.2 / 10.3) ----------------------
+
+    # schedule_activity(%opts) -> a Temporalio::Workflow::Future resolved when
+    # the matching ResolveActivity job arrives. Allocates the next seq, builds
+    # the ScheduleActivity command, buffers it, and registers the pending
+    # Future. The Workflow:: functional surface (execute_activity/start_activity)
+    # delegates here. %opts mirrors the spec section 10.2 kwargs:
+    #   activity_type (required), args (arrayref), task_queue, activity_id,
+    #   schedule_to_close_timeout, schedule_to_start_timeout,
+    #   start_to_close_timeout, heartbeat_timeout (all seconds), retry_policy
+    #   (Temporalio::Common::RetryPolicy), cancellation_type (string), headers.
+    method schedule_activity (%opts) {
+        my $activity_type = $opts{activity_type}
+            // die "Temporalio::Workflow::Runner: schedule_activity needs an "
+                 . "activity_type";
+
+        my $seq = ++$seq_counter;   # workflow-scoped, monotonic from 1.
+
+        # Convert the activity arguments to payloads (MUST-match sdk-python:
+        # arguments converted before the command is built so a converter error
+        # surfaces at the call site, not later).
+        my @args = map { $payload_converter->to_payload($_) }
+            (($opts{args} // [])->@*);
+
+        my %fields = (
+            seq           => $seq,
+            # activity_id defaults to the seq as a string (sdk-python parity).
+            activity_id   => (defined $opts{activity_id}
+                ? $opts{activity_id} : "$seq"),
+            activity_type => $activity_type,
+            # task_queue defaults to the workflow's own queue (sdk-python parity);
+            # the replay harness has no queue, so default to empty string.
+            task_queue    => ($opts{task_queue} // $task_queue // ''),
+            (@args ? (arguments => [@args]) : ()),
+            # cancellation_type: spec string -> proto enum number (default
+            # try_cancel = 0).
+            cancellation_type =>
+                _cancellation_type_number($opts{cancellation_type}),
+        );
+
+        # The four timeouts: seconds -> google.protobuf.Duration, only when set.
+        for my $t (qw(schedule_to_close_timeout schedule_to_start_timeout
+            start_to_close_timeout heartbeat_timeout))
+        {
+            next unless defined $opts{$t};
+            $fields{$t} = _duration($opts{$t});
+        }
+
+        # Retry policy -> temporal.api.common.v1.RetryPolicy proto when given.
+        if (defined(my $rp = $opts{retry_policy})) {
+            $fields{retry_policy} = $rp->to_proto;
+        }
+
+        # Headers: { name => Perl value } -> { name => Payload } when non-empty.
+        if (my $headers = $opts{headers}) {
+            if (%$headers) {
+                $fields{headers} = {
+                    map { $_ => $payload_converter->to_payload($headers->{$_}) }
+                        keys %$headers
+                };
+            }
+        }
+
+        push @commands,
+            Temporalio::Workflow::Commands::schedule_activity(\%fields);
+
+        # Register the pending Future the body awaits; the runner resolves it
+        # imperatively from the ResolveActivity job (never via IO::Async).
+        my $future = Temporalio::Workflow::Future->new;
+        $pending_activities{$seq} = $future;
+        return $future;
+    }
+
     # --- activation processing (spec section 10.3) ---------------------------
 
     # process_activation($activation) -> the WorkflowActivationCompletion proto.
@@ -99,6 +197,12 @@ class Temporalio::Workflow::Runner {
             $activation_seconds = $ts->seconds // 0;
             $activation_nanos   = $ts->nanos   // 0;
         }
+
+        # The command buffer holds only THIS activation's commands: the worker
+        # returns one completion per activation, so any commands emitted by a
+        # prior activation have already been drained. The seq counter, by
+        # contrast, is workflow-scoped and persists across activations.
+        @commands = ();
 
         # Step 4: apply jobs under the dynamically-scoped runner context so the
         # workflow body's Temporalio::Workflow:: calls resolve to this runner.
@@ -121,8 +225,11 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'initialize_workflow') {
             return $self->_apply_initialize($job->initialize_workflow);
         }
-        # FireTimer / ResolveActivity / SignalWorkflow / QueryWorkflow /
-        # CancelWorkflow / RemoveFromCache and friends land in later phases.
+        if ($variant eq 'resolve_activity') {
+            return $self->_apply_resolve_activity($job->resolve_activity);
+        }
+        # FireTimer / SignalWorkflow / QueryWorkflow / CancelWorkflow /
+        # RemoveFromCache and friends land in later phases.
         warn "Temporalio::Workflow::Runner: ignoring unhandled activation job"
            . " variant '$variant'\n";
         return;
@@ -143,6 +250,52 @@ class Temporalio::Workflow::Runner {
         $instance = $workflow_class->new;
         my $run_ref = $workflow_class->_workflow_defs->{run};
         $main_run_future = $instance->$run_ref(@args);
+        return;
+    }
+
+    # ResolveActivity { seq, result } — resolve the pending activity Future for
+    # this seq (spec section 10.3; MUST-match sdk-python _apply_resolve_activity).
+    # ActivityResolution.status is a oneof: completed -> ->done(decoded result);
+    # failed/cancelled -> ->fail(exception mapped from the Failure proto). The
+    # awaiting workflow continuation runs synchronously at resolve time
+    # (Future::AsyncAwait on_ready), so progress is observed in the pump.
+    method _apply_resolve_activity ($job) {
+        my $seq    = $job->seq;
+        my $future = delete $pending_activities{$seq};
+        unless (defined $future) {
+            # An unknown seq is a non-determinism signal (spec T-wf-13). The
+            # full non-determinism policy is P3.5/P3.7; for now, fail loudly
+            # rather than silently dropping the resolution.
+            die "Temporalio::Workflow::Runner: ResolveActivity for unknown "
+              . "seq $seq (no pending activity)";
+        }
+
+        my $resolution = $job->result;
+        my $status     = defined $resolution ? $resolution->which_status : undef;
+        $status //= '';
+
+        if ($status eq 'completed') {
+            my $success = $resolution->completed;
+            my $payload = defined $success ? $success->result : undef;
+            my $value   = defined $payload
+                ? $payload_converter->from_payload($payload)
+                : undef;
+            $future->done($value);
+        }
+        elsif ($status eq 'failed') {
+            my $failure = $resolution->failed->failure;
+            $future->fail(
+                $failure_converter->from_failure($failure, $payload_converter));
+        }
+        elsif ($status eq 'cancelled') {
+            my $failure = $resolution->cancelled->failure;
+            $future->fail(
+                $failure_converter->from_failure($failure, $payload_converter));
+        }
+        else {
+            die "Temporalio::Workflow::Runner: ResolveActivity seq $seq had no "
+              . "recognized status (got '$status')";
+        }
         return;
     }
 
@@ -193,6 +346,33 @@ class Temporalio::Workflow::Runner {
     # File-scope sub inside the class block so it is callable from methods.
     sub _make_rng ($seed) {
         return Temporalio::Workflow::Runner::_RNG->new($seed);
+    }
+
+    # Activity cancellation_type: spec string -> ActivityCancellationType enum
+    # number. Defaults to try_cancel (0). The enum lives in
+    # coresdk.workflow_commands: TRY_CANCEL=0, WAIT_CANCELLATION_COMPLETED=1,
+    # ABANDON=2 (verified against the vendored workflow_commands.proto).
+    my %CANCELLATION_TYPE = (
+        try_cancel                   => 0,
+        wait_cancellation_completed  => 1,
+        abandon                      => 2,
+    );
+    sub _cancellation_type_number ($name) {
+        return 0 unless defined $name;
+        return $CANCELLATION_TYPE{$name}
+            // die "Temporalio::Workflow::Runner: unknown cancellation_type "
+                 . "'$name'";
+    }
+
+    # Seconds (float) -> google.protobuf.Duration { seconds, nanos }. Mirrors
+    # Temporalio::Common::RetryPolicy::_duration; the activity timeouts cross
+    # the wire as Durations.
+    sub _duration ($seconds) {
+        my $Duration = Temporalio::Core::Proto::resolve(
+            'google.protobuf.Duration');
+        my $whole = int($seconds);
+        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
+        return $Duration->new({ seconds => $whole, nanos => $nanos });
     }
 }
 
@@ -276,11 +456,23 @@ same sequence (spec test T-wf-10). The skeleton ships a self-contained
 SplitMix64-style generator; P3.8 replaces it with the spec-mandated
 C<Math::Random::ISAAC::XS> primitive.
 
-=head2 Scope (P3.3 skeleton)
+=head2 Scope
 
-This skeleton handles C<InitializeWorkflow> and the success completion outcome.
-Activity scheduling and C<ResolveActivity> (P3.4), timers (P3.5), the
-dispatcher cache and eviction (P3.6), and the full fail/cancel/task-fail/
-continue-as-new outcome table (P3.7) land in later phases.
+Handles C<InitializeWorkflow>, activity scheduling
+(C<execute_activity>/C<start_activity> -> C<ScheduleActivity> command +
+C<ResolveActivity> job, P3.4), and the success completion outcome. Each
+activity is tracked by its workflow-scoped command C<seq> in a pending-Futures
+map and resolved imperatively when the matching C<ResolveActivity> job arrives
+(completed -> C<< ->done >>, failed/cancelled -> C<< ->fail >> with the
+exception mapped from the Failure proto). Timers (P3.5), the dispatcher cache
+and eviction (P3.6), and the full fail/cancel/task-fail/continue-as-new outcome
+table (P3.7) land in later phases.
+
+=head2 Sequence numbers
+
+Command sequence numbers (spec section 10.3) are workflow-scoped, monotonic
+from 1, allocated at command-emission time and persisted across activations.
+The command buffer, by contrast, holds only the current activation's commands
+(the worker returns one completion per activation).
 
 =cut

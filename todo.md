@@ -192,9 +192,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P3.3.4 Verify
 
 ### P3.4 execute_activity + ResolveActivity
-- [ ] P3.4.1 RED: sdk/t/replay/activities.t (T-wf-1/2/7, seq allocation)
-- [ ] P3.4.2 GREEN: execute_activity/start_activity + job handling
-- [ ] P3.4.3 Verify
+- [x] P3.4.1 RED: sdk/t/replay/activities.t (T-wf-1/2/7, seq allocation)
+- [x] P3.4.2 GREEN: execute_activity/start_activity + job handling
+- [x] P3.4.3 Verify
 
 ### P3.5 Timers
 - [ ] P3.5.1 RED: sdk/t/replay/timers.t (T-wf-6, sleep alias, CancelTimer)
