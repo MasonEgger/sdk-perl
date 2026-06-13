@@ -1883,7 +1883,7 @@ Temporalio::Workflow::continue_as_new(
 my $f = Temporalio::Workflow::execute_child_workflow($workflow, args => [...], id => '...');
 my $h = Temporalio::Workflow::start_child_workflow($workflow, args => [...], id => '...');
 
-# Versioning (Phase 6+):
+# Versioning (patching — implemented in v0.1; see §10.5):
 my $v = Temporalio::Workflow::patched('my-change');
 Temporalio::Workflow::deprecate_patch('old-change');
 ```
@@ -2366,7 +2366,6 @@ README documents this.
 - Child workflows.
 - Async activity completion (`async_complete_activity`).
 - Schedules.
-- Workflow versioning (`patched`, `deprecate_patch`).
 - Sessions.
 - Local activities.
 - Nexus.
