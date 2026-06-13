@@ -176,9 +176,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 3 — Workflows
 
 ### P3.1 Workflow::Definition + attributes
-- [ ] P3.1.1 RED: sdk/t/unit/workflow_definition.t (:Run/:Signal/:Query/:Update/:Init, duplicates)
-- [ ] P3.1.2 GREEN: Workflow.pm/Definition/Attributes + registry
-- [ ] P3.1.3 Verify
+- [x] P3.1.1 RED: sdk/t/unit/workflow_definition.t (:Run/:Signal/:Query/:Update/:Init, duplicates)
+- [x] P3.1.2 GREEN: Workflow.pm/Definition/Attributes + registry
+- [x] P3.1.3 Verify
 
 ### P3.2 Workflow::Future
 - [ ] P3.2.1 RED: sdk/t/unit/workflow_future.t (manual resolve, on_cancel order)
