@@ -20,6 +20,7 @@ use Temporalio::Converter::Failure ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception ();
 use Temporalio::Exception::Cancelled ();
+use Temporalio::Exception::Timeout ();
 use Temporalio::Exception::Nondeterminism ();
 use Temporalio::Exception::Workflow::NoRunner ();
 
@@ -158,6 +159,19 @@ class Temporalio::Workflow::Runner {
     # becomes ready.
     field %in_progress_handlers;
     field $handler_seq = 0;   # monotonic handler id source.
+
+    # Pending wait_condition predicates (spec section 10.2 wait_condition /
+    # T-wf-5; MUST-match sdk-python self._conditions — a list of (predicate,
+    # future) pairs). Each entry is a hashref { predicate => sub, future =>
+    # Workflow::Future, timer => Workflow::Future|undef }. The predicates are
+    # RE-CHECKED after each job set is applied (the pump): one whose predicate
+    # is now true has its future resolved (->done) and is removed; the rest stay
+    # pending across activations. A predicate must be deterministic and
+    # side-effect-free (it is re-run every pump and reads workflow state only).
+    # A timeout-bearing wait also starts a timer (separate timer seq space) and
+    # races it: if the timer fires first the wait future is failed with a
+    # Temporalio::Exception::Timeout (sdk-python asyncio.wait_for).
+    field @conditions;
 
     ADJUST {
         $payload_converter //= Temporalio::Converter::Payload->default;
@@ -340,6 +354,90 @@ class Temporalio::Workflow::Runner {
         return $future;
     }
 
+    # --- wait_condition (spec section 10.2 / T-wf-5) -------------------------
+
+    # wait_condition($predicate, %opts) -> a Temporalio::Workflow::Future that
+    # resolves (->done) once $predicate returns true. The predicate is
+    # RE-CHECKED after each job set is applied (in _pump): when state mutated by
+    # a signal/timer/activity resolution flips it true, the awaiting :Run
+    # continuation resumes in that same activation. The predicate must be
+    # deterministic and side-effect-free (it is re-run every pump and reads
+    # workflow state only — it never commands). MUST-match sdk-python
+    # workflow_wait_condition: append (fn, fut) to self._conditions; _run_once
+    # re-checks each condition and resolves the future when fn() is true.
+    #
+    # %opts: timeout (seconds) optionally races the predicate against a timer.
+    # If the timer fires before the predicate becomes true, the wait future is
+    # failed with a Temporalio::Exception::Timeout (MUST-match sdk-python
+    # asyncio.wait_for(fut, timeout) raising TimeoutError). When the predicate
+    # wins first the timer is cancelled (emitting CancelTimer).
+    method wait_condition ($predicate, %opts) {
+        my $future = Temporalio::Workflow::Future->new;
+
+        my $timer;
+        if (defined $opts{timeout}) {
+            $timer = $self->start_timer($opts{timeout});
+            # If the timer fires (resolves done) before the predicate is
+            # satisfied, the wait times out: fail the wait future with Timeout.
+            # An already-resolved wait (predicate won) leaves this a no-op.
+            $timer->on_done(sub {
+                return if $future->is_ready;
+                @conditions = grep { $_->{future} != $future } @conditions;
+                $future->fail(Temporalio::Exception::Timeout->new(
+                    message      => 'wait_condition timed out',
+                    timeout_type => 'start_to_close',
+                ));
+            });
+        }
+
+        push @conditions, {
+            predicate => $predicate,
+            future    => $future,
+            timer     => $timer,
+        };
+
+        # Re-check immediately: the predicate may already be true at call time
+        # (sdk-python's _run_once re-checks conditions on the same loop tick).
+        $self->_check_conditions;
+        return $future;
+    }
+
+    # Re-check every pending wait_condition predicate (spec section 10.2 /
+    # T-wf-5; MUST-match sdk-python _run_once's check_conditions pass). A
+    # predicate that is now true resolves its future (->done) and the entry is
+    # removed; the timer it raced (if any) is cancelled so no stale FireTimer
+    # outlives the satisfied wait (emitting CancelTimer). Entries whose future
+    # already resolved (e.g. a timed-out wait) are dropped. Predicates are
+    # re-run as long as resolving one makes progress: a satisfied condition's
+    # continuation may mutate state that satisfies another, so loop until a pass
+    # resolves nothing (a fixpoint), mirroring sdk-python re-checking after the
+    # ready queue drains.
+    method _check_conditions {
+        return unless @conditions;
+        my $progressed = 1;
+        while ($progressed) {
+            $progressed = 0;
+            my @still;
+            for my $cond (@conditions) {
+                my $future = $cond->{future};
+                next if $future->is_ready;   # resolved (e.g. timed out): drop.
+                if ($cond->{predicate}->()) {
+                    # Predicate satisfied: cancel its timeout timer (if any) and
+                    # resolve the wait. The continuation runs synchronously here.
+                    my $timer = $cond->{timer};
+                    $timer->cancel if defined $timer && !$timer->is_ready;
+                    $future->done;
+                    $progressed = 1;
+                }
+                else {
+                    push @still, $cond;
+                }
+            }
+            @conditions = @still;
+        }
+        return;
+    }
+
     # --- activation processing (spec section 10.3) ---------------------------
 
     # process_activation($activation) -> the WorkflowActivationCompletion proto.
@@ -397,13 +495,14 @@ class Temporalio::Workflow::Runner {
     # _running_workflows after cancelling its tasks).
     method evict () {
         for my $future (values %pending_activities, values %pending_timers,
-            values %in_progress_handlers)
+            values %in_progress_handlers, map { $_->{future} } @conditions)
         {
             $future->cancel unless $future->is_ready;
         }
         %pending_activities  = ();
         %pending_timers      = ();
         %in_progress_handlers = ();
+        @conditions          = ();
         if (defined $main_run_future && !$main_run_future->is_ready) {
             $main_run_future->cancel;
         }
@@ -817,10 +916,15 @@ class Temporalio::Workflow::Runner {
     # body to completion synchronously) or genuinely blocked on a future a
     # later phase resolves. No IO::Async, no wall-clock.
     method _pump {
-        # Intentionally minimal: Future::AsyncAwait runs the body and fires its
-        # on_ready continuations synchronously when the awaited futures are
-        # already resolved, so there is nothing to drive for the skeleton. The
-        # loop over pending_futures arrives with P3.4/P3.5.
+        # Future::AsyncAwait runs the body and fires its on_ready continuations
+        # synchronously when the awaited futures resolve, so activity/timer
+        # resolution drives the body without any explicit loop here. The one
+        # thing the pump must drive is the wait_condition re-check: after a job
+        # set is applied (a signal mutated state, a timer/activity resolved), any
+        # pending predicate that is now true resolves its future and resumes the
+        # awaiting continuation in this same activation (spec section 10.2 /
+        # T-wf-5; MUST-match sdk-python _run_once's check_conditions pass).
+        $self->_check_conditions;
         return;
     }
 
@@ -1150,7 +1254,9 @@ patch answer is memoized so it is deterministic across the run.
 Handles C<InitializeWorkflow>, activity scheduling
 (C<execute_activity>/C<start_activity> -> C<ScheduleActivity> command +
 C<ResolveActivity> job, P3.4), timers (C<start_timer>/C<sleep> -> C<StartTimer>
-command + C<FireTimer> job, with C<CancelTimer> on Future cancel, P3.5), and the
+command + C<FireTimer> job, with C<CancelTimer> on Future cancel, P3.5),
+C<wait_condition> (a predicate re-checked after each job set is applied,
+optionally racing a timeout timer, P4.3), and the
 success completion outcome. Each activity is tracked by its command C<seq> in a
 pending-Futures map and resolved imperatively when the matching
 C<ResolveActivity> job arrives (completed -> C<< ->done >>, failed/cancelled ->

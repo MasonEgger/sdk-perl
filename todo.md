@@ -237,9 +237,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P4.2.3 Verify
 
 ### P4.3 wait_condition
-- [ ] P4.3.1 RED: sdk/t/replay/wait_condition.t (T-wf-5, timeout, re-check per pump)
-- [ ] P4.3.2 GREEN: wait_condition
-- [ ] P4.3.3 Verify
+- [x] P4.3.1 RED: sdk/t/replay/wait_condition.t (T-wf-5, timeout, re-check per pump)
+- [x] P4.3.2 GREEN: wait_condition
+- [x] P4.3.3 Verify
 
 ### P4.4 Client signal/query end-to-end
 - [ ] P4.4.1 RED: sdk/t/integration/signals_queries.t (T-cli-signal-1, T-cli-query-1/2)

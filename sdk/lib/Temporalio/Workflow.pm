@@ -143,6 +143,23 @@ sub sleep ($seconds) {
     return _runner()->start_timer($seconds);
 }
 
+# --- wait_condition (spec section 10.2) -------------------------------------
+
+# wait_condition($predicate, %opts) -> a Future that resolves once $predicate
+# returns true. `await` it to suspend the workflow body until the condition
+# holds. The predicate is re-checked after each activation is applied (a signal
+# arrived, a timer fired, an activity resolved), so a flag set by a :Signal
+# handler resumes the awaiting body in that same activation. The predicate MUST
+# be deterministic and side-effect-free — it reads workflow state only and is
+# re-run every pump (it must never command). %opts: timeout (seconds) races the
+# wait against a timer; on timeout the awaited Future raises a
+# Temporalio::Exception::Timeout (MUST-match sdk-python wait_condition over
+# asyncio.wait_for). This is the core building block for "wait until a signal
+# sets a flag" patterns (spec section 10.2 / T-wf-5).
+sub wait_condition ($predicate, %opts) {
+    return _runner()->wait_condition($predicate, %opts);
+}
+
 # --- continue-as-new (spec section 10.2 / 10.3 step 6) ----------------------
 
 # continue_as_new($workflow_or_string, %opts) — request that the current run
@@ -215,8 +232,9 @@ C<:Run>/C<:Signal>/C<:Query>/C<:Update>/C<:Init> attribute handlers are in
 scope. It also provides the workflow-context functional surface (spec section
 10.2): replay-safety accessors (C<now>, C<time>, C<is_replaying>, C<info>,
 C<random>), activity invocation (C<execute_activity>, C<start_activity>),
-timers (C<start_timer>, C<sleep>), and C<continue_as_new>. Each looks up the
-active runner and raises L<Temporalio::Exception::Workflow::NoRunner> when
+timers (C<start_timer>, C<sleep>), C<wait_condition> (suspend the body until a
+predicate holds, optionally with a timeout), and C<continue_as_new>. Each looks
+up the active runner and raises L<Temporalio::Exception::Workflow::NoRunner> when
 called outside a workflow body.
 
 =cut
