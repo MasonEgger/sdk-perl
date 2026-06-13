@@ -181,9 +181,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P3.1.3 Verify
 
 ### P3.2 Workflow::Future
-- [ ] P3.2.1 RED: sdk/t/unit/workflow_future.t (manual resolve, on_cancel order)
-- [ ] P3.2.2 GREEN: Workflow/Future.pm
-- [ ] P3.2.3 Verify
+- [x] P3.2.1 RED: sdk/t/unit/workflow_future.t (manual resolve, on_cancel order)
+- [x] P3.2.2 GREEN: Workflow/Future.pm
+- [x] P3.2.3 Verify
 
 ### P3.3 Runner core + replay harness
 - [ ] P3.3.1 RED: sdk/t/replay/runner_basics.t (trivial complete, now/time, NoRunner, seed T-wf-10)
