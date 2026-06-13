@@ -2,6 +2,8 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- Scoping the activity Context with `dynamically $...::CURRENT = $ctx` must wrap the `await` of the body, NOT just the synchronous call that returns the Future: `my $r = do { dynamically $CURRENT = $ctx; await $self->_invoke($code, @args) }`. A `do` block that returns the Future before awaiting unwinds the dynamic scope before the body runs, so a body parking on `await $ctx->cancellation->cancelled` loses `$CURRENT` and dies "not in an activity context" — Syntax::Keyword::Dynamically exists precisely to restore across suspend/resume (2026-06-13)
+- In Test2 unit tests, drive an in-memory Future to its value with `$f->get` (synchronous, no loop run) — NOT `$loop->await($f)`, which returns the Future object itself, not its resolved value. The codebase idiom is `->get` (see converter_data.t); grep existing tests for the await pattern before writing a helper (2026-06-13)
 - sdk-core `temporal_core_worker_finalize_shutdown` awaits `Worker::shutdown`, which blocks on `workflows.shutdown()` until the workflow poll loop returns ShutDown — so a never-run worker (construction+validate only) deadlocks on finalize. For a construction-only shutdown call `worker_initiate_shutdown` + `worker_free` (a plain box drop) and issue finalize only from `run` after the poll loops drain (2026-06-13)
 - A lazy `state $x = eval { require Foo; 1 } ? 1 : 0` probe re-raises its failed `require` when the FIRST call lands inside a Future::AsyncAwait async frame (the async error-detection sees the leftover $@) — compute load-detection at module load time in a `my $HAVE_FOO = do { local $@; eval {...} }` instead of lazily per-call (2026-06-12)
 - Unit-testing a method that `await`s an `async` collaborator: the mock for that collaborator MUST return a Future (`Future->done($v)` / `Future->fail($e)`), not the bare value — a plain return dies with "Can't locate object method AWAIT_IS_READY via package <the returned value's class>" (2026-06-12)
@@ -10,8 +12,6 @@
 - Messages delivered only inside a google.protobuf.Any (google.rpc.Status, temporal.api.errordetails.v1.*) are never imported by the service protos, so import-driven schema loading misses them — parse them as explicit roots, and note sdk-rust vendors google/rpc in a standalone proto root OUTSIDE api_upstream (2026-06-12)
 - The sibling reference checkouts track upstream HEAD and can drift from spec MUST-match constants (sdk-rust `RetryOptions::default` multiplier moved 1.5→1.7 while python/ruby still ship 1.5) — when one reference disagrees with spec, confirm against a second reference SDK before assuming the spec is stale; spec wins (2026-06-12)
 - With Future::AsyncAwait loaded (0.71, perl 5.38.2) — even `use Future::AsyncAwait ()` with no import — only the FIRST `class X :isa(Y)` per file parses; the next dies with "Subroutine attributes must come before the signature" or "non-empty @ISA". Keep one `:isa` class per file; codec/test classes that must share a file can skip the `async` sugar and return `Future->done/fail` directly (2026-06-12)
-- The C bridge header alone under-specifies semantics — read the bridge's .rs conversion code too (testing.rs: an EMPTY download_version becomes `Fixed("")` not SDK-default, so pass the literal 'default'; `ephemeral_server_free` must wait for the shutdown callback because the async block borrows the server box; the spawned CLI inherits stdout/stderr) (2026-06-12)
-- A bare `class` file (no preceding `package` statement) compiles file-scope subs into `main::`, so calls from inside the class block fail with "Undefined subroutine &Class::_helper" — define every helper sub INSIDE the `class { }` block (2026-06-12)
 
 ## Tooling
 - `[@Starter::Git]` uses Git::GatherDir, which gathers only git-TRACKED files — `git add` a new distribution's files before its first `dzil test` or the build dir will be missing them (symptom: `[AlienBuild] No alienfile!`) (2026-06-11)
@@ -33,6 +33,8 @@
 - cbindgen renders opaque `_private: [u8; 0]` structs as zero-size definitions; borrowed foreign types need `[export] exclude` + `after_includes` forward typedefs to coexist with the owning header (2026-06-11)
 
 ## Perl
+- Scoping a dynamic var across a Future::AsyncAwait body with `dynamically $X = $v` must wrap the `await` itself, not just the synchronous call that produces the Future — `do { dynamically $X = $v; await $f }`, never `await do { dynamically $X = $v; build_future() }`; the latter unwinds the scope before the body runs/parks. The dispatcher that scopes Activity::Context::CURRENT must also `use Temporalio::Activity ()` so bodies can call `Temporalio::Activity::context()` (2026-06-13)
+- A bare `class` file (no preceding `package` statement) compiles file-scope subs into `main::`, so calls from inside the class block fail with "Undefined subroutine &Class::_helper" — define every helper sub INSIDE the `class { }` block (2026-06-12)
 - A lazy `state $x = eval { require Foo; 1 } ? 1 : 0` probe re-raises its failed `require` when the FIRST call lands inside a Future::AsyncAwait async frame (the async error-detection sees the leftover $@) — compute load-detection at module load time in a `my $HAVE_FOO = do { local $@; eval {...} }` instead of lazily per-call (2026-06-12)
 - With Future::AsyncAwait loaded (0.71, perl 5.38.2), only ONE `class X :isa(Y)` declaration parses per file (the next gets leaked attribute-parser state) — one `:isa` class per file; subclasses can return `Future->done/fail` directly instead of `async` sugar (2026-06-12)
 - Hand-pack C tagged unions as `pack('L x4', $tag) . $variant` zero-padded to the union size (largest member); validate every offset via a shim echo function over #[repr(C)] mirror structs copied from the owning crate (2026-06-11)
@@ -46,6 +48,7 @@
 - An alienfile local-path override needs a NON-EMPTY stub download dir (else Extract::Directory dies "no files extracted") plus an `install_prop->{download_detail}{$path} = { protocol => 'file' }` entry so the digest stage accepts the trusted local fetch (2026-06-11)
 
 ## Testing
+- Drive an in-memory Future to its value in a Test2 unit test with `$f->get` (synchronous) — `$loop->await($f)` returns the Future object itself, not its resolved value. Codebase idiom is `->get` (converter_data.t); grep existing tests for the await pattern before writing a helper (2026-06-13)
 - Unit-testing a method that `await`s an `async` collaborator: the mock for that collaborator MUST return a Future (`Future->done($v)` / `Future->fail($e)`), not the bare value — a plain return dies with "Can't locate object method AWAIT_IS_READY via package <the returned value's class>" (2026-06-12)
 - `prove t` is non-recursive by default; this repo's `sdk/.proverc` adds `--recurse` so subdirectory tests run under the documented command (2026-06-11)
 - Test names must stay ASCII — Test2's TAP handle is not UTF-8 even though test files `use utf8` (2026-06-11)

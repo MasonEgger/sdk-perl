@@ -1,0 +1,301 @@
+# ABOUTME: Async activity dispatcher (spec section 8.4): decodes ActivityTask
+# ABOUTME: bytes, routes start/cancel, runs the activity body under a
+# ABOUTME: dynamically-scoped Activity::Context, and builds + sends the
+# ABOUTME: ActivityTaskCompletion. Holds the task_token running-activities map.
+use v5.38;
+use warnings;
+use feature 'class';
+no warnings 'experimental::class';
+use feature 'try';
+no warnings 'experimental::try';
+
+use Future ();
+use Future::AsyncAwait;
+use Scalar::Util ();
+use Syntax::Keyword::Dynamically;
+
+use Temporalio::Activity ();          # the context()/info()/heartbeat() surface
+use Temporalio::Activity::Context ();
+use Temporalio::Cancellation ();
+use Temporalio::Core::Proto ();
+use Temporalio::Exception::Application ();
+use Temporalio::Exception::Cancelled ();
+use Temporalio::Worker::ActivityCompletion ();
+
+class Temporalio::Worker::ActivityDispatcher {
+    # Temporalio::Worker::ActivityRegistry: activity type name -> { code, ... }.
+    field $registry :param;
+
+    # Temporalio::Converter::Data: converts activity args/results and codec
+    # decodes/encodes payloads at the worker boundary (spec section 8.4 steps
+    # 4 + 7).
+    field $data_converter :param;
+
+    field $task_queue :param;
+    field $client     :param = undef;
+    field $loop       :param = undef;
+
+    # A coderef ($completion_bytes) -> Future: sends the serialized
+    # ActivityTaskCompletion to core (worker_complete_activity_task over the
+    # callback bridge). Injectable so unit tests capture completions without a
+    # live worker.
+    field $completer :param;
+
+    # A coderef ($heartbeat_bytes) -> $error_or_undef handed to each
+    # Activity::Context for synchronous heartbeat recording. undef when the
+    # worker carries no heartbeat path (heartbeats then no-op Perl-side).
+    field $heartbeat_recorder :param = undef;
+
+    # task_token => { cancellation => Temporalio::Cancellation, context => ... }.
+    # Added on start (step 5), used by cancel routing (step 3), removed on
+    # completion (step 7).
+    field %running;
+
+    # Proto classes resolved once.
+    field $ActivityTask;
+
+    ADJUST {
+        $ActivityTask = Temporalio::Core::Proto::resolve(
+            'coresdk.activity_task.ActivityTask');
+    }
+
+    method registry       { $registry }
+    method data_converter { $data_converter }
+    method is_running ($task_token) { exists $running{$task_token} ? 1 : 0 }
+
+    # dispatch_task($task_bytes) -> Future (spec section 8.4 step 3): decode the
+    # ActivityTask and branch on its variant. A cancel resolves and returns
+    # immediately; a start runs the activity body to completion (the returned
+    # Future resolves once the completion is sent).
+    async method dispatch_task ($task_bytes) {
+        my $task = $ActivityTask->decode($task_bytes);
+        my $which = $task->which_variant // '';
+        if ($which eq 'cancel') {
+            $self->_handle_cancel($task->task_token, $task->cancel);
+            return;
+        }
+        if ($which eq 'start') {
+            await $self->_handle_start($task->task_token, $task->start);
+            return;
+        }
+        warn "Temporalio::Worker::ActivityDispatcher: unrecognized activity"
+           . " task variant '$which' dropped\n";
+        return;
+    }
+
+    # Cancel (step 3): look up the running activity by task_token and cancel its
+    # token so a cooperating body sees the cancellation. No completion is sent
+    # for the cancel task itself — the running activity reports via its own
+    # completion. Unknown token -> warn + drop.
+    method _handle_cancel ($task_token, $cancel) {
+        my $entry = $running{$task_token};
+        if (!defined $entry) {
+            warn "Temporalio::Worker::ActivityDispatcher: cancel for unknown"
+               . " activity task token '$task_token' dropped\n";
+            return;
+        }
+        $entry->{cancellation}->cancel;
+        return;
+    }
+
+    # Start (steps 4-7): decode input (codec), route to the registered activity,
+    # register the running activity, run the body under a dynamically-scoped
+    # Activity::Context, build + send the completion, then remove from the map.
+    async method _handle_start ($task_token, $start) {
+        my $cancellation = Temporalio::Cancellation->new;
+        # Register before running so a concurrent cancel task can find it.
+        $running{$task_token} = { cancellation => $cancellation };
+
+        my $completion;
+        try {
+            my $type = $start->activity_type;
+            my $def  = $registry->definition($type);
+            if (!defined $def) {
+                Temporalio::Exception::Application->throw(
+                    message => "Activity type '$type' is not registered on this"
+                        . ' worker',
+                    type    => 'NotFoundError',
+                );
+            }
+
+            # Step 4: codec-decode start.input at the worker boundary, then
+            # convert to Perl values.
+            my @args = await $data_converter->from_payloads(
+                [ @{ $start->input // [] } ]);
+
+            # Build the per-invocation context (spec section 9.3). info is the
+            # frozen hashref the Context exposes; heartbeat flows through the
+            # injected recorder.
+            my $info = $self->_build_info($task_token, $start);
+            my $ctx  = Temporalio::Activity::Context->new(
+                info               => $info,
+                cancellation       => $cancellation,
+                data_converter     => $data_converter,
+                client             => $client,
+                heartbeat_recorder => $heartbeat_recorder
+                    // sub ($bytes) { return undef },
+            );
+            $running{$task_token}{context} = $ctx;
+
+            # Step 6: run the body with the context dynamically scoped (NEVER
+            # `local` — F::AA panics across an await, spec section 16.1). The
+            # `dynamically` MUST wrap the `await` itself, not just the
+            # synchronous call: Syntax::Keyword::Dynamically restores the value
+            # correctly across each suspend/resume, so a body that parks on
+            # `await $ctx->cancellation->cancelled` still sees $CURRENT when it
+            # resumes. Async and sync bodies both work: a sync body returns a
+            # value, an async one a Future; _invoke + await normalizes both.
+            my $result = do {
+                dynamically $Temporalio::Activity::Context::CURRENT = $ctx;
+                await $self->_invoke($def->{code}, @args);
+            };
+
+            # Success (step 7): convert + codec-encode the result payload.
+            my ($payload) = await $data_converter->to_payloads([$result]);
+            $completion = Temporalio::Worker::ActivityCompletion::success(
+                $task_token, $payload);
+        }
+        catch ($error) {
+            $completion = await $self->_failure_completion(
+                $task_token, $cancellation, $error);
+        }
+
+        # Step 7: send the completion, then drop the running entry.
+        try {
+            await $completer->($completion);
+        }
+        catch ($send_error) {
+            warn "Temporalio::Worker::ActivityDispatcher: sending completion"
+               . " for '$task_token' failed: $send_error\n";
+        }
+        delete $running{$task_token};
+        return;
+    }
+
+    # Invoke the activity callable. A `code` ref may be async (returns a Future)
+    # or sync (returns a plain value); wrapping in Future->call lets the caller
+    # `await` uniformly and routes a synchronous die into the Future.
+    method _invoke ($code, @args) {
+        return Future->call(sub { $code->(@args) });
+    }
+
+    # Build the failed/cancelled completion for a thrown $error. A Cancelled
+    # error whose token was actually cancelled (server cancel) reports the
+    # cancelled outcome (mirrors sdk-ruby run_activity); everything else is a
+    # failure. The failure proto is codec-encoded by data_converter->to_failure.
+    async method _failure_completion ($task_token, $cancellation, $error) {
+        my $exception = _as_exception($error);
+        my $failure   = await $data_converter->to_failure($exception);
+
+        if (Scalar::Util::blessed($exception)
+            && $exception->isa('Temporalio::Exception::Cancelled')
+            && $cancellation->is_cancelled)
+        {
+            return Temporalio::Worker::ActivityCompletion::cancelled(
+                $task_token, $failure);
+        }
+        return Temporalio::Worker::ActivityCompletion::failure(
+            $task_token, $failure);
+    }
+
+    # Normalize a thrown value into a Temporalio::Exception so the failure
+    # converter has something to map. A plain string death becomes an
+    # ApplicationError (mirrors the reference SDKs wrapping arbitrary errors).
+    sub _as_exception ($error) {
+        return $error
+            if Scalar::Util::blessed($error)
+            && $error->isa('Temporalio::Exception');
+        my $message = "$error";
+        chomp $message;
+        return Temporalio::Exception::Application->new(message => $message);
+    }
+
+    # Build the frozen ActivityInfo hashref the Context exposes (spec section
+    # 9.3). The schedule/start timestamps and durations stay as their proto
+    # sub-messages in v0.1 (the Context exposes the hashref as-is; a typed Info
+    # value class can come later — P2.3 lessons).
+    method _build_info ($task_token, $start) {
+        my $exec = $start->workflow_execution;
+        return {
+            activity_id     => $start->activity_id,
+            activity_type   => $start->activity_type,
+            attempt         => $start->attempt,
+            task_queue      => $task_queue,
+            task_token      => $task_token,
+            namespace       => $start->workflow_namespace,
+            workflow_id     => defined $exec ? $exec->workflow_id : undef,
+            workflow_run_id => defined $exec ? $exec->run_id : undef,
+            workflow_type   => $start->workflow_type,
+            is_local        => $start->is_local ? 1 : 0,
+            heartbeat_details              => $start->heartbeat_details,
+            scheduled_time                 => $start->scheduled_time,
+            current_attempt_scheduled_time => $start->current_attempt_scheduled_time,
+            started_time                   => $start->started_time,
+            schedule_to_close_timeout      => $start->schedule_to_close_timeout,
+            start_to_close_timeout         => $start->start_to_close_timeout,
+            heartbeat_timeout              => $start->heartbeat_timeout,
+        };
+    }
+}
+
+1;
+
+__END__
+
+=head1 NAME
+
+Temporalio::Worker::ActivityDispatcher - run activity tasks and report results
+
+=head1 SYNOPSIS
+
+    use Temporalio::Worker::ActivityDispatcher ();
+
+    my $dispatcher = Temporalio::Worker::ActivityDispatcher->new(
+        registry       => $activity_registry,
+        data_converter => $data_converter,
+        task_queue     => 'demo',
+        client         => $client,
+        loop           => $io_async_loop,
+        completer      => sub ($bytes) { ... return Future },
+        heartbeat_recorder => sub ($bytes) { ... return $err_or_undef },
+    );
+
+    await $dispatcher->dispatch_task($activity_task_bytes);
+
+=head1 DESCRIPTION
+
+The async activity dispatcher of spec section 8.4. C<dispatch_task> decodes a
+serialized C<coresdk.activity_task.ActivityTask> and branches on its variant:
+
+=over
+
+=item C<cancel>
+
+Looks up the running activity by C<task_token> in the dispatcher's
+running-activities map and cancels its L<Temporalio::Cancellation> so a
+cooperating body observing C<< $ctx->cancellation >> sees the cancellation. No
+completion is sent for the cancel task itself; the running activity reports via
+its own completion. An unknown token is warned about and dropped.
+
+=item C<start>
+
+Codec-decodes C<start.input> (the worker boundary), routes by C<activity_type>
+to the registered activity (an unregistered type completes failed with a
+C<NotFoundError> ApplicationError), records the activity in the
+C<task_token>-keyed map, and runs the body under a dynamically-scoped
+L<Temporalio::Activity::Context> (B<C<dynamically>, never C<local>> — F::AA
+panics across an await). On normal return it builds a success
+C<ActivityTaskCompletion> with the converted + codec-encoded result; on a
+thrown error it builds a failed completion (or a cancelled completion when a
+L<Temporalio::Exception::Cancelled> coincides with an actually-cancelled
+token, mirroring sdk-ruby). The completion bytes are handed to the injected
+C<completer> and the running entry is removed.
+
+=back
+
+Both the completer and the heartbeat recorder are injected so the dispatcher
+is unit-testable without a live worker; L<Temporalio::Worker> supplies real
+ones over the callback bridge. Completion building is delegated to
+L<Temporalio::Worker::ActivityCompletion>.
+
+=cut

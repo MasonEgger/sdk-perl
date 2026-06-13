@@ -8,6 +8,7 @@ no warnings 'experimental::class';
 use Future ();
 use Future::AsyncAwait;
 
+use FFI::Platypus::Buffer ();
 use Scalar::Util ();
 use Temporalio::Core::ByteArray ();
 use Temporalio::Core::Callback ();
@@ -16,7 +17,9 @@ use Temporalio::Core::FFI::WorkerOptions ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::Bridge ();
 use Temporalio::Exception::Runtime ();
+use Temporalio::Worker::ActivityDispatcher ();
 use Temporalio::Worker::ActivityRegistry ();
+use Temporalio::Worker::PollLoop ();
 
 class Temporalio::Worker {
     # --- spec section 8.1 kwargs -----------------------------------------
@@ -52,6 +55,8 @@ class Temporalio::Worker {
     field $worker_ptr;       # TemporalCoreWorker*, NULL until _ensure_worker
     field $worker_keep;      # @keep pinning the packed options buffer
     field $is_shutdown = 0;
+    field $is_running  = 0;  # true between run start and its return
+    field $initiated   = 0;  # initiate_shutdown sent once
 
     ADJUST {
         Temporalio::Exception::Argument->throw(
@@ -176,27 +181,168 @@ class Temporalio::Worker {
         return;
     }
 
+    # run (spec 8.2 steps 1-5): build + validate the worker if needed, then
+    # drive the activity poll loop (the workflow loop lands in P3.6). Returns
+    # when the loop drains — either because `shutdown` was called mid-run
+    # (initiate_shutdown makes core return the ShutDown sentinel from poll) or
+    # because core shut the worker down for another reason. On the way out it
+    # finalizes and frees the worker (the full graceful sequence deferred from
+    # `shutdown` per the P2.2 deadlock note). T-wkr-4: shutdown mid-run causes
+    # run to return; a second shutdown is a no-op.
+    async method run () {
+        $self->_assert_open;
+        await $self->validate;     # _ensure_worker + pre-poll validate
+        $is_running = 1;
+
+        my $runtime    = $self->_runtime;
+        my $dispatcher = $self->_build_activity_dispatcher;
+        my $poll_loop  = Temporalio::Worker::PollLoop->new(
+            dispatcher  => $dispatcher,
+            poll_source => sub { return $self->_poll_activity_task },
+            loop        => $runtime->loop,
+        );
+
+        my $error;
+        {
+            local $@;
+            eval { await $poll_loop->run; 1 } or $error = $@;
+        }
+
+        # The loop has drained (sentinel seen). Make sure shutdown was actually
+        # initiated (the loop may have exited because core shut down on its
+        # own), then finalize + free. _finalize_and_free is idempotent.
+        $self->_initiate_shutdown_once;
+        await $self->_finalize_and_free;
+        $is_running  = 0;
+        $is_shutdown = 1;
+
+        die $error if defined $error;
+        return;
+    }
+
+    # Build the activity dispatcher with the real completer (worker_complete_
+    # activity_task over the callback bridge) and the synchronous heartbeat
+    # recorder (worker_record_activity_heartbeat). The completer holds the
+    # serialized completion ByteArrayRef buffer through the callback (the
+    # bridge borrows it — header), so @keep lives until the Future resolves.
+    method _build_activity_dispatcher () {
+        my $runtime = $self->_runtime;
+        return Temporalio::Worker::ActivityDispatcher->new(
+            registry       => $activity_registry,
+            data_converter => $client->data_converter,
+            task_queue     => $task_queue,
+            client         => $client,
+            loop           => $runtime->loop,
+            completer      => sub ($completion_bytes) {
+                return $self->_complete_activity_task($completion_bytes);
+            },
+            heartbeat_recorder => sub ($heartbeat_bytes) {
+                return $self->_record_heartbeat($heartbeat_bytes);
+            },
+        );
+    }
+
+    # Issue worker_poll_activity_task over the callback bridge ('worker_poll'
+    # kind): resolves with the serialized ActivityTask bytes, or undef on the
+    # ShutDown sentinel.
+    method _poll_activity_task () {
+        my $runtime = $self->_runtime;
+        return Temporalio::Core::Callback->issue_async(
+            $runtime, worker_poll => sub ($user_data, $trampoline) {
+                Temporalio::Core::FFI::worker_poll_activity_task(
+                    $worker_ptr, $user_data, $trampoline);
+            });
+    }
+
+    # Issue worker_complete_activity_task over the callback bridge ('worker'
+    # kind, fail-or-nothing). The completion bytes are passed as a
+    # ByteArrayRef; @keep pins the buffer through the call.
+    method _complete_activity_task ($completion_bytes) {
+        my $runtime = $self->_runtime;
+        my @keep;
+        my ($data, $size) =
+            Temporalio::Core::FFI::keep_buffer(\@keep, $completion_bytes);
+        my $ref = Temporalio::Core::FFI::ByteArrayRef->new(
+            data => $data, size => $size);
+        my $f = Temporalio::Core::Callback->issue_async(
+            $runtime, worker => sub ($user_data, $trampoline) {
+                Temporalio::Core::FFI::worker_complete_activity_task(
+                    $worker_ptr, $ref, $user_data, $trampoline);
+            });
+        # Hold @keep (and $ref) until the completion callback fires.
+        return $f->on_ready(sub { @keep = (); undef $ref });
+    }
+
+    # Synchronous heartbeat: worker_record_activity_heartbeat returns NULL on
+    # success or an owned byte array describing the error. Returns the error
+    # string (or undef) for Activity::Context->heartbeat to raise on.
+    method _record_heartbeat ($heartbeat_bytes) {
+        my $runtime = $self->_runtime;
+        my @keep;
+        my ($data, $size) =
+            Temporalio::Core::FFI::keep_buffer(\@keep, $heartbeat_bytes);
+        my $ref = Temporalio::Core::FFI::ByteArrayRef->new(
+            data => $data, size => $size);
+        my $fail_ptr = Temporalio::Core::FFI::worker_record_activity_heartbeat(
+            $worker_ptr, $ref);
+        return undef unless defined $fail_ptr;
+        my $byte_array = Temporalio::Core::ByteArray->wrap($fail_ptr, $runtime);
+        my $message    = $byte_array->bytes;
+        $byte_array->free;
+        return $message;
+    }
+
+    method _initiate_shutdown_once () {
+        return if $initiated || !defined $worker_ptr;
+        Temporalio::Core::FFI::worker_initiate_shutdown($worker_ptr);
+        $initiated = 1;
+        return;
+    }
+
+    # Finalize (async, awaits core's Worker::shutdown — safe only once the poll
+    # loops have drained, P2.2 lesson) then free. Idempotent: a NULL worker_ptr
+    # means already freed.
+    async method _finalize_and_free () {
+        return unless defined $worker_ptr;
+        my $runtime = $self->_runtime;
+        my $ptr     = $worker_ptr;
+        await Temporalio::Core::Callback->issue_async(
+            $runtime, worker => sub ($user_data, $trampoline) {
+                Temporalio::Core::FFI::worker_finalize_shutdown(
+                    $ptr, $user_data, $trampoline);
+            });
+        Temporalio::Core::FFI::worker_free($ptr);
+        $worker_ptr  = undef;
+        $worker_keep = undef;
+        return;
+    }
+
     # shutdown (spec 8.2 step 5): idempotent. Returns a Future so callers can
-    # `await $worker->shutdown` uniformly. For a worker that was never run
-    # (construction + validate only, P2.2), the sequence is
-    # initiate_shutdown (sync) then worker_free (sync, just drops the box):
-    # the async worker_finalize_shutdown awaits core's Worker::shutdown, which
-    # blocks on the workflow/activity poll loops returning ShutDown — and with
-    # no run loop driving them (poll loops land in P2.4/P3.6) that await would
-    # deadlock. finalize_shutdown is therefore issued from `run` once the poll
-    # loops have drained, not here.
+    # `await $worker->shutdown` uniformly.
+    #
+    # While `run` is driving the poll loops, shutdown only INITIATES: that makes
+    # core return the ShutDown sentinel from the next poll, the loop drains, and
+    # `run` itself does the finalize + free (the async finalize awaits core's
+    # Worker::shutdown, which blocks until the loops return ShutDown — calling
+    # it here would deadlock, P2.2 lesson). For a worker that was never run
+    # (construction + validate only, P2.2), there is no loop to drain, so
+    # shutdown does the synchronous initiate + free directly (no finalize, which
+    # would deadlock with no loop driving the polls).
     method shutdown () {
+        my $runtime = eval { $self->_runtime };
+        if ($is_running) {
+            # Mid-run: just initiate; `run` finalizes + frees on its way out.
+            $self->_initiate_shutdown_once;
+            return $runtime ? $runtime->loop->new_future->done : Future->done;
+        }
         if (!$is_shutdown && defined $worker_ptr) {
             Temporalio::Core::FFI::worker_initiate_shutdown($worker_ptr);
             Temporalio::Core::FFI::worker_free($worker_ptr);
             $worker_ptr  = undef;
             $worker_keep = undef;
+            $initiated   = 1;
         }
         $is_shutdown = 1;
-        # A ready Future on the client's loop so `await $worker->shutdown`
-        # works uniformly; fall back to a plain immediate Future if the
-        # client carries no runtime (e.g. a never-validated worker).
-        my $runtime = eval { $self->_runtime };
         return $runtime ? $runtime->loop->new_future->done : Future->done;
     }
 }

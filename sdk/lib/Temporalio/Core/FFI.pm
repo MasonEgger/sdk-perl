@@ -531,6 +531,21 @@ my @phase0_attach = (
       [ 'TemporalCoreWorker', 'opaque', 'opaque' ] => 'void' ],
     [ temporal_core_worker_free => 'worker_free',
       [ 'TemporalCoreWorker' ] => 'void' ],
+    # Activity poll + complete (spec section 8.4). Both are async (callback
+    # bridge): poll uses the 'worker_poll' kind (a TemporalCoreWorkerPollCallback
+    # returning the serialized ActivityTask byte array, or null/null on
+    # ShutDown); complete uses the 'worker' kind (a TemporalCoreWorkerCallback,
+    # fail-or-nothing). poll takes (worker, user_data, callback); complete takes
+    # (worker, ByteArrayRef completion, user_data, callback) — the completion
+    # ByteArrayRef (a serialized coresdk.ActivityTaskCompletion) must live
+    # through the callback, so the issuing code holds the buffer until the
+    # Future resolves. Both callback args (trampoline + user_data pair) pass as
+    # opaque, matching worker_validate.
+    [ temporal_core_worker_poll_activity_task => 'worker_poll_activity_task',
+      [ 'TemporalCoreWorker', 'opaque', 'opaque' ] => 'void' ],
+    [ temporal_core_worker_complete_activity_task => 'worker_complete_activity_task',
+      [ 'TemporalCoreWorker', 'TemporalCoreByteArrayRef', 'opaque', 'opaque' ]
+        => 'void' ],
     # Activity heartbeat (spec section 9.3, T-act-7). SYNCHRONOUS, not a
     # callback bridge call: the bridge serializes the coresdk.ActivityHeartbeat
     # proto we pass as a ByteArrayRef and returns NULL on success or an owned

@@ -161,11 +161,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P2.3.3 Verify
 
 ### P2.4 Activity poll loop (async)
-- [ ] P2.4.1 RED: sdk/t/unit/activity_dispatch.t (T-act-5/8/9, cancel variant, codec, token map)
-- [ ] P2.4.2 GREEN: ActivityDispatcher.pm + PollLoop.pm activity loop + FFI attaches
-- [ ] P2.4.3 GREEN: Worker->run wiring + shutdown (T-wkr-4)
-- [ ] P2.4.4 REFACTOR: shared completion builder
-- [ ] P2.4.5 Verify
+- [x] P2.4.1 RED: sdk/t/unit/activity_dispatch.t (T-act-5/8/9, cancel variant, codec, token map)
+- [x] P2.4.2 GREEN: ActivityDispatcher.pm + PollLoop.pm activity loop + FFI attaches
+- [x] P2.4.3 GREEN: Worker->run wiring + shutdown (T-wkr-4)
+- [x] P2.4.4 REFACTOR: shared completion builder
+- [x] P2.4.5 Verify
 
 ### P2.5 Sync activity fork pool
 - [ ] P2.5.1 RED: sdk/t/unit/activity_pool.t (T-act-6, T-act-10, heartbeat relay, coop cancel)
