@@ -2,6 +2,7 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- With Future::AsyncAwait loaded (0.71, perl 5.38.2) — even `use Future::AsyncAwait ()` with no import — only the FIRST `class X :isa(Y)` per file parses; the next dies with "Subroutine attributes must come before the signature" or "non-empty @ISA". Keep one `:isa` class per file; codec/test classes that must share a file can skip the `async` sugar and return `Future->done/fail` directly (2026-06-12)
 - The C bridge header alone under-specifies semantics — read the bridge's .rs conversion code too (testing.rs: an EMPTY download_version becomes `Fixed("")` not SDK-default, so pass the literal 'default'; `ephemeral_server_free` must wait for the shutdown callback because the async block borrows the server box; the spawned CLI inherits stdout/stderr) (2026-06-12)
 - A bare `class` file (no preceding `package` statement) compiles file-scope subs into `main::`, so calls from inside the class block fail with "Undefined subroutine &Class::_helper" — define every helper sub INSIDE the `class { }` block (2026-06-12)
 - An installed (non-checkout) Protobuf dist cannot auto-resolve its bundled WKTs — Parser.pm's share lookup is checkout-relative but installs land in auto/share/dist/Protobuf — so pass `File::ShareDir::dist_dir('Protobuf') . '/proto'` as an explicit include path (2026-06-12)
@@ -11,7 +12,10 @@
 - FFI::Platypus `record(Class)` (no `*`) passes AND returns structs by value — small by-value returns like TemporalCoreRuntimeOrFail work directly on x86-64, no shim out-param needed; `record(Class)*` is the pointer form; nested records are unsupported by FFI::Platypus::Record, so flatten embedded structs into layout-identical scalar fields (2026-06-11)
 - Alien::Build runs alienfiles via `do '<abs path>'`, so `__FILE__` inside an alienfile is the real path — walk up from it to locate in-tree sources (works from a checkout AND a dzil .build dir); Test::Alien::Build's `alien_build_ok` monkeypatches `${class}::dist_dir` to the test prefix, so dist_dir-derived accessors like `include_dir` work under test (2026-06-11)
 - cbindgen turns `#[repr(C)] struct Foo { _private: [u8; 0] }` into a zero-size struct DEFINITION that conflicts with the foreign header's real definition — for borrowed foreign types use `[export] exclude` plus `after_includes` forward typedefs in cbindgen.toml (2026-06-11)
+
+## Tooling
 - `[@Starter::Git]` uses Git::GatherDir, which gathers only git-TRACKED files — `git add` a new distribution's files before its first `dzil test` or the build dir will be missing them (symptom: `[AlienBuild] No alienfile!`) (2026-06-11)
+
 ## Workflow
 - The C bridge header declares shapes, but the bridge's .rs conversion code declares semantics (empty-string traps, free-after-callback ordering, stdio inheritance) — read both before writing FFI wrappers (2026-06-12)
 - Verify MUST-match wire constants (payload encodings, gRPC code maps, defaults) by grepping the reference SDK source yourself — Explore subagents paraphrase (reported "json/proto"; actual constant is "json/protobuf") (2026-06-10)
@@ -24,6 +28,7 @@
 - cbindgen renders opaque `_private: [u8; 0]` structs as zero-size definitions; borrowed foreign types need `[export] exclude` + `after_includes` forward typedefs to coexist with the owning header (2026-06-11)
 
 ## Perl
+- With Future::AsyncAwait loaded (0.71, perl 5.38.2), only ONE `class X :isa(Y)` declaration parses per file (the next gets leaked attribute-parser state) — one `:isa` class per file; subclasses can return `Future->done/fail` directly instead of `async` sugar (2026-06-12)
 - Hand-pack C tagged unions as `pack('L x4', $tag) . $variant` zero-padded to the union size (largest member); validate every offset via a shim echo function over #[repr(C)] mirror structs copied from the owning crate (2026-06-11)
 - Linux::FD::Event flags use long literals (`'non-blocking'`, `'close-on-exec'`) — spec §4.2's `'nonblock'` sketch is rejected; spike CPAN flag literals before coding against spec sketches (2026-06-11)
 - FFI::Platypus `record(Class)` is by value (returns included), `record(Class)*` by pointer; FFI::Platypus::Record cannot nest records — flatten embedded structs to layout-identical fields (2026-06-11)

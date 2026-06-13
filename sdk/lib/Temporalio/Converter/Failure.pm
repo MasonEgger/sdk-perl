@@ -65,6 +65,11 @@ my $WF_TYPE       = Temporalio::Core::Proto::resolve('temporal.api.common.v1.Wor
 
 class Temporalio::Converter::Failure {
 
+    # The default failure converter — spec section 5.1's
+    # Temporalio::Converter::Failure->default (the converter is stateless,
+    # so this is just a fresh instance).
+    sub default ($class) { return $class->new }
+
     # temporal.api.enums.v1.ApplicationErrorCategory: UNSPECIFIED=0, BENIGN=1.
     # The Perl-level category strings are 'application' (the spec default,
     # encoding as UNSPECIFIED) and 'benign'.
@@ -402,7 +407,7 @@ Temporalio::Converter::Failure - exception / Failure proto converter
     use Temporalio::Converter::Failure;
     use Temporalio::Converter::Payload;
 
-    my $fc = Temporalio::Converter::Failure->new;
+    my $fc = Temporalio::Converter::Failure->default;   # same as ->new
     my $pc = Temporalio::Converter::Payload->default;
 
     my $failure   = $fc->to_failure($exception, $pc);

@@ -105,9 +105,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.5.5 Verify
 
 ### P1.6 PayloadCodec + Converter::Data
-- [ ] P1.6.1 RED: sdk/t/unit/converter_data.t (T-conv-1..4)
-- [ ] P1.6.2 GREEN: PayloadCodec.pm + Data.pm + TestCodec.pm
-- [ ] P1.6.3 Verify
+- [x] P1.6.1 RED: sdk/t/unit/converter_data.t (T-conv-1..4)
+- [x] P1.6.2 GREEN: PayloadCodec.pm + Data.pm + TestCodec.pm
+- [x] P1.6.3 Verify
 
 ### P1.7 Client connect + configs + update_api_key
 - [ ] P1.7.1 RED: sdk/t/unit/client_config.t (PEM detection, defaults, identity)

@@ -35,8 +35,16 @@ draft has been removed; spec.md is the sole contract.)
   plan's `NotFound::Workflow` shorthand) and
   `Temporalio::Converter::Failure` round-trips the §5.3 info-type table
   with cause chains (enum fields cross as lowercased Temporal-spec
-  strings; unknown info warns once and degrades to Application). Next:
-  P1.6 PayloadCodec base + Converter::Data facade.
+  strings; unknown info warns once and degrades to Application). P1.6
+  complete: `Temporalio::Converter::PayloadCodec` (async abstract base)
+  and `Temporalio::Converter::Data` facade (codecs encode in list order,
+  decode in reverse; failure payload traversal mirrors sdk-python's
+  `_apply_to_failure_payloads`; codec/converter errors surface as
+  DataConverter); `Failure->default` added per spec §5.1. CAUTION: with
+  Future::AsyncAwait loaded, only ONE `class X :isa(Y)` parses per file
+  on perl 5.38.2 — keep one :isa class per file (the test codecs are
+  split into sdk/t/lib/TestCodec/*.pm for this reason). Next: P1.7
+  client connect + configs.
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 
