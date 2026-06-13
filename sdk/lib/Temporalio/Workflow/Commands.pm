@@ -85,6 +85,35 @@ sub cancel_timer ($seq) {
     return _command_class()->new({ cancel_timer => { seq => $seq } });
 }
 
+# respond_to_query { query_id, succeeded|failed } — answers a QueryWorkflow job
+# (spec section 10.3; MUST-match sdk-python _apply_query_workflow which sets
+# command.respond_to_query.query_id and either .succeeded.response (one result
+# payload) or .failed (the converted Failure)). The runner runs the :Query
+# handler, then calls this with the query id and either a result payload OR an
+# already-converted Failure proto (never both). A query failure is delivered as
+# THIS command, never as a workflow/task failure (a dying handler does not fail
+# the workflow).
+sub respond_to_query ($query_id, %parts) {
+    my %variant;
+    if (exists $parts{failure}) {
+        $variant{failed} = $parts{failure};
+    }
+    else {
+        # Success: QuerySuccess { response: Payload }. A void return leaves the
+        # response unset (sdk-python always sends one payload, but the converter
+        # may yield undef for a void handler return).
+        $variant{succeeded} = {
+            (defined $parts{response} ? (response => $parts{response}) : ()),
+        };
+    }
+    return _command_class()->new({
+        respond_to_query => {
+            query_id => $query_id,
+            %variant,
+        },
+    });
+}
+
 # set_patch_marker { patch_id, deprecated } — emitted the first time the
 # workflow body calls Temporalio::Workflow::patched($id) (or deprecate_patch)
 # and the patch is in use (spec section 10.3 step / versioning; MUST-match
@@ -177,6 +206,15 @@ and the C<google.protobuf.Duration> conversion).
 C<CancelTimer { seq }> — emitted when a started timer's
 L<Temporalio::Workflow::Future> is cancelled. C<$seq> is the seq of the
 C<StartTimer> being cancelled.
+
+=item C<respond_to_query($query_id, %parts)>
+
+C<QueryResult { query_id, succeeded|failed }> — answers a C<QueryWorkflow>
+activation job. Pass C<< response => $payload >> for a successful query (the
+handler's return value converted to a C<temporal.api.common.v1.Payload>, or
+omitted for a void return) or C<< failure => $failure >> for a dying handler
+(an already-converted C<temporal.api.failure.v1.Failure>). A query failure is
+delivered as this command, never as a workflow or task failure.
 
 =back
 

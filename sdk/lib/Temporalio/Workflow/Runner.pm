@@ -18,6 +18,7 @@ use Temporalio::Workflow::ContinueAsNew ();
 use Temporalio::Converter::Payload ();
 use Temporalio::Converter::Failure ();
 use Temporalio::Core::Proto ();
+use Temporalio::Exception ();
 use Temporalio::Exception::Cancelled ();
 use Temporalio::Exception::Nondeterminism ();
 use Temporalio::Exception::Workflow::NoRunner ();
@@ -432,8 +433,11 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'signal_workflow') {
             return $self->_apply_signal_workflow($job->signal_workflow);
         }
-        # QueryWorkflow (P4.2) / RemoveFromCache (handled by the dispatcher fast
-        # path) and friends land in later phases.
+        if ($variant eq 'query_workflow') {
+            return $self->_apply_query_workflow($job->query_workflow);
+        }
+        # RemoveFromCache (handled by the dispatcher fast path) and friends land
+        # in later phases.
         warn "Temporalio::Workflow::Runner: ignoring unhandled activation job"
            . " variant '$variant'\n";
         return;
@@ -707,6 +711,88 @@ class Temporalio::Workflow::Runner {
     # The names of signals still buffered (spec section 10.3 QUEUEING). Test
     # introspection helper — sorted for a stable view.
     method _buffered_signal_names { return [ sort keys %buffered_signals ] }
+
+    # QueryWorkflow { query_id, query_type, arguments } — run the matching
+    # :Query handler and emit a RespondToQuery command (spec section 10.3;
+    # MUST-match sdk-python _apply_query_workflow). Queries are SYNCHRONOUS in
+    # effect and MUST NOT mutate workflow state or produce other commands: they
+    # are ordered LAST in the activation (set 3 of _ordered_job_sets) so they
+    # observe the most up-to-date state, and they run against the live instance.
+    # A handler that throws does NOT fail the workflow or the task — it produces
+    # a RespondToQuery carrying the converted failure (the dying-handler case).
+    # A query with no named handler and no dynamic handler is itself a query
+    # failure (sdk-python raises "Query handler ... not found").
+    method _apply_query_workflow ($job) {
+        my $query_id = $job->query_id // '';
+        my $name     = $job->query_type // '';
+
+        my ($handler, $is_dynamic) = $self->_resolve_query_handler($name);
+        if (!defined $handler) {
+            my $known = join ' ', sort keys $workflow_class->_workflow_defs->{queries}->%*;
+            my $err = Temporalio::Exception->new(
+                message => "Query handler for '$name' expected but not found, "
+                         . "known queries: [$known]",
+            );
+            push @commands, Temporalio::Workflow::Commands::respond_to_query(
+                $query_id,
+                failure => $failure_converter->to_failure($err, $payload_converter),
+            );
+            return;
+        }
+
+        # Decode the query arguments. A dynamic handler is called with
+        # ($name, @args) (mirrors sdk-python's dynamic query (name, args)); a
+        # named one gets the bare decoded args. The handler is run through
+        # Future->call(sub { Future->wrap(...) }) — the lessons.md idiom for
+        # sync-or-async user code: it routes a synchronous die into a failed
+        # Future and normalises a plain return into a done Future. A query is
+        # synchronous in effect, so the Future is expected to be already ready;
+        # we read its outcome immediately.
+        my @args = map { $payload_converter->from_payload($_) }
+            (($job->arguments // [])->@*);
+
+        my $future = Future->call(sub {
+            return Future->wrap(
+                $is_dynamic
+                    ? $instance->$handler($name, @args)
+                    : $instance->$handler(@args)
+            );
+        });
+
+        if (my @failure = $future->failure) {
+            # Dying handler -> query FAILED response (not a workflow/task fail).
+            push @commands, Temporalio::Workflow::Commands::respond_to_query(
+                $query_id,
+                failure => $failure_converter->to_failure($failure[0], $payload_converter),
+            );
+            return;
+        }
+
+        my $result = ($future->result)[0];
+        my $payload = defined $result
+            ? $payload_converter->to_payload($result)
+            : undef;
+        push @commands, Temporalio::Workflow::Commands::respond_to_query(
+            $query_id,
+            response => $payload,
+        );
+        return;
+    }
+
+    # Resolve a query handler by name (spec section 10.3): the named :Query
+    # handler if one matches, else the dynamic catch-all if registered. Returns
+    # ($methodref, $is_dynamic) or (undef) when neither exists. MUST-match
+    # sdk-python's `self._queries.get(name) or self._queries.get(None)`.
+    method _resolve_query_handler ($name) {
+        my $defs = $workflow_class->_workflow_defs;
+        if (my $named = $defs->{queries}{$name}) {
+            return ($named, 0);
+        }
+        if (my $dynamic = $defs->{dynamic}{query}) {
+            return ($dynamic, 1);
+        }
+        return (undef);
+    }
 
     # True when no signal handler is still in-flight (spec section 10.3 ASYNC
     # HANDLER TRACKING; MUST-match sdk-python workflow_all_handlers_finished).

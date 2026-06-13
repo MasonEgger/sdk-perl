@@ -232,9 +232,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P4.1.3 Verify
 
 ### P4.2 Queries
-- [ ] P4.2.1 RED: sdk/t/replay/queries.t (T-wf-4, dying handler, queries-last)
-- [ ] P4.2.2 GREEN: QueryWorkflow + RespondToQuery
-- [ ] P4.2.3 Verify
+- [x] P4.2.1 RED: sdk/t/replay/queries.t (T-wf-4, dying handler, queries-last)
+- [x] P4.2.2 GREEN: QueryWorkflow + RespondToQuery
+- [x] P4.2.3 Verify
 
 ### P4.3 wait_condition
 - [ ] P4.3.1 RED: sdk/t/replay/wait_condition.t (T-wf-5, timeout, re-check per pump)
