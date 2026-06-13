@@ -2,6 +2,7 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- Messages delivered only inside a google.protobuf.Any (google.rpc.Status, temporal.api.errordetails.v1.*) are never imported by the service protos, so import-driven schema loading misses them — parse them as explicit roots, and note sdk-rust vendors google/rpc in a standalone proto root OUTSIDE api_upstream (2026-06-12)
 - The sibling reference checkouts track upstream HEAD and can drift from spec MUST-match constants (sdk-rust `RetryOptions::default` multiplier moved 1.5→1.7 while python/ruby still ship 1.5) — when one reference disagrees with spec, confirm against a second reference SDK before assuming the spec is stale; spec wins (2026-06-12)
 - With Future::AsyncAwait loaded (0.71, perl 5.38.2) — even `use Future::AsyncAwait ()` with no import — only the FIRST `class X :isa(Y)` per file parses; the next dies with "Subroutine attributes must come before the signature" or "non-empty @ISA". Keep one `:isa` class per file; codec/test classes that must share a file can skip the `async` sugar and return `Future->done/fail` directly (2026-06-12)
 - The C bridge header alone under-specifies semantics — read the bridge's .rs conversion code too (testing.rs: an EMPTY download_version becomes `Fixed("")` not SDK-default, so pass the literal 'default'; `ephemeral_server_free` must wait for the shutdown callback because the async block borrows the server box; the spawned CLI inherits stdout/stderr) (2026-06-12)
@@ -11,7 +12,6 @@
 - Linux::FD::Event flags use long literals (`'non-blocking'`, `'close-on-exec'`) — spec §4.2's `'nonblock'` sketch is rejected with "No such flag"; spike CPAN flag/option literals in a one-liner before coding against spec sketches (2026-06-11)
 - FFI::Platypus::Record drops C trailing padding (TemporalCoreByteArray: 25 bytes vs C's 32) but inserts interior padding correctly — by-pointer field reads are safe, and record sizeof IS a valid array stride iff the final member ends on the struct's max-alignment boundary (probe with sentinel bytes first; CallbackEntry: 64 == C); read struct fields from an opaque ptr by casting `'opaque' => 'record(Class)*'` through the shared FFI instance (2026-06-12)
 - FFI::Platypus `record(Class)` (no `*`) passes AND returns structs by value — small by-value returns like TemporalCoreRuntimeOrFail work directly on x86-64, no shim out-param needed; `record(Class)*` is the pointer form; nested records are unsupported by FFI::Platypus::Record, so flatten embedded structs into layout-identical scalar fields (2026-06-11)
-- Alien::Build runs alienfiles via `do '<abs path>'`, so `__FILE__` inside an alienfile is the real path — walk up from it to locate in-tree sources (works from a checkout AND a dzil .build dir); Test::Alien::Build's `alien_build_ok` monkeypatches `${class}::dist_dir` to the test prefix, so dist_dir-derived accessors like `include_dir` work under test (2026-06-11)
 ## Tooling
 - `[@Starter::Git]` uses Git::GatherDir, which gathers only git-TRACKED files — `git add` a new distribution's files before its first `dzil test` or the build dir will be missing them (symptom: `[AlienBuild] No alienfile!`) (2026-06-11)
 
@@ -23,6 +23,9 @@
 - Cross-check new-SDK semantics against at least two reference SDKs (Python for workflow semantics, Ruby for worker architecture) — single-source review missed RemoveFromCache eviction and the cancel-vs-fail completion command (2026-06-10)
 - When a parallel tool batch partially fails (e.g. classifier outage), re-dispatch only the cancelled calls — results from the surviving calls in the batch remain valid (2026-06-10)
 - To write files larger than one response allows, end each chunk with a unique marker comment and append via Edit on the marker (2026-06-10)
+
+## Protobuf
+- Messages delivered only inside a google.protobuf.Any (google.rpc.Status, temporal.api.errordetails.v1.*) are never imported by the service protos, so import-driven schema loading misses them — parse them as explicit roots; sdk-rust vendors google/rpc in a standalone proto root outside api_upstream (2026-06-12)
 
 ## Rust
 - cbindgen renders opaque `_private: [u8; 0]` structs as zero-size definitions; borrowed foreign types need `[export] exclude` + `after_includes` forward typedefs to coexist with the owning header (2026-06-11)

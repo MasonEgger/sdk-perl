@@ -8,9 +8,21 @@ no warnings 'experimental::class';
 use FFI::Platypus::Buffer ();
 use Temporalio::Core::ByteArray ();
 use Temporalio::Core::FFI ();
+use Temporalio::Core::Proto ();
+use Temporalio::Exception::ActivityNotFound ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::Bridge ();
+use Temporalio::Exception::Cancelled ();
+use Temporalio::Exception::NamespaceNotFound ();
+use Temporalio::Exception::QueryRejected ();
+use Temporalio::Exception::RpcError ();
+use Temporalio::Exception::RpcPermissionDenied ();
+use Temporalio::Exception::RpcResourceExhausted ();
+use Temporalio::Exception::RpcTimeout ();
+use Temporalio::Exception::RpcUnauthenticated ();
 use Temporalio::Exception::Runtime ();
+use Temporalio::Exception::WorkflowAlreadyStarted ();
+use Temporalio::Exception::WorkflowNotFound ();
 
 # Process-wide monotonic 64-bit callback id (spec section 4.5).
 my $NEXT_CALLBACK_ID = 1;
@@ -45,6 +57,128 @@ class Temporalio::Core::Callback {
 
     sub _bridge_failure ($message) {
         return Temporalio::Exception::Bridge->new(message => $message);
+    }
+
+    # --- spec section 7.5: RPC error -> exception mapping -------------------
+
+    # gRPC status code -> canonical name, lowercased (MUST-match table;
+    # verified against sdk-python service.py RPCStatusCode, lines 418-437).
+    my %GRPC_STATUS_NAME = (
+        0  => 'ok',
+        1  => 'cancelled',
+        2  => 'unknown',
+        3  => 'invalid_argument',
+        4  => 'deadline_exceeded',
+        5  => 'not_found',
+        6  => 'already_exists',
+        7  => 'permission_denied',
+        8  => 'resource_exhausted',
+        9  => 'failed_precondition',
+        10 => 'aborted',
+        11 => 'out_of_range',
+        12 => 'unimplemented',
+        13 => 'internal',
+        14 => 'unavailable',
+        15 => 'data_loss',
+        16 => 'unauthenticated',
+    );
+
+    # The non-special-cased rows of the spec section 7.5 lookup table. Codes
+    # 5 (NOT_FOUND), 6 (ALREADY_EXISTS), and 9 (FAILED_PRECONDITION) are
+    # handled contextually in rpc_error_for; everything else not listed here
+    # is the RpcError catch-all.
+    my %CLASS_FOR_CODE = (
+        1  => 'Temporalio::Exception::Cancelled',
+        4  => 'Temporalio::Exception::RpcTimeout',
+        7  => 'Temporalio::Exception::RpcPermissionDenied',
+        8  => 'Temporalio::Exception::RpcResourceExhausted',
+        16 => 'Temporalio::Exception::RpcUnauthenticated',
+    );
+
+    # Decode failure_details as a google.rpc.Status when present. The bridge
+    # sends an EMPTY (non-null) byte array when tonic carried no
+    # grpc-status-details-bin, so empty and absent both mean "no details".
+    # Returns undef on garbage - mapping an error must never die.
+    sub _decode_grpc_status ($details) {
+        return undef unless defined $details && length $details;
+        return scalar eval {
+            Temporalio::Core::Proto::resolve('google.rpc.Status')
+                ->decode($details);
+        };
+    }
+
+    # Unpack a google.protobuf.Any against an expected full message name
+    # (Any.type_url is "<prefix>/<full name>"). Returns undef on a type
+    # mismatch or undecodable value.
+    sub _unpack_any ($any, $full_name) {
+        return undef unless defined $any
+            && ($any->type_url // '') =~ m{/\Q$full_name\E\z};
+        return scalar eval {
+            Temporalio::Core::Proto::resolve($full_name)
+                ->decode($any->value // '');
+        };
+    }
+
+    # rpc_error_for(status_code => ..., message => ..., details => $raw,
+    #               rpc => $rpc_name, %context)
+    # Builds (does not throw) the exception for a failed RPC completion per
+    # the spec section 7.5 MUST-match table. $raw is the raw failure_details
+    # byte string (a serialized google.rpc.Status). %context may carry
+    # workflow_id / workflow_type for the ALREADY_EXISTS special case.
+    sub rpc_error_for (%args) {
+        my $code    = $args{status_code} // 0;
+        my $message = $args{message} // 'RPC call failed';
+        my $rpc     = $args{rpc} // '';
+        my $status  = _decode_grpc_status($args{details});
+
+        # 5 NOT_FOUND, special-cased on the operation kind: namespace ops
+        # raise NamespaceNotFound, activity ops ActivityNotFound, everything
+        # else (the common case) WorkflowNotFound.
+        if ($code == 5) {
+            my $class = $rpc =~ /Namespace/ ? 'Temporalio::Exception::NamespaceNotFound'
+                      : $rpc =~ /Activity/  ? 'Temporalio::Exception::ActivityNotFound'
+                      :                       'Temporalio::Exception::WorkflowNotFound';
+            return $class->new(message => $message);
+        }
+
+        # 6 ALREADY_EXISTS, special-cased on start_workflow: like sdk-python
+        # client/_impl.py and sdk-ruby internal/client/implementation.rb,
+        # only when details[0] unpacks as the errordetails failure; otherwise
+        # fall through to the RpcError catch-all.
+        if ($code == 6
+            && $rpc =~ /\A(?:SignalWithStart|Start)WorkflowExecution\z/)
+        {
+            my $failure = _unpack_any(
+                $status && $status->details->[0],
+                'temporal.api.errordetails.v1.WorkflowExecutionAlreadyStartedFailure',
+            );
+            if (defined $failure) {
+                return Temporalio::Exception::WorkflowAlreadyStarted->new(
+                    message       => $message,
+                    workflow_id   => $args{workflow_id},
+                    workflow_type => $args{workflow_type},
+                    run_id        => $failure->run_id,
+                );
+            }
+        }
+
+        # 9 FAILED_PRECONDITION, special-cased on query rejection.
+        if ($code == 9 && $rpc eq 'QueryWorkflow') {
+            return Temporalio::Exception::QueryRejected->new(
+                message => $message);
+        }
+
+        my $class = $CLASS_FOR_CODE{$code} // 'Temporalio::Exception::RpcError';
+        return $class->new(message => $message)
+            unless $class->isa('Temporalio::Exception::RpcError');
+        return $class->new(
+            message     => $message,
+            status_code => $code,
+            # Code 0 with a failure message is a non-gRPC failure (client.rs:
+            # "Status code may still be 0 with a failure message").
+            status_name => $code ? $GRPC_STATUS_NAME{$code} : undef,
+            details     => $status,
+        );
     }
 
     # Per-kind result builders keyed on entry.kind (1..6 in trampoline

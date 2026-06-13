@@ -117,11 +117,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.7.5 Verify
 
 ### P1.8 client_rpc_call + error mapping
-- [ ] P1.8.1 RED: sdk/t/unit/rpc_mapping.t (§7.5 table-driven)
-- [ ] P1.8.2 GREEN: rpc branch in Callback.pm
-- [ ] P1.8.3 RED: sdk/t/integration/client_rpc.t (DescribeNamespace, NotFound, retry flag)
-- [ ] P1.8.4 GREEN: _rpc_call helper + FFI attach
-- [ ] P1.8.5 Verify
+- [x] P1.8.1 RED: sdk/t/unit/rpc_mapping.t (§7.5 table-driven)
+- [x] P1.8.2 GREEN: rpc branch in Callback.pm
+- [x] P1.8.3 RED: sdk/t/integration/client_rpc.t (DescribeNamespace, NotFound, retry flag)
+- [x] P1.8.4 GREEN: _rpc_call helper + FFI attach
+- [x] P1.8.5 Verify
 
 ### P1.9 Common types
 - [ ] P1.9.1 RED: sdk/t/unit/common_types.t (RetryPolicy proto, SA typed keys, untyped → Argument)

@@ -187,6 +187,36 @@ package Temporalio::Core::FFI::ConnectionOptions {
     );
 }
 
+package Temporalio::Core::FFI::RpcCallOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreRpcCallOptions (client.rs / header): the service
+    # discriminator (repr(C) enum: Workflow=1, Operator, Cloud, Test,
+    # Health), two ByteArrayRef members (rpc name, serialized request proto)
+    # flattened to (data, size) pairs, the retry flag (core, not Perl,
+    # applies the client RetryConfig - spec section 7.5), two MetadataRef
+    # members (entry-count sized; build with keep_byte_array_ref_array),
+    # timeout_millis (0 = no timeout), and an optional cancellation token.
+    # Layout verified against the pinned header with a gcc offsetof probe:
+    # service at 0 (+4 pad), rpc at 8, req at 24, retry at 40 (+7 pad),
+    # metadata at 48, binary_metadata at 64, timeout_millis at 80 (+4 pad),
+    # cancellation_token at 88, sizeof 96 - record_layout_1 inserts the same
+    # padding.
+    record_layout_1(
+        uint32 => 'service',
+        opaque => 'rpc_data',
+        size_t => 'rpc_size',
+        opaque => 'req_data',
+        size_t => 'req_size',
+        bool   => 'retry',
+        opaque => 'metadata_data',
+        size_t => 'metadata_size',
+        opaque => 'binary_metadata_data',
+        size_t => 'binary_metadata_size',
+        uint32 => 'timeout_millis',
+        opaque => 'cancellation_token',
+    );
+}
+
 package Temporalio::Core::FFI::LoggingOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreLoggingOptions
@@ -336,6 +366,7 @@ $ffi->type('record(Temporalio::Core::FFI::ClientTlsOptions)'       => 'TemporalC
 $ffi->type('record(Temporalio::Core::FFI::ClientRetryOptions)'     => 'TemporalCoreClientRetryOptions');
 $ffi->type('record(Temporalio::Core::FFI::ClientKeepAliveOptions)' => 'TemporalCoreClientKeepAliveOptions');
 $ffi->type('record(Temporalio::Core::FFI::ConnectionOptions)'      => 'TemporalCoreConnectionOptions');
+$ffi->type('record(Temporalio::Core::FFI::RpcCallOptions)'         => 'TemporalCoreRpcCallOptions');
 $ffi->type('record(Temporalio::Core::FFI::TestServerOptions)'    => 'TemporalCoreTestServerOptions');
 $ffi->type('record(Temporalio::Core::FFI::DevServerOptions)'     => 'TemporalCoreDevServerOptions');
 $ffi->type('record(Temporalio::Core::FFI::LoggingOptions)'       => 'TemporalCoreLoggingOptions');
@@ -449,6 +480,13 @@ my @phase0_attach = (
       [ 'TemporalCoreConnection' ] => 'void' ],
     [ temporal_core_client_update_api_key => 'client_update_api_key',
       [ 'TemporalCoreConnection', 'TemporalCoreByteArrayRef' ] => 'void' ],
+    # Raw RPC call (spec sections 7.3/7.5). The callback arguments are the
+    # shim trampoline pointer (rpc kind) and the shim (queue, callback_id)
+    # user_data pair, both passed as opaque. Per the header: "Client,
+    # options, and user data must live through callback."
+    [ temporal_core_client_rpc_call => 'client_rpc_call',
+      [ 'TemporalCoreConnection', 'record(Temporalio::Core::FFI::RpcCallOptions)*',
+        'opaque', 'opaque' ] => 'void' ],
     # Ephemeral dev server (spec section 12.2). The callback arguments are
     # the shim trampoline pointers (server_start / server_shutdown kinds),
     # passed as opaque; user_data is the shim (queue, callback_id) pair.

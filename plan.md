@@ -54,8 +54,18 @@ draft has been removed; spec.md is the sole contract.)
   ClientKeepAliveOptions records + client_connect/client_free/
   client_update_api_key attaches in Core::FFI (metadata is a
   ByteArrayRefArray — entry COUNT, not byte length; built via the new
-  `keep_byte_array_ref_array`). Next: P1.8 client_rpc_call + §7.5
-  error mapping.
+  `keep_byte_array_ref_array`). P1.8 complete: the §7.5 MUST-match
+  mapping lives in `Temporalio::Core::Callback::rpc_error_for` (status
+  names verified against sdk-python service.py RPCStatusCode; the
+  ALREADY_EXISTS→WorkflowAlreadyStarted unpack verified against
+  sdk-python client/_impl.py and sdk-ruby implementation.rb);
+  `Client->_rpc_call` (async, retry=1 default, response class derived
+  from the request class) over the RpcCallOptions record (gcc offsetof
+  probe: sizeof 96) + client_rpc_call attach; google/rpc/status.proto
+  newly vendored (sdk-rust's standalone google/ root — vendor-protos.pl
+  updated) and parsed as an explicit proto root alongside
+  errordetails/v1/message.proto (both reachable only via Any). Next:
+  P1.9 common types (RetryPolicy/Priority/TypedSearchAttributes).
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 

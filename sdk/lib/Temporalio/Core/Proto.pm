@@ -143,6 +143,15 @@ sub _root_files ($root) {
         },
     }, File::Spec->catdir($root, qw(temporal sdk core)));
 
+    # Messages reachable only through a google.protobuf.Any, never via an
+    # import: the gRPC error envelope and the Temporal error-details payloads
+    # it carries (spec section 7.5). Parse them as explicit roots; a missing
+    # file dies in load() with its path, the same re-vendor guard as any
+    # other root.
+    push @roots,
+        File::Spec->catfile($root, qw(google rpc status.proto)),
+        File::Spec->catfile($root, qw(temporal api errordetails v1 message.proto));
+
     return sort map { File::Spec->abs2rel($_, $root) } @roots;
 }
 

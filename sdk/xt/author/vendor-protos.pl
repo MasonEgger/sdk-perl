@@ -13,6 +13,10 @@
 #                                  google/protobuf/** is EXCLUDED — the Protobuf
 #                                  distribution bundles the well-known types and
 #                                  Temporalio::Core::Proto adds its share root)
+#   google/rpc/**              -> share/proto/google/rpc/      (google.rpc.Status,
+#                                  the gRPC error envelope decoded by the spec
+#                                  section 7.5 mapping; lives in its own root in
+#                                  sdk-rust, outside api_upstream)
 # plus the api_upstream LICENSE for attribution. Only *.proto files are copied.
 # The destination tree is wiped first so removals upstream propagate.
 use v5.38;
@@ -48,6 +52,9 @@ my @trees = (
       # The well-known types ship inside the Protobuf distribution; vendoring
       # a second copy here would shadow the canonical ones (spec section 4.6).
       sub ($rel) { $rel =~ m{^protobuf/} } ],
+    # google.rpc.Status (the gRPC error envelope, spec section 7.5) lives in
+    # sdk-rust's standalone google/ proto root, not under api_upstream.
+    [ "$protos/google/rpc",            "$dest/google/rpc", undef ],
 );
 
 my $copied = 0;
