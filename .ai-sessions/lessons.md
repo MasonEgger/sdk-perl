@@ -2,6 +2,7 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- Generated Protobuf message accessors (Temporalio::Proto::*) are READ-ONLY — `$msg->field($x)` silently no-ops (no error), so build every field via `Class->new(\%fields)`; collect variant-only fields (e.g. SignalWithStart's signal_name/signal_input) into an extras hash and merge into the constructor args rather than setting them after construction (2026-06-12)
 - `feature 'class'` only generates a NAMED-param constructor (no BUILDARGS), so a spec-mandated positional `->new(\@x)` needs a glob wrapper: capture `Class->can('new')`, then `*Class::new = sub ($c,$arg){ ...validate...; $gen->($c, field => $arg) }` after the `class {}` block (`no warnings 'redefine'`) (2026-06-12)
 - Messages delivered only inside a google.protobuf.Any (google.rpc.Status, temporal.api.errordetails.v1.*) are never imported by the service protos, so import-driven schema loading misses them — parse them as explicit roots, and note sdk-rust vendors google/rpc in a standalone proto root OUTSIDE api_upstream (2026-06-12)
 - The sibling reference checkouts track upstream HEAD and can drift from spec MUST-match constants (sdk-rust `RetryOptions::default` multiplier moved 1.5→1.7 while python/ruby still ship 1.5) — when one reference disagrees with spec, confirm against a second reference SDK before assuming the spec is stale; spec wins (2026-06-12)
@@ -11,7 +12,7 @@
 - An installed (non-checkout) Protobuf dist cannot auto-resolve its bundled WKTs — Parser.pm's share lookup is checkout-relative but installs land in auto/share/dist/Protobuf — so pass `File::ShareDir::dist_dir('Protobuf') . '/proto'` as an explicit include path (2026-06-12)
 - cbindgen tagged unions (#[repr(C)] Rust enums with payload) lay out as {4-byte C-enum tag, pad to union alignment, union sized by largest member}; Perl-side hand-pack is `pack('L x4', $tag) . $variant` zero-padded to the union size — and verify hand-packed layouts with a shim echo function built on #[repr(C)] mirrors copied verbatim from the owning crate (compiler-guaranteed layout, no server needed) (2026-06-11)
 - Linux::FD::Event flags use long literals (`'non-blocking'`, `'close-on-exec'`) — spec §4.2's `'nonblock'` sketch is rejected with "No such flag"; spike CPAN flag/option literals in a one-liner before coding against spec sketches (2026-06-11)
-- FFI::Platypus `record(Class)` (no `*`) passes AND returns structs by value — small by-value returns like TemporalCoreRuntimeOrFail work directly on x86-64, no shim out-param needed; `record(Class)*` is the pointer form; nested records are unsupported by FFI::Platypus::Record, so flatten embedded structs into layout-identical scalar fields (2026-06-11)
+
 ## Tooling
 - `[@Starter::Git]` uses Git::GatherDir, which gathers only git-TRACKED files — `git add` a new distribution's files before its first `dzil test` or the build dir will be missing them (symptom: `[AlienBuild] No alienfile!`) (2026-06-11)
 

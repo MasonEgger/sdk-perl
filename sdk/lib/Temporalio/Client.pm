@@ -17,6 +17,9 @@ use Temporalio::Client::Connection ();
 use Temporalio::Client::KeepAliveConfig ();
 use Temporalio::Client::RetryConfig ();
 use Temporalio::Client::TlsConfig ();
+use Temporalio::Client::WorkflowHandle ();
+use Temporalio::Common::TypedSearchAttributes ();
+use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::RpcError ();
 use Temporalio::Runtime ();
@@ -31,6 +34,24 @@ class Temporalio::Client {
         cloud    => 3,
         test     => 4,
         health   => 5,
+    );
+
+    # Workflow-id reuse/conflict policy spec strings -> proto enum numbers.
+    # MUST match temporal.api.enums.v1.WorkflowId{Reuse,Conflict}Policy
+    # (introspected from the vendored proto; cross-checked against sdk-python
+    # temporalio/common.py WorkflowIDReusePolicy / WorkflowIDConflictPolicy).
+    my %ID_REUSE_POLICY = (
+        unspecified                 => 0,
+        allow_duplicate             => 1,
+        allow_duplicate_failed_only => 2,
+        reject_duplicate            => 3,
+        terminate_if_running        => 4,
+    );
+    my %ID_CONFLICT_POLICY = (
+        unspecified        => 0,
+        fail               => 1,
+        use_existing       => 2,
+        terminate_existing => 3,
     );
 
     field $connection     :param;    # Temporalio::Client::Connection
@@ -50,6 +71,280 @@ class Temporalio::Client {
     method update_api_key ($api_key) {
         $connection->update_api_key($api_key);
         return;
+    }
+
+    # get_workflow_handle($workflow_id, run_id => ..., first_execution_run_id
+    # => ...) — returns a Temporalio::Client::WorkflowHandle without an RPC
+    # (spec section 7.4).
+    method get_workflow_handle ($workflow_id, %opts) {
+        Temporalio::Exception::Argument->throw(
+            message => 'get_workflow_handle requires a workflow id')
+            unless defined $workflow_id && length $workflow_id;
+        return Temporalio::Client::WorkflowHandle->new(
+            client                 => $self,
+            workflow_id            => $workflow_id,
+            run_id                 => $opts{run_id},
+            first_execution_run_id => $opts{first_execution_run_id},
+        );
+    }
+
+    # start_workflow($workflow_or_string, \@args, %kwargs) — async (spec
+    # section 7.4). Builds the StartWorkflowExecutionRequest, issues it over
+    # _rpc_call (ALREADY_EXISTS special-cased to WorkflowAlreadyStarted via
+    # the spec section 7.5 mapping), and returns a WorkflowHandle whose run_id
+    # is the response's first run id.
+    async method start_workflow ($workflow, $args = [], %kwargs) {
+        my $request = await $self->_build_start_workflow_request(
+            $workflow, $args, %kwargs);
+        my $workflow_id = $request->workflow_id;
+        my $response = await $self->_rpc_call(
+            'StartWorkflowExecution', $request,
+            error_context => {
+                workflow_id   => $workflow_id,
+                workflow_type => $request->workflow_type->name,
+            });
+        return Temporalio::Client::WorkflowHandle->new(
+            client                 => $self,
+            workflow_id            => $workflow_id,
+            run_id                 => $response->run_id,
+            first_execution_run_id => $response->run_id,
+        );
+    }
+
+    # execute_workflow(...) — convenience: start then await result. result()
+    # lands in P1.11; the helper is wired here for completeness once it does.
+    async method execute_workflow ($workflow, $args = [], %kwargs) {
+        my $handle = await $self->start_workflow($workflow, $args, %kwargs);
+        return await $handle->result;
+    }
+
+    # signal_with_start_workflow($workflow_or_string, \@args, %kwargs) — async
+    # (spec section 7.4). Same kwargs as start_workflow plus signal =>
+    # $name, signal_args => \@args.
+    async method signal_with_start_workflow ($workflow, $args = [], %kwargs) {
+        my $request = await $self->_build_signal_with_start_workflow_request(
+            $workflow, $args, %kwargs);
+        my $workflow_id = $request->workflow_id;
+        my $response = await $self->_rpc_call(
+            'SignalWithStartWorkflowExecution', $request,
+            error_context => {
+                workflow_id   => $workflow_id,
+                workflow_type => $request->workflow_type->name,
+            });
+        return Temporalio::Client::WorkflowHandle->new(
+            client                 => $self,
+            workflow_id            => $workflow_id,
+            run_id                 => $response->run_id,
+            first_execution_run_id => $response->run_id,
+        );
+    }
+
+    # _build_start_workflow_request($workflow_or_string, \@args, %kwargs) —
+    # async; maps the spec section 7.4 kwargs onto a
+    # StartWorkflowExecutionRequest. Validation (required id/task_queue, policy
+    # strings) happens here, before any RPC. Args/memo/header values encode
+    # through the data converter.
+    async method _build_start_workflow_request ($workflow, $args, %kwargs) {
+        my $class = Temporalio::Core::Proto::resolve(
+            'temporal.api.workflowservice.v1.StartWorkflowExecutionRequest');
+        return await $self->_populate_start_request($class, $workflow, $args,
+            \%kwargs);
+    }
+
+    # _build_signal_with_start_workflow_request(...) — async; like the above
+    # but targets SignalWithStartWorkflowExecutionRequest and additionally
+    # carries the signal name + encoded signal args.
+    async method _build_signal_with_start_workflow_request ($workflow, $args, %kwargs) {
+        my $signal      = delete $kwargs{signal};
+        my $signal_args = delete $kwargs{signal_args} // [];
+        Temporalio::Exception::Argument->throw(
+            message => 'signal_with_start_workflow requires a signal name')
+            unless defined $signal && length $signal;
+
+        # The generated proto accessors are read-only, so every field must be
+        # passed through new(): collect the signal extras and hand them to the
+        # shared populator to merge into the constructor args.
+        my %extra = (signal_name => $signal);
+        if (@$signal_args) {
+            my @payloads = await $data_converter->to_payloads($signal_args);
+            my $Payloads = Temporalio::Core::Proto::resolve(
+                'temporal.api.common.v1.Payloads');
+            $extra{signal_input} = $Payloads->new({ payloads => [@payloads] });
+        }
+
+        my $class = Temporalio::Core::Proto::resolve(
+            'temporal.api.workflowservice.v1.SignalWithStartWorkflowExecutionRequest');
+        return await $self->_populate_start_request($class, $workflow,
+            $args, \%kwargs, \%extra);
+    }
+
+    # Shared body for both request kinds. Mutates and returns a fresh request
+    # message of $class. Async because args/memo/header encode through the
+    # data converter.
+    async method _populate_start_request ($class, $workflow, $args, $kwargs, $extra = {}) {
+        my %k = %$kwargs;
+        my $id         = delete $k{id};
+        my $task_queue = delete $k{task_queue};
+        Temporalio::Exception::Argument->throw(
+            message => 'start_workflow requires an id')
+            unless defined $id && length $id;
+        Temporalio::Exception::Argument->throw(
+            message => 'start_workflow requires a task_queue')
+            unless defined $task_queue && length $task_queue;
+
+        my $workflow_name = _workflow_name($workflow);
+
+        my $reuse = _policy_enum('id_reuse_policy', delete $k{id_reuse_policy},
+            \%ID_REUSE_POLICY);
+        my $conflict = _policy_enum('id_conflict_policy',
+            delete $k{id_conflict_policy}, \%ID_CONFLICT_POLICY);
+
+        my $WorkflowType = Temporalio::Core::Proto::resolve(
+            'temporal.api.common.v1.WorkflowType');
+        my $TaskQueue = Temporalio::Core::Proto::resolve(
+            'temporal.api.taskqueue.v1.TaskQueue');
+
+        my %fields = (
+            namespace                   => $namespace,
+            workflow_id                 => $id,
+            workflow_type               => $WorkflowType->new({ name => $workflow_name }),
+            task_queue                  => $TaskQueue->new({ name => $task_queue }),
+            identity                    => $identity,
+            request_id                  => _new_uuid(),
+            workflow_id_reuse_policy    => $reuse,
+            workflow_id_conflict_policy => $conflict,
+        );
+
+        if (defined(my $cron = delete $k{cron_schedule})) {
+            $fields{cron_schedule} = $cron;
+        }
+        if (delete $k{request_eager_start}) {
+            $fields{request_eager_execution} = 1;
+        }
+
+        for my $pair (
+            [ execution_timeout => 'workflow_execution_timeout' ],
+            [ run_timeout       => 'workflow_run_timeout' ],
+            [ task_timeout      => 'workflow_task_timeout' ],
+            [ start_delay       => 'workflow_start_delay' ],
+        ) {
+            my ($kw, $proto_field) = @$pair;
+            my $seconds = delete $k{$kw};
+            $fields{$proto_field} = _duration($seconds) if defined $seconds;
+        }
+
+        if (my $args_ref = $args) {
+            if (@$args_ref) {
+                my @payloads = await $data_converter->to_payloads($args_ref);
+                my $Payloads = Temporalio::Core::Proto::resolve(
+                    'temporal.api.common.v1.Payloads');
+                $fields{input} = $Payloads->new({ payloads => [@payloads] });
+            }
+        }
+
+        if (defined(my $retry_policy = delete $k{retry_policy})) {
+            $fields{retry_policy} = $retry_policy->to_proto;
+        }
+        if (defined(my $priority = delete $k{priority})) {
+            $fields{priority} = $priority->to_proto;
+        }
+        if (defined(my $sa = delete $k{search_attributes})) {
+            $fields{search_attributes} = _coerce_search_attributes($sa);
+        }
+        if (defined(my $memo = delete $k{memo})) {
+            $fields{memo} = await $self->_encode_string_payload_map(
+                'temporal.api.common.v1.Memo', $memo);
+        }
+        if (defined(my $headers = delete $k{headers})) {
+            $fields{header} = await $self->_encode_string_payload_map(
+                'temporal.api.common.v1.Header', $headers);
+        }
+
+        # Quietly ignore fields parked for later phases (static_summary/
+        # static_details/versioning_override) — but reject genuine typos.
+        delete @k{qw(static_summary static_details versioning_override)};
+        if (my @unknown = sort keys %k) {
+            Temporalio::Exception::Argument->throw(
+                message => 'unknown start_workflow option(s): '
+                         . join(', ', @unknown));
+        }
+
+        # Merge caller-supplied extras (e.g. signal_name/signal_input for the
+        # SignalWithStart variant) — the generated proto accessors are
+        # read-only, so everything must arrive via new().
+        %fields = (%fields, %$extra);
+
+        return $class->new(\%fields);
+    }
+
+    # Encode a { name => value } hashref into a temporal.api.common.v1.{Memo,
+    # Header} message: each value becomes a single Payload via the data
+    # converter, keyed by name in the proto's `fields` map.
+    async method _encode_string_payload_map ($proto_name, $hashref) {
+        my $Message = Temporalio::Core::Proto::resolve($proto_name);
+        my %map;
+        for my $key (sort keys %$hashref) {
+            my ($payload) = await $data_converter->to_payloads([ $hashref->{$key} ]);
+            $map{$key} = $payload;
+        }
+        return $Message->new({ fields => \%map });
+    }
+
+    # ----- non-method helpers (file-scope subs compile into main:: under a
+    # bare `class`; keep them here so the methods above can call them) -----
+
+    sub _workflow_name ($workflow) {
+        # A workflow function ref carries its registered name elsewhere
+        # (P3.1); v0.1's client takes the type name as a string. A coderef is
+        # not yet resolvable, so require a non-empty string here.
+        Temporalio::Exception::Argument->throw(
+            message => 'start_workflow requires a workflow type name (string)')
+            unless defined $workflow && !ref $workflow && length $workflow;
+        return $workflow;
+    }
+
+    sub _policy_enum ($name, $value, $table) {
+        return 0 unless defined $value;          # unspecified
+        return $value if $value =~ /\A[0-9]+\z/; # already a proto number
+        my $num = $table->{$value};
+        Temporalio::Exception::Argument->throw(
+            message => "invalid $name '$value' (expected one of "
+                     . join(', ', sort keys %$table) . ')')
+            unless defined $num;
+        return $num;
+    }
+
+    sub _duration ($seconds) {
+        my $Duration = Temporalio::Core::Proto::resolve(
+            'google.protobuf.Duration');
+        my $whole = int($seconds);
+        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
+        return $Duration->new({ seconds => $whole, nanos => $nanos });
+    }
+
+    sub _coerce_search_attributes ($sa) {
+        return $sa->to_proto
+            if Scalar::Util::blessed($sa)
+            && $sa->isa('Temporalio::Common::TypedSearchAttributes');
+        # A bare untyped hashref is forbidden (spec section 7.4 — no guessing).
+        Temporalio::Exception::Argument->throw(
+            message => 'search_attributes must be a '
+                     . 'Temporalio::Common::TypedSearchAttributes instance '
+                     . '(a bare untyped hashref is not accepted — spec 7.4)');
+    }
+
+    # A v4-ish UUID for request_id. The server treats request_id as an opaque
+    # idempotency token; any unique value works. Uses Data::UUID if present,
+    # else a random fallback in canonical 8-4-4-4-12 form.
+    sub _new_uuid () {
+        state $have_uuid = eval { require Data::UUID; 1 } ? 1 : 0;
+        if ($have_uuid) {
+            return lc(Data::UUID->new->create_str);
+        }
+        my @h = map { sprintf '%04x', int(rand(0x10000)) } 1 .. 8;
+        return sprintf '%s%s-%s-4%s-%x%s-%s%s%s',
+            $h[0], $h[1], $h[2], substr($h[3], 1),
+            (8 + int(rand(4))), substr($h[4], 1), $h[5], $h[6], $h[7];
     }
 
     # _rpc_call($rpc_name, $request_msg, %opts) — async. The single funnel

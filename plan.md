@@ -74,8 +74,28 @@ draft has been removed; spec.md is the sole contract.)
   converter/_search_attributes.py), and the spec §7.4 untyped-input guard
   (bare hashref / non-SearchAttributeKey pair → Exception::Argument; no
   type guessing). TypedSearchAttributes->new is positional (\@pairs) via a
-  glob wrapper over the feature-class constructor. Next: P1.10
-  start_workflow + WorkflowHandle.
+  glob wrapper over the feature-class constructor. P1.10 complete:
+  `Client->start_workflow`/`signal_with_start_workflow`/`execute_workflow`
+  (async) build the Start/SignalWithStart-WorkflowExecutionRequest from the
+  spec §7.4 kwargs (id_reuse/id_conflict policy strings → proto enum numbers,
+  MUST-match temporal.api.enums.v1.WorkflowId{Reuse,Conflict}Policy
+  introspected from the vendored proto: reuse unspecified 0/allow_duplicate 1/
+  allow_duplicate_failed_only 2/reject_duplicate 3/terminate_if_running 4;
+  conflict unspecified 0/fail 1/use_existing 2/terminate_existing 3 — cross-
+  checked against sdk-python common.py + _impl.py `_populate_start_workflow_
+  execution_request`), funnel through `_rpc_call` (ALREADY_EXISTS special-
+  cased to WorkflowAlreadyStarted), and return a `Client::WorkflowHandle`
+  (fields-only in v0.1; result/describe/cancel/terminate land in P1.11).
+  `get_workflow_handle` builds a handle with no RPC. NOTE: the generated
+  proto accessors are READ-ONLY, so every field (incl. signal_name/
+  signal_input) must arrive via `new(\%fields)` — setters silently no-op.
+  NOTE: a bare Perl string arg/memo/header value encodes binary/plain (the
+  P1.4 composite puts BinaryPlain before Json and a string IS a byte buffer);
+  this differs from sdk-python's json/plain for str, by design — the wire
+  payload is the SDK's own converter output. T-cli-start-1..4 green
+  (start_workflow_request.t unit + start_workflow.t integration, run live
+  against the dev server). Next: P1.11 WorkflowHandle->result +
+  describe/cancel/terminate + list/count.
 
 Progress tracking lives in `todo.md`. Update both as steps complete.
 

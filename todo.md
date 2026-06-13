@@ -129,11 +129,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P1.9.3 Verify
 
 ### P1.10 start_workflow + WorkflowHandle
-- [ ] P1.10.1 RED: sdk/t/unit/start_workflow_request.t (kwargs→proto, policies, T-cli-start-3/4)
-- [ ] P1.10.2 GREEN: start_workflow/get_workflow_handle/signal_with_start + handle fields
-- [ ] P1.10.3 RED: sdk/t/integration/start_workflow.t (T-cli-start-1/2)
-- [ ] P1.10.4 GREEN: wire until green
-- [ ] P1.10.5 Verify
+- [x] P1.10.1 RED: sdk/t/unit/start_workflow_request.t (kwargs→proto, policies, T-cli-start-3/4)
+- [x] P1.10.2 GREEN: start_workflow/get_workflow_handle/signal_with_start + handle fields
+- [x] P1.10.3 RED: sdk/t/integration/start_workflow.t (T-cli-start-1/2)
+- [x] P1.10.4 GREEN: wire until green
+- [x] P1.10.5 Verify
 
 ### P1.11 result + describe/cancel/terminate + list/count
 - [ ] P1.11.1 RED: sdk/t/unit/workflow_handle_result.t (§7.6 terminal-event table)
