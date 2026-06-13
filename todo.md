@@ -266,8 +266,8 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P5.3.4 Verify: prove -lj4 xt t
 
 ### P5.4 CI matrix
-- [ ] P5.4.1 .github/workflows/ci.yml per spec §14
-- [ ] P5.4.2 Verify: green on feature branch
+- [x] P5.4.1 .github/workflows/ci.yml per spec §14
+- [x] P5.4.2 Verify: green on feature branch
 
 ### P5.5 v0.1.0 release prep
 - [ ] P5.5.1 RED: version-agreement test

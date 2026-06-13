@@ -1,0 +1,186 @@
+# ABOUTME: GitHub Actions CI for the Temporalio Perl SDK monorepo (spec section 14).
+# ABOUTME: OS x Perl matrix, Rust stable, builds the c-bridge + shim, runs the suite.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save matrix minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Spec section 2: the Alien::Temporalio::Core recipe is pinned to this
+# sdk-rust release. Keep in sync with alien-core/alienfile ($pinned_tag).
+env:
+  SDK_RUST_TAG: v0.4.0
+  CARGO_BUILD_JOBS: "2"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Primary matrix: every supported OS x Perl combination, blocking.
+  test:
+    name: ${{ matrix.os }} / perl ${{ matrix.perl }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, macos-14, macos-13]
+        perl: ["5.38", "5.40", "5.42"]
+    steps:
+      - name: Checkout sdk-perl
+        uses: actions/checkout@v4
+
+      # Spec section 14 stage 4: build Alien::Temporalio::Core from a pinned
+      # sdk-rust checkout via ALIEN_TEMPORALIO_CORE_SDK_RUST_PATH (no tarball
+      # fetch / digest dance in CI).
+      - name: Checkout sdk-rust (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: temporalio/sdk-rust
+          ref: ${{ env.SDK_RUST_TAG }}
+          path: sdk-rust
+
+      # Stage 1.
+      - name: Install Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl }}
+          install-modules-with: cpanm
+
+      # Stage 2.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Stage / cache: cargo registry + git + target, keyed on the sdk-rust pin
+      # and the in-tree shim lockfile.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            sdk-rust/target
+            ext/temporalio-perl-bridge/target
+          key: ${{ runner.os }}-cargo-${{ env.SDK_RUST_TAG }}-${{ hashFiles('ext/temporalio-perl-bridge/Cargo.lock', 'ext/temporalio-perl-bridge/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ env.SDK_RUST_TAG }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Cache cpanm
+        uses: actions/cache@v4
+        with:
+          path: ~/.cpanm
+          key: ${{ runner.os }}-perl${{ matrix.perl }}-cpanm-${{ hashFiles('sdk/cpanfile') }}
+          restore-keys: |
+            ${{ runner.os }}-perl${{ matrix.perl }}-cpanm-
+
+      # Stage 3: author/build tooling + the SDK's own deps. Dist::Zilla builds
+      # all three distributions; Protobuf is a git dependency (cpanfile).
+      - name: Install Perl tooling
+        run: |
+          cpanm --notest --quiet Dist::Zilla Dist::Zilla::Plugin::AlienBuild
+          # Author-side dzil plugins used by the dist.ini files.
+          dzil authordeps --missing | cpanm --notest --quiet || true
+
+      # Stage 4: build + install Alien::Temporalio::Core (cargo-builds the
+      # sdk-core C bridge from the pinned sdk-rust checkout in place).
+      - name: Build Alien::Temporalio::Core
+        env:
+          ALIEN_TEMPORALIO_CORE_SDK_RUST_PATH: ${{ github.workspace }}/sdk-rust
+        working-directory: alien-core
+        run: |
+          cpanm --notest --quiet --installdeps .
+          dzil install --install-command "cpanm --notest --quiet ."
+
+      # Stage 5: build + install our in-tree Rust shim
+      # (Alien::Temporalio::PerlBridge). The alienfile walks up to ext/.
+      - name: Build Alien::Temporalio::PerlBridge
+        working-directory: alien-perl-bridge
+        run: |
+          cpanm --notest --quiet --installdeps .
+          dzil install --install-command "cpanm --notest --quiet ."
+
+      # Stage 3 (cont.): the SDK's runtime + test deps, including the pure-Perl
+      # Protobuf distribution pulled from git per sdk/cpanfile.
+      - name: Install SDK deps
+        working-directory: sdk
+        run: cpanm --notest --quiet --installdeps --with-develop .
+
+      # Stage 8: integration tests drive an ephemeral dev server via the
+      # `temporal` CLI; install it so the integration stage runs (rather than
+      # skip_all). A green suite offline is also valid (CLAUDE.md).
+      - name: Install Temporal CLI
+        uses: temporalio/setup-temporal@v0
+
+      # Stages 6 + 8: dzil test runs the full Perl suite (unit + replay +
+      # integration). The temporal CLI on PATH lets the integration tests run.
+      - name: Run SDK test suite
+        working-directory: sdk
+        run: dzil test --all
+
+      # Stage 7: author tests (POD syntax + coverage).
+      - name: Run author tests
+        working-directory: sdk
+        run: prove -lj4 xt
+
+  # Allow-failure portability canary (spec section 14): one Windows job that
+  # surfaces obvious breakage without blocking releases.
+  windows:
+    name: windows-2022 / strawberry-perl (allow-failure)
+    runs-on: windows-2022
+    continue-on-error: true
+    steps:
+      - name: Checkout sdk-perl
+        uses: actions/checkout@v4
+
+      - name: Checkout sdk-rust (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: temporalio/sdk-rust
+          ref: ${{ env.SDK_RUST_TAG }}
+          path: sdk-rust
+
+      - name: Install Strawberry Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          distribution: strawberry
+          perl-version: "5.40"
+          install-modules-with: cpanm
+
+      - name: Install Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Perl tooling
+        run: |
+          cpanm --notest --quiet Dist::Zilla Dist::Zilla::Plugin::AlienBuild
+          dzil authordeps --missing | cpanm --notest --quiet
+
+      - name: Build Alien::Temporalio::Core
+        env:
+          ALIEN_TEMPORALIO_CORE_SDK_RUST_PATH: ${{ github.workspace }}/sdk-rust
+        working-directory: alien-core
+        run: |
+          cpanm --notest --quiet --installdeps .
+          dzil install --install-command "cpanm --notest --quiet ."
+
+      - name: Build Alien::Temporalio::PerlBridge
+        working-directory: alien-perl-bridge
+        run: |
+          cpanm --notest --quiet --installdeps .
+          dzil install --install-command "cpanm --notest --quiet ."
+
+      - name: Install SDK deps
+        working-directory: sdk
+        run: cpanm --notest --quiet --installdeps --with-develop .
+
+      # No temporal CLI install on Windows: integration tests skip_all, which
+      # is an accepted green-offline outcome (CLAUDE.md).
+      - name: Run SDK test suite
+        working-directory: sdk
+        run: dzil test --all
