@@ -476,10 +476,19 @@ class Temporalio::Workflow::Runner {
         # so _apply_signal_workflow buffers it; _apply_initialize then drains the
         # buffer once the instance exists (T-wf-3 visibility).
         dynamically $Temporalio::Workflow::Runner::CURRENT = $self;
+        my $set_index = -1;
         for my $job_set ($self->_ordered_job_sets($activation)) {
+            $set_index++;
             next unless @$job_set;
             $self->_apply_job($_) for @$job_set;
-            $self->_pump;
+            # Re-check wait_condition predicates only after the signal set (1)
+            # and the non-query set (2) — NOT after patches (0) or queries (3).
+            # A query activation (incl. a standalone "legacy_query") must not
+            # advance the workflow: resuming a parked :Run there would emit a
+            # CompleteWorkflow alongside the QueryResult, which core rejects
+            # ("legacy query response along with other commands"). MUST-match
+            # sdk-python activate(): _run_once(check_conditions=index==1 or 2).
+            $self->_pump(check_conditions => ($set_index == 1 || $set_index == 2));
         }
 
         # Steps 6-7: drain the command buffer into a completion proto.
@@ -915,7 +924,7 @@ class Temporalio::Workflow::Runner {
     # the main run Future is either already ready (Future::AsyncAwait ran the
     # body to completion synchronously) or genuinely blocked on a future a
     # later phase resolves. No IO::Async, no wall-clock.
-    method _pump {
+    method _pump (%opts) {
         # Future::AsyncAwait runs the body and fires its on_ready continuations
         # synchronously when the awaited futures resolve, so activity/timer
         # resolution drives the body without any explicit loop here. The one
@@ -924,7 +933,13 @@ class Temporalio::Workflow::Runner {
         # pending predicate that is now true resolves its future and resumes the
         # awaiting continuation in this same activation (spec section 10.2 /
         # T-wf-5; MUST-match sdk-python _run_once's check_conditions pass).
-        $self->_check_conditions;
+        #
+        # check_conditions is gated by the caller: it is FALSE for the patch and
+        # query job sets (a query activation must not advance the workflow body),
+        # TRUE for the signal and non-query sets. Defaults to TRUE so callers
+        # that pump outside the job-set loop keep the prior re-check behavior.
+        my $check = exists $opts{check_conditions} ? $opts{check_conditions} : 1;
+        $self->_check_conditions if $check;
         return;
     }
 
@@ -1088,12 +1103,50 @@ class Temporalio::Workflow::Runner {
     # FailWorkflowExecution, CancelWorkflowExecution, ContinueAsNew..., or the
     # mid-run command set) wrapped in a Success status.
     method _successful_completion {
+        my @out = @commands;
+
+        # LEGACY QUERY (spec section 10.3; MUST-match sdk-core's completion
+        # validator): a query with query_id "legacy_query" is delivered on its
+        # own workflow task; core replays history to rebuild state, then the lang
+        # SDK answers ONLY the query. If the completion carries the legacy-query
+        # response alongside ANY other command (e.g. a CompleteWorkflow that the
+        # replayed body produced when a buffered signal unblocked it), core
+        # rejects it: "Workflow completion had a legacy query response along with
+        # other commands." So when a legacy-query response is present, suppress
+        # every non-query-response command — the workflow's commands were already
+        # in history; only the query answer is new.
+        if (_has_legacy_query_response(\@out)) {
+            @out = grep { _is_query_response($_) } @out;
+        }
+
         my $completion_class = Temporalio::Core::Proto::resolve(
             'coresdk.workflow_completion.WorkflowActivationCompletion');
         return $completion_class->new({
             run_id     => $run_id,
-            successful => { commands => [@commands] },
+            successful => { commands => \@out },
         });
+    }
+
+    # True when $cmd is a RespondToQuery command (its variant is the query
+    # response oneof). The respond_to_query sub-message is a plain hashref
+    # (proto sub-messages are not always blessed — lessons.md), so read it as a
+    # hash, not via accessors.
+    sub _is_query_response ($cmd) {
+        return ($cmd->which_variant // '') eq 'respond_to_query';
+    }
+
+    # True when the command list contains a RespondToQuery whose query_id is the
+    # sentinel "legacy_query" (sdk-core LEGACY_QUERY_ID).
+    sub _has_legacy_query_response ($cmds) {
+        for my $cmd (@$cmds) {
+            next unless _is_query_response($cmd);
+            my $rtq = $cmd->respond_to_query;
+            return 1
+                if ref $rtq eq 'HASH'
+                && defined $rtq->{query_id}
+                && $rtq->{query_id} eq 'legacy_query';
+        }
+        return 0;
     }
 
     # A workflow-FAILURE completion: a successful completion whose sole command

@@ -242,10 +242,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P4.3.3 Verify
 
 ### P4.4 Client signal/query end-to-end
-- [ ] P4.4.1 RED: sdk/t/integration/signals_queries.t (T-cli-signal-1, T-cli-query-1/2)
-- [ ] P4.4.2 GREEN: integration fixes only
-- [ ] P4.4.3 examples/greet-with-signal/
-- [ ] P4.4.4 Verify — **Phase 4 acceptance green**
+- [x] P4.4.1 RED: sdk/t/integration/signals_queries.t (T-cli-signal-1, T-cli-query-1/2)
+- [x] P4.4.2 GREEN: integration fixes only
+- [x] P4.4.3 examples/greet-with-signal/
+- [x] P4.4.4 Verify — **Phase 4 acceptance green**
 
 ## Phase 5 — Hardening
 
