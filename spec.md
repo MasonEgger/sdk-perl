@@ -4123,3 +4123,119 @@ NOT used). sdk-ruby `metric.rb:9-110`, `internal/metric.rb:9-50` (meter
 shape). Perl: `LoggingConfig.pm:16-17,44-53`, `TelemetryConfig.pm:26-104`,
 `FFI.pm:220-279`, shim `lib.rs:30-86`, `Callback.pm:184-188,299-322`,
 `Runtime.pm:120-144`. Compliance `features/telemetry/metrics/README.md`.
+
+## 29. Worker hardening (v0.2, Phase 10)
+
+Four axes layered onto the existing `Worker.pm` options and the hand-packed
+`Core/FFI/WorkerOptions.pm` (464-byte tripwire — all three changed regions
+keep the same total size, the C unions/pointer-pairs already being the
+largest member). The custom-slot-supplier path additionally exercises the
+Rust shim (callbacks fire on Tokio threads).
+
+### 29.1 Worker versioning
+
+**Deployment-based (primary, resolved WH-1 — follow Ruby).** New
+`deployment_options => Temporalio::Worker::DeploymentOptions->new(version =>
+Temporalio::Worker::DeploymentVersion->new(deployment_name=>, build_id=>),
+use_worker_versioning => 0, default_versioning_behavior => 'unspecified')`.
+`DeploymentVersion` has `to_canonical_string`/`from_canonical_string`
+(`"<name>.<build_id>"`). `default_versioning_behavior` string→proto:
+`unspecified`0/`pinned`1/`auto_upgrade`2. **Per-workflow behavior (resolved
+WH-2 — must ship):** a `:VersioningBehavior('pinned')` attribute on the
+workflow class (attribute machinery §10.1), reported to core in the
+activation completion — required by the `routing_pinned`/`routing_auto_upgrade`
+scenarios.
+
+**Legacy build-id (deprecated, Python-parity).** Worker kwargs `build_id`
+(exists) + `use_worker_versioning` (new) → the C `LegacyBuildIdBased` tag.
+Resolved WH-3: ship the worker kwargs; **defer** the legacy client
+`update/get_worker_build_id_compatibility` RPCs unless a consumer needs them.
+Resolved WH-4: no worker-deployment management client API (matches both
+references; the harness drives those RPCs raw).
+
+**Contract.** Exactly one strategy reaches core (resolution: deployment →
+legacy → none-carrying-build_id). `deployment_options` is mutually exclusive
+with `build_id`/`use_worker_versioning` (→ `Argument`);
+`default_versioning_behavior` must be `unspecified` unless versioning is on
+(→ `Argument`). `build_id` default (resolved WH-5): MD5 of sorted `%INC`
+contents (per-process identity; bytes needn't match other SDKs).
+WorkerOptions gains the deployment packers at offset 32 (40-byte union,
+size unchanged). Tests **T-wkrver-1..9** map to `build_id_versioning/*`
+(legacy, env-gated) and `deployment_versioning/*` (current).
+
+### 29.2 Slot suppliers / worker tuner
+
+New `tuner` kwarg, mutually exclusive with the four `max_concurrent_*`
+(no tuner → synthesize a fixed tuner from them, v0.1 parity). Three supplier
+kinds (C tag FixedSize0/ResourceBased1/Custom2):
+`Worker::SlotSupplier::FixedSize`(num_slots),
+`::ResourceBased`(target_memory_usage, target_cpu_usage, minimum_slots,
+maximum_slots, ramp_throttle), `::Custom` (resolved WH-7: ship; both
+references have it). The tuner holds **four** pools (workflow, activity,
+local_activity, **nexus** — resolved WH-7: follow Python/C's four, nexus
+defaults fixed). Factories `Tuner->create_fixed`/`create_resource_based` and
+a composite `new`.
+
+**Custom suppliers (resolved WH-8 — the only v0.2 feature needing NEW shim
+work).** A duck-typed object: `reserve_slot($ctx)` (async, returns a Future/
+permit), `try_reserve_slot($ctx)` (non-blocking, permit-or-undef),
+`mark_slot_used`/`release_slot` (non-blocking). Core calls these on Tokio
+threads; the shim trampolines push a `{ctx,kind}` job onto the per-runtime
+queue, the IO::Async loop drains and runs the Perl callback, and the async
+reserve completes via `temporal_core_complete_async_reserve`. Non-blocking
+callbacks must not die into the trampoline (caught → release/no-permit). The
+callback struct is `@keep`-pinned for the worker lifetime. (If shim scope is
+tight, fixed+resource ship first, custom follows.) `ReserveContext` omits
+`worker_deployment_version` (resolved WH-6 — absent from the pinned C
+`SlotReserveCtx`). Tests **T-tuner-1..7**.
+
+### 29.3 Autoscaling pollers
+
+New `workflow_task_poller_behavior`/`activity_task_poller_behavior`/
+`nexus_task_poller_behavior` kwargs (resolved WH-9: ship the nexus one,
+Python parity). `PollerBehavior::SimpleMaximum(maximum)` (≥2 workflow, ≥1
+others) or `::Autoscaling(minimum=1, maximum=100, initial=5)` with
+`minimum<=initial<=maximum`. The C `PollerBehavior` is a **two-nullable-
+pointer struct** (not a tagged union): the active variant is the non-NULL
+pointer. **Override (resolved WH-10 — Python model):** the behavior field is
+primary; an explicitly-set legacy `max_concurrent_*_task_polls` overrides it
+with `SimpleMaximum(that)` (v0.1 parity; legacy kwargs deprecated).
+Validation → `Argument`. Tests **T-poller-1..5** (net-new; no compliance
+scenario).
+
+### 29.4 Determinism enforcement
+
+A **best-effort** guard (resolved WH-11) — Perl has neither Python's import
+sandbox (out of scope, §15) nor Ruby's TracePoint, so it follows Ruby's
+*model* (trap globally, act only in workflow context, escape via `Unsafe`)
+with a coarser *mechanism*: `CORE::GLOBAL::` overrides of `time`/`localtime`/
+`gmtime`/`rand`/`srand`/`sleep`/`system`/`exec`/`readpipe`/`open`/`fork`/
+`kill` plus symbol-table overrides for `Time::HiRes::*`. Each override:
+`if (in workflow context && !suppressed) throw Nondeterminism else goto
+&CORE::builtin`. "In context" = `defined $Runner::CURRENT`. Suppression is
+**dynamically-scoped** (`Syntax::Keyword::Dynamically`, never `local`) via a
+new `Temporalio::Workflow::Unsafe::illegal_call_tracing_disabled(&)` escape
+hatch. The SDK's own deterministic primitives self-exempt (they call
+`CORE::`-qualified builtins / construct the RNG under suppression). **Default
+ON** (resolved WH-12), disable via a worker kwarg. **Documented gaps:** can't
+trap `CORE::`-qualified calls, pre-compiled call sites, or raw socket
+builtins — the deterministic replacement surface (`now`/`time`/`random`/
+`sleep`) remains the primary correctness mechanism; the guard is a secondary
+net. New files `Workflow/Unsafe.pm`, `Workflow/DeterminismGuard.pm`. A
+trapped call throws `Temporalio::Exception::Nondeterminism`. Tests
+**T-det-1..7** (net-new), incl. T-det-7 pinning the `CORE::time` best-effort
+boundary.
+
+### 29.5 Reference anchors (MUST-match)
+
+C header `temporal-sdk-core-c-bridge.h`: versioning `:546-580,794`; tuner/
+slot-suppliers `:582-768,797`, custom callbacks `:606-735`, contexts
+`:598-668` (Nexus slot_info field order `:636-639`),
+`temporal_core_complete_async_reserve:1099`; pollers `:776-789,805-808`.
+sdk-python `_worker.py:49-146,409-598,1026-1050`, `_tuning.py:20-450`,
+`common.py:1234-1279`, `_client.py:2770-2829`, `_worker_versioning.py`.
+sdk-ruby `worker.rb`, `worker/{deployment_options,poller_behavior,tuner}.rb`,
+`worker_deployment_version.rb`, `illegal_call_tracer.rb`, `workflow.rb:559-644`
+(Unsafe). Perl `Core/FFI/WorkerOptions.pm` (packers), `Worker.pm`,
+`Workflow/Runner.pm:34`, `Exception/Nondeterminism.pm`. Compliance
+`features/{build_id_versioning,deployment_versioning,snippets/worker_tuner}/*`.

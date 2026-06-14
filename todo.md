@@ -369,3 +369,23 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P10.4.1 RED: cargo test (8-thread aggregate) + sdk/t/unit/metric_meter.t + sdk/t/integration/metrics.t (T-meter-1..10)
 - [ ] P10.4.2 GREEN: Runtime/MetricMeter + TelemetryConfig custom_meter to_ffi + shim 8-callback set (aggregate record_*, marshal create/free)
 - [ ] P10.4.3 Verify: cargo test && prove -lj4 t
+
+### P10.5 Worker versioning (spec §29.1)
+- [ ] P10.5.1 RED: sdk/t/unit/worker_versioning.t + sdk/t/integration/deployment_versioning.t (T-wkrver-1..5)
+- [ ] P10.5.2 GREEN: DeploymentOptions/DeploymentVersion + Worker kwargs + WorkerOptions versioning packers + :VersioningBehavior attribute + MD5-%INC build_id
+- [ ] P10.5.3 Verify: prove -lj4 t
+
+### P10.6 Slot suppliers / worker tuner (spec §29.2)
+- [ ] P10.6.1 RED: sdk/t/unit/tuner.t + cargo test + integration (T-tuner-1..7)
+- [ ] P10.6.2 GREEN: Tuner + SlotSupplier/{FixedSize,ResourceBased,Custom} + context classes + WorkerOptions packers + shim custom-supplier callbacks
+- [ ] P10.6.3 Verify: cargo test && prove -lj4 t
+
+### P10.7 Autoscaling pollers (spec §29.3)
+- [ ] P10.7.1 RED: sdk/t/unit/poller_behavior.t + integration smoke (T-poller-1..5)
+- [ ] P10.7.2 GREEN: PollerBehavior/{SimpleMaximum,Autoscaling} + Worker *_poller_behavior kwargs + override resolution + WorkerOptions packer
+- [ ] P10.7.3 Verify: prove -lj4 t
+
+### P10.8 Determinism enforcement (spec §29.4)
+- [ ] P10.8.1 RED: sdk/t/unit/determinism_guard.t + WfDef fixtures (T-det-1..7)
+- [ ] P10.8.2 GREEN: Workflow/Unsafe + Workflow/DeterminismGuard (CORE::GLOBAL:: overrides gated on context + dynamically-scoped suppression) + worker disable kwarg
+- [ ] P10.8.3 Verify: prove -lj4 t — **Phase 10 worker-hardening green**

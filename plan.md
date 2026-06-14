@@ -1628,6 +1628,90 @@ metric_new/attributes_new/free. Ruby-shaped meter interface (no MetricBuffer).
 3. Verify: cargo test && cd sdk && prove -lj4 t
 ```
 
+### Step P10.5: Worker versioning (spec §29.1)
+
+**NOTE**: §29.1 — deployment-primary + legacy build-id deprecated; per-workflow
+:VersioningBehavior attribute; WorkerOptions packs the versioning union
+(tag 0/1/2), 464-byte tripwire unchanged.
+
+```text
+1. RED: Write tests first:
+   - sdk/t/unit/worker_versioning.t: DeploymentVersion canonical-string
+     round-trip + reject malformed (T-wkrver-1); constructor mutual-exclusion
+     + behavior guard → Argument (T-wkrver-2); packer emits correct tag/body,
+     buffer stays 464 (T-wkrver-3); :VersioningBehavior attribute parses
+   - sdk/t/integration/deployment_versioning.t (skip without dev server):
+     routing_pinned (T-wkrver-4); routing_auto_upgrade (T-wkrver-5)
+2. GREEN: Worker/DeploymentOptions.pm + DeploymentVersion.pm; Worker.pm
+   deployment_options/use_worker_versioning; WorkerOptions versioning packers;
+   :VersioningBehavior attribute on the workflow definition → activation
+   completion; build_id default = MD5 of sorted %INC.
+3. Verify: cd sdk && prove -lj4 t
+```
+
+### Step P10.6: Slot suppliers / worker tuner (spec §29.2)
+
+**NOTE**: §29.2 — Tuner with 4 pools; FixedSize/ResourceBased/Custom. Custom
+needs NEW shim work (reserve/try_reserve/mark/release on Tokio threads → queue
+drain + complete_async_reserve).
+
+```text
+1. RED: Write tests first:
+   - sdk/t/unit/tuner.t: create_fixed/create_resource_based/composite pack the
+     right tags in holder order, buffer 464 (T-tuner-1/2/3); tuner +
+     max_concurrent → Argument; no tuner synthesizes fixed (T-tuner-4); target
+     out of (0,1] → Argument (T-tuner-7)
+   - ext/temporalio-perl-bridge cargo test + sdk/t/integration: custom supplier
+     reserve/release on the main thread per task (T-tuner-5); try_reserve
+     undef defers (T-tuner-6)
+2. GREEN: Worker/Tuner.pm + SlotSupplier/{FixedSize,ResourceBased,Custom}.pm +
+   context classes; WorkerOptions ResourceBased + Custom packers; shim custom
+   slot-supplier callbacks (queue drain, complete_async_reserve).
+   (cargo test + regen header + rebuild Alien for the custom path.)
+3. Verify: cargo test && cd sdk && prove -lj4 t
+```
+
+### Step P10.7: Autoscaling pollers (spec §29.3)
+
+**NOTE**: §29.3 — *_poller_behavior kwargs; SimpleMaximum vs Autoscaling;
+two-nullable-pointer struct; Python override semantics (legacy poll count
+overrides with SimpleMaximum).
+
+```text
+1. RED: Write unit tests first (sdk/t/unit/poller_behavior.t):
+   - SimpleMaximum packs (ptr,NULL) at offset 352, buffer 464 (T-poller-1);
+     Autoscaling packs (NULL,ptr) with 3×u64 body (T-poller-2); explicit legacy
+     poll count overrides Autoscaling with SimpleMaximum (T-poller-3);
+     validation → Argument (T-poller-4)
+   - sdk/t/integration smoke: worker with autoscaling pollers completes a
+     trivial workflow (T-poller-5)
+2. GREEN: Worker/PollerBehavior/{SimpleMaximum,Autoscaling}.pm; Worker.pm
+   *_poller_behavior kwargs + override resolution; WorkerOptions poller packer
+   generalized to dispatch on variant.
+3. Verify: cd sdk && prove -lj4 t
+```
+
+### Step P10.8: Determinism enforcement (spec §29.4)
+
+**NOTE**: §29.4 — best-effort CORE::GLOBAL:: overrides; act only in workflow
+context; Unsafe escape via Syntax::Keyword::Dynamically; default ON. Document
+the gaps (CORE::-qualified, raw sockets not trapped).
+
+```text
+1. RED: Write replay/unit tests first (sdk/t/unit/determinism_guard.t +
+   WfDef fixtures):
+   - time/rand/sleep in a workflow body throw Nondeterminism; same outside a
+     workflow return real values (T-det-1); Unsafe::illegal_call_tracing_disabled
+     suppresses + restores (T-det-2); suppression survives await (T-det-3); SDK
+     now/random never throw (T-det-4); backticks/system throw (T-det-5);
+     idempotent double-install, third-party unaffected (T-det-6); CORE::time NOT
+     trapped — pins the best-effort boundary (T-det-7)
+2. GREEN: Workflow/Unsafe.pm + Workflow/DeterminismGuard.pm (CORE::GLOBAL::
+   overrides gated on $Runner::CURRENT + dynamically-scoped suppression);
+   Worker kwarg to disable; self-exemption for SDK primitives.
+3. Verify: cd sdk && prove -lj4 t — **Phase 10 worker-hardening green**
+```
+
 ---
 
 ## Implementation Guidelines
