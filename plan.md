@@ -1333,6 +1333,41 @@ Workflow::info; no bespoke exception (from_failure verbatim).
    (child workflows + updates + external handles) green**
 ```
 
+## Phase 7 — Activity feature parity
+
+### Step P7.1: Local activities (spec §21)
+
+**NOTE**: §21 — analog of execute_activity (P3.4) sharing the activity seq
+space/%pending_activities. New: ScheduleLocalActivity/RequestCancelLocalActivity
+commands + the backoff→server-timer loop (runner-owned, resolved D1). Worker
+side unchanged — core runs the LA.
+
+```text
+1. RED: Write replay tests first:
+   - Create sdk/t/replay/local_activities.t + WfDef fixtures:
+     - complete_immediately: one ScheduleLocalActivity, value in same WFT
+       (T-local-1); serial three commands (T-local-3); concurrent share
+       %pending_activities (T-local-4)
+     - retry_on_error: only terminal failure reaches lang (T-local-5);
+       non_retryable from activity / in options (T-local-6/7)
+     - backoff_with_persistent_timer: ResolveActivity{backoff} → StartTimer
+       → re-schedule new seq + attempt + original_schedule_time; outer await
+       unaffected (T-local-9)
+     - cancel_try_cancel / cancel_wait_completed / cancel_abandon
+       (T-local-10/11/12); cancel_failing backing-off LA → CancelTimer
+       (T-local-13)
+     - shutdown tolerates late LA resolves without non-determinism
+       (T-local-14/15)
+2. GREEN: Workflow.pm execute_local_activity/start_local_activity;
+   Runner.pm schedule_local_activity (shared activity seq) + backoff branch
+   in _apply_resolve_activity + runner-owned backoff loop (StartTimer +
+   re-schedule); Commands.pm schedule_local_activity +
+   request_cancel_local_activity.
+3. REFACTOR: share the resolve/cancel paths with regular activities where
+   they coincide.
+4. Verify: cd sdk && prove -lj4 t
+```
+
 ---
 
 ## Implementation Guidelines

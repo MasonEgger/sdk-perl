@@ -53,3 +53,6 @@ sdk/t/tmp/
 target/
 # cpanfile.snapshot should generally be ignored for library code, otherwise included
 # cpanfile.snapshot
+
+# v0.2 spec research drafts (scratch, not committed)
+.v0.2-drafts/

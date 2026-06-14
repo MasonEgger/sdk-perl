@@ -300,3 +300,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P6.3.3 RED: sdk/t/integration/external_workflow.t (T-ext-10)
 - [ ] P6.3.4 GREEN: wire until green
 - [ ] P6.3.5 Verify: prove -lj4 t — **Phase 6 acceptance: workflow parity green**
+
+## Phase 7 — Activity feature parity
+
+### P7.1 Local activities (spec §21)
+- [ ] P7.1.1 RED: sdk/t/replay/local_activities.t (T-local-1..15) + WfDef fixtures
+- [ ] P7.1.2 GREEN: execute/start_local_activity + ScheduleLocalActivity/RequestCancelLocalActivity + backoff→timer loop (runner-owned)
+- [ ] P7.1.3 REFACTOR: share resolve/cancel paths with regular activities
+- [ ] P7.1.4 Verify: prove -lj4 t

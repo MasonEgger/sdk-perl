@@ -3119,3 +3119,175 @@ empty). sdk-python: `workflow/_workflow_ops.py:551-655`,
 sdk-ruby: `workflow.rb:294-296`, `workflow/external_workflow_handle.rb:10-41`,
 `internal/worker/workflow_instance/outbound_implementation.rb:25-58,218-281`,
 `workflow_instance.rb:389-395`.
+
+---
+
+# Phase 7 — Activity feature parity (§21–§24)
+
+## 21. Local activities (v0.2, Phase 7)
+
+The local-activity analog of `execute_activity` (§10.2): same scheduling
+shape and the same activity seq space / `%pending_activities`, a different
+command (`ScheduleLocalActivity`/`RequestCancelLocalActivity`), and one
+genuinely new mechanism — the local-backoff → server-timer conversion.
+sdk-core runs the LA in-process during the workflow task with no server
+round-trip and owns marker recording, WFT heartbeating, and the local
+executor; **the worker side (`Worker.pm`, dispatcher, poll loop) is
+unchanged** (resolved decision D5). Other resolved decisions: timeouts in
+**seconds** (Ruby idiom, v0.1 convention); `cancellation_type` surface
+default **`try_cancel`** (follows the references over the proto comment);
+no `Cancellation` kwarg in v0.2 (shared §10.2 gap); the backoff loop is
+**runner-owned** (D1 — internal structure differs from Python's body-side
+`asyncio.shield` loop, observable behavior identical).
+
+### 21.1 Public API
+
+`Temporalio::Workflow::execute_local_activity($activity, %opts)` and
+`start_local_activity($activity, %opts)`, mirroring the regular pair
+(`execute_*` awaits the returned `Workflow::Future`; `start_*` returns it
+un-awaited). `$activity` resolves to an activity-type string via the
+existing `_activity_type_name`.
+
+```perl
+my $result = await Temporalio::Workflow::execute_local_activity(
+    'My::Activity::SayHello',
+    args                      => ['Temporal'],
+    start_to_close_timeout    => 5,            # seconds
+    schedule_to_close_timeout => 30,
+    retry_policy              => $rp,
+    local_retry_threshold     => 60,           # seconds; backoff above this → server timer
+    cancellation_type         => 'try_cancel', # try_cancel|wait_cancellation_completed|abandon
+    activity_id               => undef,
+    summary                   => undef,
+);
+```
+
+kwargs (MUST-match the union of sdk-python `start_local_activity` and
+sdk-ruby `execute_local_activity`):
+
+| kwarg | default | notes |
+|---|---|---|
+| `args` | `[]` | converted to payloads at the call site |
+| `schedule_to_close_timeout` | unset | inclusive of all retries |
+| `schedule_to_start_timeout` | unset | non-retryable; clamped `<= s2c` |
+| `start_to_close_timeout` | unset | per-attempt; retryable |
+| `retry_policy` | unset | **LAs retry indefinitely by default** (differs from regular activities) |
+| `local_retry_threshold` | 60 | backoff above this → server timer |
+| `cancellation_type` | `try_cancel` | |
+| `activity_id` | seq string | advanced |
+| `summary` | unset | → `user_metadata.summary` |
+
+At least one of `start_to_close_timeout` / `schedule_to_close_timeout`
+MUST be set (reuses the §10.2 check).
+
+### 21.2 Behavioral contract
+
+**Command emission.** A new `Runner::schedule_local_activity(%opts)`, a
+near-clone of `schedule_activity`, that: (1) allocates from the **same**
+activity seq space (`++$activity_seq_counter`, registers in
+`%pending_activities` — LA and regular handles share the map, mirroring
+sdk-python); (2) emits `Commands::schedule_local_activity(\%fields)` with
+proto `ScheduleLocalActivity` fields (`seq`, `activity_id`,
+`activity_type`, `headers`, `arguments`, the three timeouts,
+`retry_policy`, `local_retry_threshold`, `cancellation_type`, plus
+`attempt`/`original_schedule_time` **only on a backoff re-schedule**); no
+`task_queue`/`heartbeat_timeout`/`priority`; (3) `summary` →
+`command.user_metadata.summary`.
+
+**Local execution.** sdk-core dispatches the LA to the worker's
+local-activity executor (reusing the activity-definition registry +
+fork pool for sync activities), runs it in the same workflow task, records
+markers, and WFT-heartbeats if needed. None of this is lang's job — lang
+emits the command and consumes the `ResolveActivity`.
+
+**Local backoff → persistent timer (the new mechanism).** When core
+decides the next-attempt backoff exceeds `local_retry_threshold`, it
+resolves with `ActivityResolution.backoff` (`DoBackoff{attempt,
+backoff_duration, original_schedule_time}`) instead of retrying. The
+**runner** then (a) starts a real `StartTimer` for `backoff_duration`
+(cancellable), (b) on fire re-emits `ScheduleLocalActivity` for the same
+type/args with a **new seq**, `attempt = DoBackoff.attempt`, and the
+preserved `original_schedule_time`, (c) re-registers the pending entry
+under the new seq. The body holds one stable **outer** `Workflow::Future`,
+resolved only on a terminal `completed`/`failed`/`cancelled` — it is
+unaware of backoff (runner-owned loop, D1).
+
+**`ResolveActivity` handling.** LA resolutions arrive on the same
+`ResolveActivity` job as regular activities (distinguished by the `backoff`
+status; the `is_local` flag is informational). `_apply_resolve_activity`
+gains a fourth branch: `completed`/`failed`/`cancelled` resolve the outer
+future terminally (as today); `backoff` runs the timer + re-schedule loop
+without resolving the outer future.
+
+**Cancellation types.** `try_cancel` (default) → emit
+`RequestCancelLocalActivity{seq}` and immediately resolve the outer future
+`Cancelled`; `wait_cancellation_completed` → emit the cancel but wait for a
+`ResolveActivity{cancelled}` job; `abandon` → emit **no** command and
+resolve `Cancelled` immediately. A backing-off LA cancelled on its server
+timer → cancel the pending timer (`CancelTimer`) + resolve `Cancelled`.
+`RequestCancelLocalActivity` via a new
+`Commands::request_cancel_local_activity($seq)`.
+
+**Worker shutdown** is core-side: lang keeps draining activations and must
+not treat a late LA resolve for an evicting workflow as non-determinism
+(the backoff re-schedule must register its new seq so the late resolve is
+recognized).
+
+### 21.3 Failure modes
+
+- **No timeout set** → die at the call site (reuses the §10.2 check).
+- **Arg/result conversion error** → surfaces at the call site before the
+  command is buffered.
+- **Activity fails, retries remain** → core retries locally; no resolve
+  reaches lang until terminal.
+- **Non-retryable failure** → core resolves `failed`; runner fails the
+  outer future with the converted `ApplicationFailure` (no LA-specific
+  code; `non_retryable_error_types` is a normal RetryPolicy field).
+- **`backoff` for an unknown/cancelled seq** → tolerate as stale per the
+  existing cancelled-seq path; an unknown seq with no pending entry is
+  non-determinism.
+- Re-schedule after backoff MUST use the new seq + `attempt` +
+  `original_schedule_time`, or replay breaks.
+
+### 21.4 Test scenarios
+
+Replay (`sdk/t/replay/local_activities.t`), each mapped to a
+`features/features/local_activity/` scenario:
+
+- **T-local-1** `complete_immediately` — one `ScheduleLocalActivity`; value
+  returned in the same WFT.
+- **T-local-2** `complete_eventually` — LA outlives a WFT; lang keeps
+  draining; value reaches the body.
+- **T-local-3** `serial` — three LAs in order; three commands.
+- **T-local-4** `concurrent` — three un-awaited then jointly awaited; share
+  `%pending_activities`.
+- **T-local-5** `retry_on_error` — fails to max_attempts; only the terminal
+  failure reaches lang.
+- **T-local-6** `non_retryable_error_from_activity` — non-retryable
+  `ApplicationError`; resolved `failed`, no retry.
+- **T-local-7** `non_retryable_error_in_options` — `non_retryable_error_types`
+  match; same as T-local-6, no LA-specific path.
+- **T-local-8** `one_success_one_fail` — two concurrent; each outer future
+  resolves independently.
+- **T-local-9** `backoff_with_persistent_timer` — `backoff` → `StartTimer`
+  → re-schedule (new seq, attempt, original_schedule_time); body's await
+  unaffected.
+- **T-local-10/11/12** `cancel_try_cancel`/`cancel_wait_completed`/`cancel_abandon`
+  — the three cancellation-type behaviors above.
+- **T-local-13** `cancel_failing` — backing-off LA cancelled → `CancelTimer`
+  + `Cancelled`.
+- **T-local-14/15** `shutdown_sends_cancellation`/`complete_after_shutdown`
+  — lang tolerates late LA resolves without non-determinism; no stuck
+  workflow.
+
+### 21.5 Reference anchors (MUST-match)
+
+Protos: `ScheduleLocalActivity`/`RequestCancelLocalActivity`/`ActivityCancellationType`
+`workflow_commands.proto:104-167`; `DoBackoff`/`ActivityResolution.backoff`
+`activity_result/activity_result.proto:23-76`; `ResolveActivity`+`is_local`
+`workflow_activation.proto:223-229`. sdk-python
+`workflow/_activities.py:1131-1474`, `worker/_workflow_instance.py:810-857`
+(backoff branch), `:1880-1932` (schedule loop), `:3103-3193` (resolve_backoff,
+LA fields), `:3195-3202` (cancel). sdk-ruby `workflow.rb:228-287`. Perl host
+code: `Workflow.pm`, `Workflow/Runner.pm` (schedule_local_activity,
+backoff branch), `Workflow/Commands.pm`.
