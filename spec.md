@@ -3525,3 +3525,165 @@ Protos `workflow_commands.proto:319-330` (oneof tags 18/19),
 `common/v1/message.proto:47-54`. Perl `Workflow.pm:31-38,63,177-189`,
 `Workflow/Commands.pm`, `Workflow/Runner.pm`,
 `Common/SearchAttributeKey.pm` (add value_set/value_unset).
+
+---
+
+# Phase 8 — Scheduling (§25)
+
+## 25. Schedules (v0.2, Phase 8)
+
+A **purely client-side** feature — no workflow-runner, worker, or
+activation changes. Three new `Client` methods, a `ScheduleHandle`
+mirroring `WorkflowHandle`, a lazy list iterator mirroring
+`WorkflowExecutionIterator`, and a flat `Temporalio::Schedule::*` data-class
+tree (resolved decision: flat namespace, closer to Python than Ruby's
+deep nesting; the umbrella `Temporalio::Schedule` re-exports constructors).
+New files: `Client/ScheduleHandle.pm`, `Client/ScheduleListIterator.pm`,
+`Schedule.pm` + `Schedule/{Schedule,Spec,Calendar,Range,Interval,State,
+Policy,Action,Backfill,Update,Description,Info,ListDescription}.pm`,
+`Exception/ScheduleAlreadyRunning.pm`.
+
+### 25.1 Public API
+
+```perl
+my $h = $client->get_schedule_handle($id);             # no RPC
+my $h = await $client->create_schedule($id, $schedule,
+    trigger_immediately => 0, backfills => [], memo => undef,
+    search_attributes => undef);                       # -> ScheduleHandle
+my $it = $client->list_schedules($query, page_size => 1000);  # lazy iterator
+
+# ScheduleHandle (mirrors WorkflowHandle; explicit id/client readers, 5.38 floor):
+await $h->describe;                 # -> Schedule::Description
+await $h->delete;
+await $h->backfill(@backfills);     # >=1 required (PatchSchedule)
+await $h->trigger(overlap => undef);
+await $h->pause(note => 'Paused via Perl SDK');
+await $h->unpause(note => 'Unpaused via Perl SDK');
+await $h->update($updater);         # $updater: ($update_input) -> Schedule::Update|undef|Future
+```
+
+Resolved decisions: `backfills` (plural) on create; default pause/unpause
+notes `"Paused via Perl SDK"`/`"Unpaused via Perl SDK"`; the action takes a
+workflow **type-name string** only (coderef resolution lands with workflow
+registration, not here).
+
+**Data classes** (`feature 'class'`, kwargs; private `_to_proto`/`_from_proto`;
+only `Schedule->_to_proto` and `Action::StartWorkflow->_to_proto` are async —
+they encode payloads). Load-bearing proto remaps:
+
+- `Schedule->new(action=>, spec=>, policy=>, state=>)` → proto field
+  **`policies`** (plural) ↔ Perl `policy`.
+- `Spec->new(calendars=>[], intervals=>[], cron_expressions=>[], skip=>[],
+  start_at=>, end_at=>, jitter=>, time_zone_name=>)` — remaps
+  calendars↔`structured_calendar`, cron_expressions↔`cron_string`,
+  intervals↔`interval`, skip↔`exclude_structured_calendar`,
+  time_zone_name↔`timezone_name`. On describe the server returns only
+  structured/interval (cron compiles server-side), so `_from_proto` leaves
+  `cron_expressions` empty.
+- `Calendar->new(second=>,minute=>,hour=>,day_of_month=>,month=>,year=>,
+  day_of_week=>,comment=>)` with `Range->new($start,$end=$start,$step=1)`.
+  **Per-field default ranges are load-bearing** — an empty `second` means
+  "never match", so the constructor MUST inject defaults (`second=[0]`,
+  `day_of_month=[1..31]`, etc.). `Range` is inclusive/inclusive, step 1,
+  passed verbatim (no +1).
+- `Interval->new(every=>, offset=>)` → `interval`/`phase`.
+- `State->new(note=>, paused=>0, limited_actions=>0, remaining_actions=>0)`
+  → `note`↔`notes`.
+- `Policy->new(overlap=>'skip', catchup_window=>365d, pause_on_failure=>0)`.
+- `Action::StartWorkflow->new($type_name, args=>[], id=>, task_queue=>,
+  execution_timeout=>, run_timeout=>, task_timeout=>, retry_policy=>,
+  memo=>, search_attributes=>, headers=>, priority=>)` → wraps
+  `NewWorkflowExecutionInfo`. `workflow_id_reuse_policy` and `cron_schedule`
+  are INVALID in a schedule action — reject as unknown kwargs.
+- `Backfill->new(start_at=>, end_at=>, overlap=>)` — write-only; `start_at`
+  is **exclusive**, `end_at` inclusive.
+- `Update->new(schedule=>, search_attributes=>)`; the updater receives
+  `Update::Input->new(description=>)`.
+- `OverlapPolicy` string→enum: `unspecified`0/`skip`1/`buffer_one`2/
+  `buffer_all`3/`cancel_other`4/`terminate_other`5/`allow_all`6.
+
+Read-side decode-only classes: `Description` (id, schedule, info, typed
+search attributes, lazy memo, raw_description — **action workflow args held
+as raw Payloads** for round-trip fidelity), `Info` (num_actions, recent/next
+action times), `ListDescription` (lossy list view).
+
+### 25.2 Behavioral contract
+
+Every RPC funnels through `_rpc_call` (`service=>'workflow'`, `retry=>1`;
+§7.5 error map).
+
+- **create_schedule**: validate the `limited_actions`/`remaining_actions`
+  invariant before any RPC (raise `Argument`); build `initial_patch` only if
+  `trigger_immediately || @backfills` (trigger overlap comes from the
+  schedule's OWN policy); `CreateScheduleRequest{schedule_id, schedule =>
+  await _to_proto, initial_patch, memo, search_attributes, request_id}`;
+  return a handle.
+- **describe**: decode into `Description`; the returned schedule may differ
+  from created (specs compiled); action args are NOT eagerly decoded (held
+  raw so describe→modify→update re-emits identical payloads); schedule-level
+  SAs decoded eagerly, memo lazily.
+- **delete**: `DeleteScheduleRequest` has **no `request_id`**.
+- **PatchSchedule ops** (backfill/trigger/pause/unpause) build a
+  `PatchScheduleRequest` differing only in the `SchedulePatch`. `trigger`
+  fires even while paused. `backfill` raises `Argument` if empty.
+- **update($updater)**: internal describe → `Update::Input`; invoke the
+  updater (may return a `Schedule::Update`, falsy, or a Future — await if
+  Future); falsy → no RPC; else `UpdateScheduleRequest` replacing
+  spec/action/policies/state completely; if `update->search_attributes` is
+  **defined** (even empty) clear+re-encode SAs. **Single-shot** (resolved
+  decision: no conflict-token retry loop — neither reference SDK implements
+  it; carry the same TODO).
+- **Action encoding**: `Action::StartWorkflow->_to_proto($client)` encodes
+  each arg via the data converter (an already-`Payload` arg passes through),
+  memo/header via the string-payload-map helpers, typed SAs via the SA
+  encoder, timeouts via `_duration`. (Codec-context binding deferred to the
+  interceptor/codec-context work, §27.)
+
+### 25.3 Failure modes
+
+- **Duplicate schedule id** → server `ALREADY_EXISTS`; `create_schedule`
+  catches the §7.5-mapped error for `CreateSchedule` and re-raises
+  **`Temporalio::Exception::ScheduleAlreadyRunning`** (new class). (Resolved:
+  the re-map happens in `create_schedule`, not the §7.5 table.)
+- **Schedule not found** → §7.5 `NotFound` (no schedule-specific subclass).
+- **limited/remaining mismatch** or **empty backfill** → `Argument` before RPC.
+- **Unknown kwargs** (incl. `workflow_id_reuse_policy`/`cron_schedule` on the
+  action) → `Argument`.
+
+### 25.4 Test scenarios
+
+Integration (`sdk/t/integration/schedule.t`, skip without dev server;
+filter scheduled runs by workflow **type**, not exact id). Unit
+request-builder echoes where noted.
+
+- **T-sched-1** `basic` — create/describe/list/update/delete; interval spec,
+  `buffer_one` overlap; update mutates the action args (`arg1`→`arg2`).
+- **T-sched-2** `backfill` — paused schedule, two backfill windows
+  `allow_all`; poll until `num_actions==6`.
+- **T-sched-3** `cron` — the compliance `cron` scenario tests the legacy
+  per-workflow `cron_schedule` start option (map to `start_workflow`); **plus**
+  a Perl-authored `ScheduleSpec.cron_expressions` round-trip (no compliance
+  scenario exists for it).
+- **T-sched-4** `duplicate_error` — second create with the same id →
+  `ScheduleAlreadyRunning` (clean unit form via a stubbed ALREADY_EXISTS).
+- **T-sched-5** `pause` — pure-client; assert paused/note after each
+  pause/unpause incl. the exact default notes.
+- **T-sched-6** `trigger` — trigger twice (paused); poll until `num_actions==2`.
+- **T-sched-7** `list_matching_times` — Perl-authored (no compliance
+  scenario); assert projected fire times.
+- **T-sched-unit** — Range/Calendar inclusivity (Range inclusive/inclusive
+  no +1; default ranges injected; the three coexisting inclusivity rules —
+  Range, ScheduleSpec.start_time inclusive, Backfill.start_time exclusive).
+
+### 25.5 Reference anchors (MUST-match)
+
+sdk-python `client/_schedule.py:67-1604`, `client/_client.py:2669-2736`,
+`client/_impl.py:1165-1378`. sdk-ruby `client/schedule.rb`,
+`client/schedule_handle.rb`, `client.rb:680-723`,
+`internal/client/implementation.rb:616-808`. Protos
+`schedule/v1/message.proto`, `enums/v1/schedule.proto:15-38`,
+`workflow/v1/message.proto:425-455` (NewWorkflowExecutionInfo),
+`workflowservice/v1/request_response.proto:1351-1488`. Perl: `Client.pm`
+(`_rpc_call`, `_encode_string_payload_map`, `_duration`,
+`_coerce_search_attributes`, `_new_uuid`, policy-enum pattern),
+`WorkflowHandle.pm` + `WorkflowExecutionIterator.pm` (templates).

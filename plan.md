@@ -1438,6 +1438,52 @@ memo hashref with undef-deletes. Commands UpsertWorkflowSearchAttributes
    (local activities, async completion, eager, upsert) green**
 ```
 
+## Phase 8 — Scheduling
+
+### Step P8.1: Schedule data classes + Client methods (spec §25)
+
+**NOTE**: §25 — purely client-side. Data classes with load-bearing proto
+remaps (policy↔policies, calendars↔structured_calendar, every↔interval,
+note↔notes); default calendar ranges injected; Range inclusive/inclusive.
+
+```text
+1. RED: Write unit tests first:
+   - sdk/t/unit/schedule_types.t: each data class round-trips _to_proto/
+     _from_proto with the correct field remaps; default ranges injected
+     (second=[0], day_of_month=[1..31]); Range inclusive/inclusive no +1;
+     three inclusivity rules (Range, spec.start_time, backfill exclusive)
+     (T-sched-unit); OverlapPolicy string→enum
+   - sdk/t/unit/schedule_request.t: create_schedule builds CreateScheduleRequest
+     (initial_patch only when trigger/backfills; overlap from schedule policy);
+     limited/remaining invariant → Argument; action rejects
+     workflow_id_reuse_policy/cron_schedule kwargs
+2. GREEN: Schedule.pm umbrella + Schedule/{Schedule,Spec,Calendar,Range,
+   Interval,State,Policy,Action,Backfill,Update,Description,Info,
+   ListDescription}.pm; Client->create_schedule/get_schedule_handle/
+   list_schedules; Client/ScheduleListIterator.pm;
+   Exception/ScheduleAlreadyRunning.pm.
+3. Verify: cd sdk && prove -lj4 t/unit
+```
+
+### Step P8.2: ScheduleHandle ops + integration (spec §25)
+
+```text
+1. RED: Write tests first:
+   - sdk/t/unit/schedule_handle.t: describe/delete/backfill/trigger/pause/
+     unpause/update build the right PatchSchedule/Update/Delete requests
+     (delete has no request_id; default notes exact); backfill empty →
+     Argument; update single-shot (updater invoked once; falsy → no RPC);
+     duplicate create → ScheduleAlreadyRunning via stubbed ALREADY_EXISTS
+     (T-sched-4)
+   - sdk/t/integration/schedule.t (skip without dev server): basic
+     create/describe/list/update/delete (T-sched-1); backfill (T-sched-2);
+     cron round-trip (T-sched-3); pause/unpause notes (T-sched-5); trigger
+     (T-sched-6); list_matching_times (T-sched-7)
+2. GREEN: Client/ScheduleHandle.pm (all methods via _rpc_call); update's
+   describe→updater→UpdateSchedule flow.
+3. Verify: cd sdk && prove -lj4 t — **Phase 8 acceptance: schedules green**
+```
+
 ---
 
 ## Implementation Guidelines

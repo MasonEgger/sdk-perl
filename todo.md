@@ -323,3 +323,15 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P7.4.1 RED: sdk/t/replay/upsert.t (T-upsert-1..9) + WfDef fixtures
 - [ ] P7.4.2 GREEN: upsert_search_attributes/upsert_memo + Commands builders + Runner conversion/info-view + SearchAttributeKey value_set/value_unset
 - [ ] P7.4.3 Verify: prove -lj4 t — **Phase 7 acceptance: activity parity green**
+
+## Phase 8 — Scheduling
+
+### P8.1 Schedule data classes + Client methods (spec §25)
+- [ ] P8.1.1 RED: sdk/t/unit/schedule_types.t + schedule_request.t (proto remaps, default ranges, invariants, T-sched-unit)
+- [ ] P8.1.2 GREEN: Schedule.pm + Schedule/* data classes + Client create/get/list_schedules + ScheduleListIterator + Exception/ScheduleAlreadyRunning
+- [ ] P8.1.3 Verify: prove -lj4 t/unit
+
+### P8.2 ScheduleHandle ops + integration (spec §25)
+- [ ] P8.2.1 RED: sdk/t/unit/schedule_handle.t + sdk/t/integration/schedule.t (T-sched-1..7)
+- [ ] P8.2.2 GREEN: Client/ScheduleHandle.pm (describe/delete/backfill/trigger/pause/unpause/update)
+- [ ] P8.2.3 Verify: prove -lj4 t — **Phase 8 acceptance: schedules green**
