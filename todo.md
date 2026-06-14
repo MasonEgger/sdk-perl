@@ -389,3 +389,13 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P10.8.1 RED: sdk/t/unit/determinism_guard.t + WfDef fixtures (T-det-1..7)
 - [ ] P10.8.2 GREEN: Workflow/Unsafe + Workflow/DeterminismGuard (CORE::GLOBAL:: overrides gated on context + dynamically-scoped suppression) + worker disable kwarg
 - [ ] P10.8.3 Verify: prove -lj4 t — **Phase 10 worker-hardening green**
+
+### P10.9 Client extras — reset + http_proxy (spec §30)
+- [ ] P10.9.1 RED: sdk/t/unit/reset.t + http_proxy.t + integration (T-reset-1..5, T-proxy-1..5)
+- [ ] P10.9.2 GREEN: WorkflowHandle->reset + Client->reset_workflow; HttpConnectProxyConfig + ClientHttpConnectProxyOptions FFI record + wire Client.pm:589
+- [ ] P10.9.3 Verify: prove -lj4 t
+
+### P10.10 Client environment configuration (spec §31)
+- [ ] P10.10.1 RED: sdk/t/unit/envconfig.t (T-envcfg-1..12, replay Rust corpus) + integration
+- [ ] P10.10.2 GREEN: Temporalio/EnvConfig + EnvConfig/{ClientConfigTLS,ClientConfigProfile,ClientConfig} (pure-Perl envconfig.rs port) + TOML::Tiny + per-OS path helper
+- [ ] P10.10.3 Verify: prove -lj4 t — **v0.2 SDK feature contracts complete**

@@ -4239,3 +4239,165 @@ sdk-ruby `worker.rb`, `worker/{deployment_options,poller_behavior,tuner}.rb`,
 (Unsafe). Perl `Core/FFI/WorkerOptions.pm` (packers), `Worker.pm`,
 `Workflow/Runner.pm:34`, `Exception/Nondeterminism.pm`. Compliance
 `features/{build_id_versioning,deployment_versioning,snippets/worker_tuner}/*`.
+
+## 30. Client extras — workflow reset & HTTP proxy (v0.2, Phase 10)
+
+### 30.1 Workflow reset
+
+No reference SDK ships a high-level reset helper (reset is a raw
+`ResetWorkflowExecution` RPC everywhere). Resolved decision: ship a **thin,
+clearly-forked** convenience helper for ergonomics and to give the
+compliance scenario a surface — mirroring at the RPC/request-field level.
+
+```perl
+my $new_run_id = await $handle->reset(
+    workflow_task_finish_event_id => $event_id,   # required
+    reason                        => '',
+    reset_reapply_type            => 'signal',    # signal|none|all_eligible (deprecated proto field)
+    reset_reapply_exclude_types   => ['signal'],  # signal|update|nexus
+    request_id                    => undef,        # default fresh UUID
+);
+my $new_run_id = await $client->reset_workflow($workflow_id, $run_id, %same_kwargs);
+```
+
+Builds `ResetWorkflowExecutionRequest` (namespace, workflow_execution,
+reason, workflow_task_finish_event_id, request_id default UUID, mapped
+reapply enums, identity) and funnels through `_rpc_call`; returns the new
+`run_id`. The current run is terminated and a new run started. Resolved
+decision: expose `reset_reapply_type` (back-compat, deprecated in proto) +
+`reset_reapply_exclude_types`; **defer** `ResetOptions`/`post_reset_operations`/
+build-id targets to v0.3. Missing event id or bad enum string → `Argument`
+before any RPC; server errors map via §7.5. Tests **T-reset-1..5** (raw-RPC
+round-trip + enum mapping unit; reset/termination/failure integration —
+the compliance README notes reset is mainly a server-behavior test).
+
+### 30.2 HTTP CONNECT proxy
+
+Closes a concrete C-bridge gap: `Client.pm:589` currently hardcodes
+`http_connect_proxy_options => undef` and there is no FFI record for it.
+
+```perl
+my $client = await Temporalio::Client->connect($target,
+    http_connect_proxy => { target_host => 'proxy:3128',
+        basic_auth_user => 'u', basic_auth_pass => 'p' });
+```
+
+New `Temporalio::Client::HttpConnectProxyConfig` (fields `target_host`
+required, `basic_auth_user`/`basic_auth_pass`; resolved decision: Ruby's
+two-field auth mapping 1:1 to the C `username`/`password`, Python's class
+name) with a `to_ffi($keep)` building a new
+`Temporalio::Core::FFI::ClientHttpConnectProxyOptions` record (three
+ByteArrayRef data/size pairs). `connect` coerces hashref-or-instance via
+`_coerce_config` and wires the slot like `tls_options`. `http_connect_proxy
+=> 1` (bare truthy) → `Argument` (required target_host); only one of
+`basic_auth_user`/`basic_auth_pass` → `Argument` (resolved decision: xor
+guard, a minor ergonomic fork — references don't enforce). Proxy is
+orthogonal to the `http`/`https` target scheme; core forces DNS-LB off when
+a proxy is set (no conflict yet — DNS-LB options not surfaced). Proxy
+unreachable / 407 → mapped `RpcError`. Tests **T-proxy-1..5** (config+FFI
+marshalling unit; connect wires the field; integration no-auth + auth
+against the harness proxy; `http_proxy_nativeconn*` are TS-only, no Perl
+analog).
+
+### 30.3 Reference anchors (MUST-match)
+
+Reset: proto `request_response.proto:906-933`, `enums/v1/reset.proto:13-45`;
+`features/reset/reset_and_delete/feature.go`; Perl `WorkflowHandle.pm:189-304`,
+`Client.pm:380-471`. Proxy: C header `:128-132,166,182-188`; sdk-python
+`service.py:117-230`; sdk-ruby `client/connection.rb:119-350`; Perl
+`Client.pm:483-593`, `Client/TlsConfig.pm:60-73`, `Core/FFI.pm:155-188`
+(the `ConnectionOptions` slot exists; add the proxy record).
+
+## 31. Client environment configuration (v0.2, Phase 10)
+
+Loading client connection settings from a TOML profile file and `TEMPORAL_*`
+env vars. The canonical schema lives in Rust core
+(`sdk-rust/crates/common/src/envconfig.rs`); both reference SDKs delegate to
+it over their bridge. **The C bridge exposes no envconfig symbol**, so Perl
+**reimplements `envconfig.rs` in pure Perl** (resolved decision — a
+*mechanism* fork; every TOML key, env var, default, precedence rule, and
+error is a cross-SDK MUST-match copied from the Rust oracle, whose test
+corpus is replayed as a compliance fixture).
+
+### 31.1 Public API
+
+A `Temporalio::EnvConfig` namespace module with three `feature 'class'`
+value classes: `ClientConfigTLS`, `ClientConfigProfile`, `ClientConfig`.
+
+- **`ClientConfigTLS`** — `disabled` (tri-state undef/0/1), `server_name`,
+  `server_root_ca_cert`, `client_cert`, `client_private_key`,
+  `disable_host_verification`; a **DataSource** is `{path=>}` **or**
+  `{data=>}` (resolved decision: hashref, not a bare scalar — keeps the
+  `*_path`/`*_data` split unambiguous). `to_tls_config()` → `0` (when
+  disabled) or a `Temporalio::Client::TlsConfig` (reads each DataSource into
+  the path-or-content scalar TlsConfig already accepts).
+- **`ClientConfigProfile`** — `address`/`namespace`/`api_key`/`tls`/
+  `grpc_meta`; codec parsed+round-tripped but not surfaced (resolved
+  decision, matches references). `->load(profile=>, config_source=>,
+  disable_file=>, disable_env=>, config_file_strict=>, override_env_vars=>)`
+  loads one profile (TOML + env overrides). `to_connect_config()` → a
+  hashref of `connect` kwargs (`address`→`target`, `grpc_meta`→`rpc_metadata`).
+- **`ClientConfig`** — holds all `profiles`; `->load(...)` (no env overrides,
+  only `TEMPORAL_CONFIG_FILE` to locate the file) and the convenience
+  `->load_client_connect_config(...)`.
+
+Integration: **no change to `connect`'s signature** (resolved decision:
+keep positional `$target`); the user splats the loaded kwargs and `delete`s
+`target` for the positional slot.
+
+### 31.2 Behavioral contract (MUST-match the Rust oracle)
+
+- **File precedence**: explicit `config_source` → `TEMPORAL_CONFIG_FILE` →
+  per-OS default (`<config_dir>/temporalio/temporal.toml`). Non-existent
+  file / empty TOML → empty config (not an error).
+- **Profile precedence**: explicit `profile` → `TEMPORAL_PROFILE` →
+  `"default"`. An explicit/env-named missing profile → `ProfileNotFound`
+  (`Argument`); a missing `"default"` (name unset) → empty profile, no error.
+- **Env overrides** apply on top of the TOML profile (override wins);
+  `disable_file`/`disable_env` skip the respective source; **both disabled →
+  `Argument`**. The all-profiles `ClientConfig->load` applies no env
+  overrides. The full `TEMPORAL_*` var table and TOML schema (`[profile.<name>]`
+  + `.tls`/`.codec`/`.grpc_meta`) match `envconfig.rs` exactly, incl. the
+  `server_ca_cert_*`/`client_key_*` TOML spelling vs the
+  `server_root_ca_cert`/`client_private_key` field names.
+- **gRPC meta**: keys normalized (lowercase, `_`→`-`); empty env value
+  **deletes** a header.
+- **`disabled` tri-state**: `TEMPORAL_TLS=true`→`disabled=0` (note inversion).
+- **`to_connect_config`**: `api_key` implies `tls=>1` unless an explicit tls
+  block overrides it (`tls=>0` when disabled, else a TlsConfig).
+
+### 31.3 Failure modes & deps
+
+All config-assembly failures raise `Temporalio::Exception::Argument` before
+any RPC: missing explicit/env profile; malformed TOML; strict-mode unknown
+key; both path+data for the same material (TOML or env or cross); both
+`disable_file`+`disable_env`; bare-scalar DataSource. Resolved dependency
+decision: **`TOML::Tiny`** (pure Perl) for parsing, and a small internal
+per-OS path helper (Linux `~/.config`, macOS `~/Library/Application
+Support`, Windows `%APPDATA%`) rather than a heavyweight `dirs`-equivalent.
+
+### 31.4 Test scenarios
+
+Unit (offline, `override_env_vars` for hermetic tests) **T-envcfg-1..12**
+replaying the Rust `envconfig.rs:1046-1776` test corpus: multi-profile parse;
+full TLS block + codec + grpc_meta normalization; profile-selection
+precedence; missing-profile behaviors; env layering incl. empty-delete;
+path/data conflicts; both-disabled error; strict-mode unknown key; `disabled`
+tri-state round-trip; `to_connect_config` mapping; non-existent/empty file;
+per-OS default path. Integration **T-envcfg-int-1**: write a temp
+`temporal.toml`, load, splat into `connect`, issue one RPC.
+
+### 31.5 Reference anchors (MUST-match)
+
+Oracle `sdk-rust/crates/common/src/envconfig.rs` (env docs `:9-29`, loaders
+`:255-378`, env apply `:415-543`, conflicts `:557-591`, default path
+`:608-616`, TOML structs `:736-764`, strict `:890-933`, tests `:1046-1776`).
+sdk-python `envconfig.py:101-409`. sdk-ruby `env_config.rb:24-314`. Perl
+`Client.pm:498-505` (connect), `Client/TlsConfig.pm:22-73`,
+`Exception/Argument`.
+
+---
+
+**v0.2 SDK feature contracts complete (§18–§31).** The compliance-harness
+and samples-perl specs live in their own repos (per the separate-spec-per-repo
+decision); see the features repo and `samples-perl/spec.md`.

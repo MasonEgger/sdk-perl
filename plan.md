@@ -1712,6 +1712,50 @@ the gaps (CORE::-qualified, raw sockets not trapped).
 3. Verify: cd sdk && prove -lj4 t — **Phase 10 worker-hardening green**
 ```
 
+### Step P10.9: Client extras — reset + http_proxy (spec §30)
+
+**NOTE**: §30 — thin forked reset helper; http_proxy closes the
+Client.pm:589 gap (new ClientHttpConnectProxyOptions FFI record).
+
+```text
+1. RED: Write tests first:
+   - sdk/t/unit/reset.t: ResetWorkflowExecutionRequest round-trip + enum
+     mapping; bad enum/missing event id → Argument (T-reset-1/2)
+   - sdk/t/unit/http_proxy.t: HttpConnectProxyConfig->to_ffi record non-null
+     (T-proxy-1); validation incl. xor + bare-truthy → Argument (T-proxy-2);
+     connect wires http_connect_proxy_options non-null/undef (T-proxy-3)
+   - sdk/t/integration: reset at 2nd WFT complete, new run id, original
+     terminated (T-reset-3/4/5); proxy no-auth + auth (T-proxy-4/5)
+2. GREEN: WorkflowHandle->reset + Client->reset_workflow;
+   Client/HttpConnectProxyConfig.pm + Core/FFI ClientHttpConnectProxyOptions
+   record + wire Client.pm:589.
+3. Verify: cd sdk && prove -lj4 t
+```
+
+### Step P10.10: Client environment configuration (spec §31)
+
+**NOTE**: §31 — reimplement envconfig.rs in pure Perl (TOML::Tiny + internal
+per-OS path helper); replay the Rust test corpus; no connect signature
+change.
+
+```text
+1. RED: Write unit tests first (sdk/t/unit/envconfig.t), replaying the Rust
+   envconfig.rs test corpus as fixtures:
+   - multi-profile parse (T-envcfg-1); full TLS+codec+grpc_meta normalization
+     (T-envcfg-2); profile precedence (T-envcfg-3); missing-profile behaviors
+     (T-envcfg-4); env layering incl empty-delete (T-envcfg-5); path/data
+     conflicts (T-envcfg-6); both-disabled error (T-envcfg-7); strict unknown
+     key (T-envcfg-8); disabled tri-state round-trip (T-envcfg-9);
+     to_connect_config mapping (T-envcfg-10); missing/empty file (T-envcfg-11);
+     per-OS default path with stubbed dir (T-envcfg-12)
+   - sdk/t/integration/envconfig.t: load temp toml → connect → one RPC
+2. GREEN: Temporalio/EnvConfig.pm + EnvConfig/{ClientConfigTLS,
+   ClientConfigProfile,ClientConfig}.pm (pure-Perl envconfig.rs port);
+   TOML::Tiny dep; internal per-OS config-dir helper.
+3. Verify: cd sdk && prove -lj4 t — **Phase 10 / v0.2 SDK feature contracts
+   complete**
+```
+
 ---
 
 ## Implementation Guidelines
