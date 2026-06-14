@@ -359,3 +359,13 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P10.2.1 RED: sdk/t/unit/tracing.t (T-trace-1..9, skip_all without OTel)
 - [ ] P10.2.2 GREEN: Contrib/OpenTelemetry/TracingInterceptor + durable_scheduler_disabled Runner primitive + W3C fallback
 - [ ] P10.2.3 Verify: prove -lj4 t
+
+### P10.3 core→Perl log forwarding (spec §28.1)
+- [ ] P10.3.1 RED: cargo test (kind-7 deep-copy, shutdown free) + sdk/t/unit/log_forwarding.t (T-logfwd-1..7)
+- [ ] P10.3.2 GREEN: LogForwardingConfig + LoggingConfig forward_to + shim 7th trampoline/kind-7/free/Drop + Callback drain builder + global registry
+- [ ] P10.3.3 Verify: cargo test && prove -lj4 t
+
+### P10.4 Custom metric meters (spec §28.2)
+- [ ] P10.4.1 RED: cargo test (8-thread aggregate) + sdk/t/unit/metric_meter.t + sdk/t/integration/metrics.t (T-meter-1..10)
+- [ ] P10.4.2 GREEN: Runtime/MetricMeter + TelemetryConfig custom_meter to_ffi + shim 8-callback set (aggregate record_*, marshal create/free)
+- [ ] P10.4.3 Verify: cargo test && prove -lj4 t

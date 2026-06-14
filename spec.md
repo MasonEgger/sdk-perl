@@ -4009,3 +4009,117 @@ sdk-python `worker/_interceptor.py:27-528`, `client/_interceptor.py:674-771`,
 `features/update/client_interceptor/feature.py:43-67`,
 `features/tracing/README.md`. Perl install points: `Client.pm:289`,
 `Worker.pm:266,309`, `Workflow.pm:107`, `Runner.pm:313,514,1136`.
+
+## 28. Runtime observability — log forwarding & custom metric meters (v0.2, Phase 10)
+
+Two features sharing the `TelemetryConfig` carrier and the §3 "never touch
+the Perl interpreter off the main thread" invariant.
+
+### 28.1 Log forwarding
+
+Surface a Perl logger as the destination for core's structured logs.
+
+**Public API.** New `Temporalio::Runtime::LogForwardingConfig->new(logger=>,
+append_target_to_name=>1, prepend_target_on_message=>1,
+overwrite_log_record_time=>1, append_log_fields_to_message=>1)`;
+`LoggingConfig` gains a `forward_to` param (resolved decision: keep the name
+`forward_to` for bridge symmetry; `undef` = today's no-forwarding). The
+**logger is duck-typed** (resolved decision): `$logger->log($level,
+$message, \%context)` where `%context = {target, timestamp_ms, fields,
+temporal_log}`, with an optional `->is_enabled($level)` gate; thin
+`Log::Any`/`Log::Dispatch` adapters ship (not deps).
+
+**Behavioral contract.** Field assembly mirrors sdk-python `_on_logs`
+exactly (level gate; name `"$base-sdk_core::$target"`; message prefix
+`"[sdk_core::$target] "` + appended fields JSON; backdate via `timestamp_ms`).
+The mechanism is **a seventh shim trampoline** (resolved decisions): the
+`forward_to` callback has **no `user_data`**, so the trampoline locates the
+target queue via a **process-global registry** (`Runtime->new` raises
+`Argument` if a second runtime requests forwarding while one is active —
+per-id routing deferred); it **deep-copies** the `TemporalCoreForwardedLog`
+(freed the instant the callback returns) into a new **kind-7**
+`TemporalioPerlBridgeEntry` with shim-owned buffers, pushed onto the
+existing per-runtime SegQueue (design A — reuse the single queue + drain,
+one wakeup fd; no second loop). The drain adds a kind-7 builder that
+constructs `%context`, frees the shim buffers via a new
+`temporalio_perl_bridge_forwarded_log_free`, and calls
+`LogForwardingConfig->_on_log`. Kind-7's shim-owned ownership is a
+**second, documented convention** alongside the kind-1..6
+`temporal_core_byte_array_free` rule. `LoggingConfig->to_ffi` sets the
+`forward_to` opaque slot to the kind-7 trampoline pointer when present.
+Core's internal throttling is inherited unchanged; no Perl-side buffering.
+
+**Failure modes.** A throwing logger is caught and dropped (rate-limited
+`warn`) so it can't poison sibling completions in the drain batch;
+undecodable fields JSON passes through raw; shutdown frees undrained kind-7
+buffers (shim `Drop`); deep-copy makes use-after-free structurally
+impossible.
+
+**Test scenarios** (T-logfwd-1..7): forwarding undef → NULL slot (T-1); a
+core log reaches a fake logger intact (T-2); shim deep-copy survives
+immediate free under ASan (T-3, cargo); assembly-flag golden compare (T-4);
+shutdown frees N undrained entries, no leak (T-5); a throwing logger is
+isolated (T-6); `is_enabled` gate (T-7).
+
+### 28.2 Custom metric meters
+
+A user-supplied Perl meter that core calls back for every metric create and
+record — the `custom_meter` arm of the C bridge `MetricsOptions` ("only one
+of opentelemetry/prometheus/custom_meter").
+
+**Public API.** A duck-typed/subclassable `Temporalio::Runtime::MetricMeter`
+with `create_metric($name,$desc,$unit,$kind)` (returns an opaque handle),
+`record_integer`/`record_float`/`record_duration($metric,$value,$attrs)`,
+and `new_attributes($append_from,$attrs)`. Kinds map 1:1 to
+`TemporalCoreMetricKind` (counter/histogram/gauge × integer/float/duration).
+The meter interface is modelled on **Ruby's `Metric::Meter`** (resolved
+decision — Python's `MetricBuffer` pull model is **not implementable**: the
+pinned C header has no `buffered_with_size`, only `custom_meter`). Wired
+through the existing single-exporter slot: `TelemetryConfig->new(metrics =>
+My::Meter->new)`; the existing "exactly one exporter" guard (T-rt-4) now
+covers the meter, enforcing the C bridge's "only one of" rule; `to_ffi`
+builds a `TemporalCoreCustomMetricMeter` (eight function pointers) and sets
+`MetricsOptions.custom_meter`.
+
+**Behavioral contract — threading (resolved decision: hybrid).** The eight
+callbacks fire on **arbitrary core threads with synchronous returns**,
+which collides with §3. The resolution: **aggregate `record_*` in the Rust
+shim** (counters/histograms/gauges kept in Rust, applied on the core thread
+with zero Perl contact; the Perl meter pulls snapshots on the main-thread
+drain — re-implementing the buffer the header lacks, bounded by
+metric×attribute-set cardinality, never dropping), and **main-thread-marshal
+the rare `metric_new`/`attributes_new`/`*_free`** (push a request entry,
+signal the eventfd, block the core thread on a condvar until the main-thread
+drain runs the Perl method and posts the result). This never touches Perl
+off the main thread and never blocks a hot path. Handles are shim-allocated
+ids into a Rust table; attributes decode from the tagged
+`TemporalCoreCustomMetricAttributeValue` union (string/int/float/bool, null
+= empty set); `meter_free` runs at `Runtime->shutdown` (double-free no-ops);
+core already prefixes names (`temporal_` default) so the Perl meter sees
+final names.
+
+**Failure modes.** Two exporters → `Argument` (extended T-rt-4); a meter
+method must NEVER unwind across the C ABI — in the marshalling path the
+main-thread proxy catches it and returns a sentinel (record dropped,
+rate-limited warn), and the aggregation path is pure Rust and cannot throw;
+`create_metric` returning undef → metric disabled (null handle, records
+dropped); attribute type coercion never panics the shim.
+
+**Test scenarios** (T-meter-1..10): config sets `custom_meter` non-NULL,
+others NULL (T-1); meter+Prometheus → Argument (T-2); `metric_new` once per
+metric, handle identity preserved (T-3); the record kinds × value types
+(T-4); attribute decode incl. null (T-5); append-attributes superset without
+mutating original (T-6); 8-thread concurrent record exact under aggregation,
+no off-main-thread Perl call (T-7, cargo); throwing method doesn't unwind/
+abort (T-8); `meter_free` once, no leak (T-9); the
+`features/telemetry/metrics` compliance scenario (T-10).
+
+### 28.3 Reference anchors (MUST-match)
+
+C header `temporal-sdk-core-c-bridge.h`: forwarded-log `:33-39,344-357,
+987-993`; custom-meter `:16-31,327-332,391-468`. sdk-python
+`runtime.py:194-307` (logging/forwarding), `:417-506` (metrics; MetricBuffer
+NOT used). sdk-ruby `metric.rb:9-110`, `internal/metric.rb:9-50` (meter
+shape). Perl: `LoggingConfig.pm:16-17,44-53`, `TelemetryConfig.pm:26-104`,
+`FFI.pm:220-279`, shim `lib.rs:30-86`, `Callback.pm:184-188,299-322`,
+`Runtime.pm:120-144`. Compliance `features/telemetry/metrics/README.md`.

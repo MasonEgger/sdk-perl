@@ -1579,6 +1579,55 @@ durable_scheduler_disabled Runner primitive; replay-safe completed spans.
 3. Verify: cd sdk && prove -lj4 t
 ```
 
+### Step P10.3: core→Perl log forwarding (spec §28.1)
+
+**NOTE**: §28.1 — seventh shim trampoline (kind 7) deep-copying the forwarded
+log onto the existing SegQueue; no user_data → process-global registry;
+duck-typed logger; keep forward_to name.
+
+```text
+1. RED: Write tests first:
+   - ext/temporalio-perl-bridge cargo test: fire the kind-7 trampoline with a
+     TemporalCoreForwardedLog freed immediately after return; assert deep copy
+     intact under ASan (T-logfwd-3); shutdown frees N undrained kind-7 entries
+     (T-logfwd-5)
+   - sdk/t/unit/log_forwarding.t: forwarding undef → NULL slot (T-logfwd-1);
+     core log reaches fake logger intact (T-logfwd-2); assembly-flag golden
+     (T-logfwd-4); throwing logger isolated (T-logfwd-6); is_enabled gate
+     (T-logfwd-7); second forwarding runtime → Argument
+2. GREEN: Runtime/LogForwardingConfig.pm; LoggingConfig forward_to + to_ffi
+   kind-7 pointer; shim 7th trampoline + kind-7 entry +
+   temporalio_perl_bridge_forwarded_log_free + Drop; kind-7 drain builder in
+   Callback.pm; process-global forwarding registry.
+   (cargo test + regen header + rebuild Alien per P0.10.)
+3. Verify: cargo test && cd sdk && prove -lj4 t
+```
+
+### Step P10.4: Custom metric meters (spec §28.2)
+
+**NOTE**: §28.2 — TemporalCoreCustomMetricMeter (8 callbacks). Hybrid
+threading: aggregate record_* in the Rust shim, main-thread-marshal rare
+metric_new/attributes_new/free. Ruby-shaped meter interface (no MetricBuffer).
+
+```text
+1. RED: Write tests first:
+   - ext/temporalio-perl-bridge cargo test: 8-thread concurrent record exact
+     under shim aggregation, no off-main-thread Perl call (T-meter-7)
+   - sdk/t/unit/metric_meter.t: config sets custom_meter non-NULL others NULL
+     (T-meter-1); meter+Prometheus → Argument (T-meter-2); metric_new once,
+     handle identity (T-meter-3); record kinds × value types (T-meter-4);
+     attribute decode incl null (T-meter-5); append-attributes superset
+     (T-meter-6); throwing method no unwind/abort (T-meter-8); meter_free once
+     no leak (T-meter-9)
+   - sdk/t/integration/metrics.t: features/telemetry/metrics compliance
+     (T-meter-10)
+2. GREEN: Runtime/MetricMeter.pm; TelemetryConfig accepts a MetricMeter
+   exporter + to_ffi custom_meter branch; shim 8-callback closure set +
+   aggregation tables + main-thread marshalling for create/free.
+   (cargo test + regen header + rebuild Alien.)
+3. Verify: cargo test && cd sdk && prove -lj4 t
+```
+
 ---
 
 ## Implementation Guidelines
