@@ -335,3 +335,15 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P8.2.1 RED: sdk/t/unit/schedule_handle.t + sdk/t/integration/schedule.t (T-sched-1..7)
 - [ ] P8.2.2 GREEN: Client/ScheduleHandle.pm (describe/delete/backfill/trigger/pause/unpause/update)
 - [ ] P8.2.3 Verify: prove -lj4 t — **Phase 8 acceptance: schedules green**
+
+## Phase 9 — Nexus
+
+### P9.1 Nexus caller side (spec §26)
+- [ ] P9.1.1 RED: sdk/t/replay/nexus.t (T-nexus-1..9) + WfDef fixtures
+- [ ] P9.1.2 GREEN: create_nexus_client + NexusClient + NexusOperationHandle + Commands builders + Runner two-stage resolve/seq/cancel + cancellation-type map
+- [ ] P9.1.3 Verify: prove -lj4 t
+
+### P9.2 Nexus handler side (spec §26)
+- [ ] P9.2.1 RED: sdk/t/unit/nexus_definition.t + sdk/t/integration/nexus.t (T-nexus-10..14)
+- [ ] P9.2.2 GREEN: Nexus/{Definition,OperationContext,OperationResult,WorkflowHandle} + Worker/NexusDispatcher + NexusRegistry + Worker nexus_services + gRPC→Nexus error table
+- [ ] P9.2.3 Verify: prove -lj4 t — **Phase 9 acceptance: Nexus green**

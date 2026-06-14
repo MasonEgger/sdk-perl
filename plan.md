@@ -1484,6 +1484,57 @@ note↔notes); default calendar ranges injected; Range inclusive/inclusive.
 3. Verify: cd sdk && prove -lj4 t — **Phase 8 acceptance: schedules green**
 ```
 
+## Phase 9 — Nexus
+
+### Step P9.1: Nexus caller side (spec §26)
+
+**NOTE**: §26 — caller mirrors the §18 child-workflow two-stage pattern
+(ScheduleNexusOperation → ResolveNexusOperationStart then
+ResolveNexusOperation), separate seq space. Single input Payload. Sync
+(started_sync + same-activation completed) vs async (operation_token).
+
+```text
+1. RED: Write replay tests first:
+   - sdk/t/replay/nexus.t + WfDef fixtures: start_operation emits one
+     ScheduleNexusOperation (seq 1, single input, cancellation_type=0,
+     timeouts) (T-nexus-1); started_sync + same-activation completed →
+     execute result, operation_token undef (T-nexus-2); operation_token start
+     + later completed (T-nexus-3/4); failed/timed_out/cancelled →
+     NexusOperation cause Application/Timeout/Cancelled (T-nexus-5/6); start
+     failed fails start await (T-nexus-7); cancel emits
+     RequestCancelNexusOperation / abandon none / pre-scheduled Cancelled
+     (T-nexus-8); unknown seq → non-determinism (T-nexus-9)
+2. GREEN: Workflow.pm create_nexus_client; Workflow/NexusClient.pm +
+   NexusOperationHandle.pm; Commands.pm schedule_nexus_operation +
+   request_cancel_nexus_operation; Runner.pm nexus seq space + pending maps +
+   _apply_resolve_nexus_operation_start/_apply_resolve_nexus_operation +
+   cancel propagation; NexusOperationCancellationType map.
+3. Verify: cd sdk && prove -lj4 t
+```
+
+### Step P9.2: Nexus handler side (spec §26)
+
+**NOTE**: §26 handler side (Python-reference) — reimplement the nexusrpc
+slice natively. Attribute pattern :NexusService/:SyncOperation/
+:WorkflowRunOperation. Dispatcher mirrors the activity dispatcher.
+
+```text
+1. RED: Write tests first:
+   - sdk/t/unit/nexus_definition.t: :NexusService/:SyncOperation/
+     :WorkflowRunOperation register service+operations in the registry; four
+     §10.1 constraints hold (T-nexus-11)
+   - sdk/t/integration/nexus.t (skip without dev server + endpoint): full
+     sync_success — execute_operation against My::NexusService on the same
+     worker returns "Hello, world!"; history Scheduled+Completed, NO Started
+     (T-nexus-10/12); workflow-run op start → Async{token}, cancel cancels
+     backing workflow (T-nexus-13); handler error → NexusHandler with right
+     type; OperationError → failure-carrying response (T-nexus-14)
+2. GREEN: Nexus.pm + Nexus/{Definition,OperationContext,OperationResult,
+   WorkflowHandle}.pm; Worker/NexusDispatcher.pm + NexusRegistry.pm;
+   Worker.pm nexus_services arg; gRPC→Nexus error-type MUST-match table.
+3. Verify: cd sdk && prove -lj4 t — **Phase 9 acceptance: Nexus green**
+```
+
 ---
 
 ## Implementation Guidelines

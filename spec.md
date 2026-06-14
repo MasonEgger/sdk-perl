@@ -3687,3 +3687,200 @@ sdk-python `client/_schedule.py:67-1604`, `client/_client.py:2669-2736`,
 (`_rpc_call`, `_encode_string_payload_map`, `_duration`,
 `_coerce_search_attributes`, `_new_uuid`, policy-enum pattern),
 `WorkflowHandle.pm` + `WorkflowExecutionIterator.pm` (templates).
+
+---
+
+# Phase 9 — Nexus (§26)
+
+## 26. Nexus (v0.2, Phase 9)
+
+> **Experimental** in every reference SDK; this contract inherits the
+> "may change" caveat.
+
+Nexus connects two namespaces (or a namespace and an external service)
+through a server-registered **endpoint**. A caller workflow invokes a named
+**operation** on a **service** at an endpoint; a handler worker serves it.
+Operations are **sync** (handler returns inline; Scheduled→Completed, no
+Started event) or **async** (handler starts backing work — typically a
+workflow — returns an operation token; Scheduled→Started→Completed). Both
+caller and handler sides are required (user decision). Resolved forks: the
+handler side follows sdk-python alone (Ruby runs it in Go core) and
+**reimplements the small `nexusrpc` slice natively** under
+`Temporalio::Nexus::*` (F2); definitions use the **attribute pattern**
+(`:NexusService`/`:SyncOperation`/`:WorkflowRunOperation`, F3); **no
+endpoint-creation client API** (endpoints are server/operator-managed,
+the name is a caller string input, F4); `cancellation_type` default
+**`wait_cancellation_completed`** (F5, = Nexus proto zero); explicit
+`$handle->cancel` (F6, parity with §18).
+
+### 26.1 Public API — caller side
+
+Files: `Workflow.pm` (`create_nexus_client`), `Workflow/NexusClient.pm`
+(new), `Workflow/NexusOperationHandle.pm` (new), `Workflow/Commands.pm`,
+`Workflow/Runner.pm`.
+
+```perl
+my $nc = Temporalio::Workflow::create_nexus_client(
+    endpoint => $endpoint, service => 'test-service');
+
+my $handle = await $nc->start_operation(
+    'say-hello', 'world',                  # operation name + SINGLE arg (one input Payload)
+    schedule_to_close_timeout => undef,    # seconds → Duration
+    schedule_to_start_timeout => undef,
+    start_to_close_timeout    => undef,
+    cancellation_type         => 'wait_cancellation_completed',
+    summary                   => undef,    # → user_metadata
+    headers                   => {},       # → nexus_header (string→string, NOT Temporal headers)
+);
+my $result = await $handle->result;
+
+my $result = await $nc->execute_operation('say-hello', 'world', schedule_to_close_timeout => 60);
+```
+
+`create_nexus_client` returns a `NexusClient` bound to endpoint+service
+(never instantiated directly). The proto carries a **single** `input`
+Payload, so `start_operation` takes one positional `$arg` (not `args`).
+`NexusOperationHandle` (constructed only by `start_operation`):
+`operation_token` (async ops: token; sync ops: undef), `await
+$handle->result` (idempotent; awaiting the handle == `->result`),
+`$handle->cancel`. Cancellation-type strings →
+`NexusOperationCancellationType`: `wait_cancellation_completed`0 (default),
+`abandon`1, `try_cancel`2, `wait_cancellation_requested`3.
+
+### 26.2 Public API — handler side (Python-reference, native reimplementation)
+
+Files: `Nexus.pm` (umbrella + handler context helpers), `Nexus/Definition.pm`
+(service/operation definition base + attribute handlers),
+`Nexus/OperationContext.pm` (`StartOperationContext`,
+`CancelOperationContext`, `WorkflowRunOperationContext`),
+`Nexus/OperationResult.pm` (`StartOperationResultSync`/`Async`),
+`Nexus/WorkflowHandle.pm` (operation-token encode/decode),
+`Worker/NexusDispatcher.pm`, `Worker/NexusRegistry.pm`.
+
+```perl
+class My::NexusService :isa(Temporalio::Nexus::Definition) :NexusService('test-service') {
+    method say_hello :SyncOperation('say-hello') ($ctx, $name) { return "Hello, $name!" }
+
+    method echo :WorkflowRunOperation('echo') ($ctx, $input) {
+        return await $ctx->start_workflow('EchoHandlerWorkflow', $input, id => ...);
+    }
+}
+
+my $worker = Temporalio::Worker->new(..., nexus_services => [ My::NexusService->new ]);
+```
+
+`:NexusService($name)` registers the service (default: class name).
+`:SyncOperation($name)` returns the result directly (dispatcher wraps in
+`StartOperationResultSync`; sig `($ctx, $input)`, `$ctx` a
+`StartOperationContext`). `:WorkflowRunOperation($name)` must call
+`$ctx->start_workflow(...)` and return a `Nexus::WorkflowHandle` (dispatcher
+→ `StartOperationResultAsync{operation_token}`; `$ctx` a
+`WorkflowRunOperationContext` adding `start_workflow` with the full
+client-start kwargs). The four §10.1 attribute constraints apply. Handler
+context module functions: `Temporalio::Nexus::info`/`::client`/`::logger`/
+`::in_operation`/`::is_worker_shutdown`.
+
+### 26.3 Behavioral contract
+
+**Caller (mirrors §18 two-stage).** Separate seq space
+(`$nexus_operation_seq_counter`). `start_operation` allocates seq; converts
+the single `arg`→`input` Payload, the three timeouts→Duration,
+`cancellation_type`→enum, `summary`→user_metadata (all before buffering);
+emits one `ScheduleNexusOperation` (oneof arm 21); registers a start Future
+in `%pending_nexus_operation_starts{seq}` and a result Future (in a
+`NexusOperationHandle`) in `%pending_nexus_operations{seq}` + a cancel
+callback; returns the start Future. A pre-scheduled cancel raises
+`Cancelled` immediately.
+
+- **`ResolveNexusOperationStart`**: `operation_token`→async, store token,
+  `->done` start (don't pop — result job follows); `started_sync`→sync,
+  token undef, `->done` start, result job is in the **same activation**;
+  `failed`→pop, `->fail` start (no result job follows).
+- **`ResolveNexusOperation`**: look up by seq (unknown→non-determinism);
+  `completed`→`->done` converted result; `failed`/`cancelled`/`timed_out`→
+  `->fail` (mapped, §26.4); pop the seq.
+- **Sync vs async** is the key compliance distinction: sync = `started_sync`
+  + same-activation completed (no Started event server-side); async =
+  `operation_token` start then a later resolve.
+- **Cancellation**: `$handle->cancel` (or `CancelWorkflow` propagating —
+  extend `_apply_cancel_workflow`) emits `RequestCancelNexusOperation{seq}`
+  only if still pending, except under `abandon`. `result` waits under a
+  detached cancellation so requesting cancel doesn't interrupt the wait.
+
+**Handler (mirrors Python `_NexusWorker`).** `NexusDispatcher` polls Nexus
+tasks (`poll_nexus_task`) on core and drains results on the main IO::Async
+thread via the existing trampoline-queue path (user code never runs on a
+Tokio thread). A `NexusTask` is a server `task` or a `cancel_task`
+(core-abort); track running tasks by `task_token`. Start-operation task →
+build `StartOperationContext`, run the registered operation: sync return →
+`StartOperationResponse.Sync{payload}`; `WorkflowHandle` return →
+`StartOperationResponse.Async{operation_token}`. Cancel-operation task →
+decode token → cancel backing workflow. `cancel_task` → cancel the tracked
+task, ack. Completion sends are shielded from cancellation (never dropped or
+shutdown hangs); shutdown drains remaining tasks then waits for running ones.
+
+### 26.4 Failure modes
+
+**Caller** → `Temporalio::Exception::NexusOperation` (existing class) whose
+`cause` is the mapped failure: `result{failed}`→`Application`;
+`{timed_out}`→`Timeout`; `{cancelled}`→`Cancelled`; start `{failed}` fails
+the start await (no result job). Carries endpoint/service/operation/
+operation_token/scheduled_event_id. Unknown-seq resolve → non-determinism.
+
+**Handler** → `Temporalio::Exception::NexusHandler` (existing class)
+carrying a Nexus `type` + `retry_behavior`. The dispatcher's error mapping
+mirrors Python `_exception_to_handler_error`: HandlerError passes through;
+`Application`(non_retryable)→`INTERNAL`; `WorkflowAlreadyStarted`→`INTERNAL`
+non-retryable; **gRPC status→Nexus type is a MUST-match table**
+(INVALID_ARGUMENT→BAD_REQUEST, NOT_FOUND→NOT_FOUND,
+RESOURCE_EXHAUSTED→RESOURCE_EXHAUSTED, UNIMPLEMENTED→NOT_IMPLEMENTED,
+DEADLINE_EXCEEDED→UPSTREAM_TIMEOUT, UNAVAILABLE/ABORTED→UNAVAILABLE, else
+INTERNAL); else→`INTERNAL`. A handler `OperationError` (op failed/cancelled,
+not infra) produces a failure-carrying `StartOperationResponse`
+(`CANCELED`→`Cancelled`, `FAILED`→`Application`).
+
+### 26.5 Test scenarios
+
+Caller (replay, `sdk/t/replay/nexus.t`):
+
+- **T-nexus-1** — `start_operation` emits one `ScheduleNexusOperation`
+  (seq 1, endpoint/service/operation, single converted `input`,
+  `cancellation_type=0`, summary→user_metadata, converted timeouts).
+- **T-nexus-2** — `started_sync` + same-activation `completed` resolves
+  `execute_operation` (`operation_token` undef); the **primary sync_success**
+  case (`"Hello, world!"`, no Started event).
+- **T-nexus-3/4** — `operation_token` start resolves the handle; later
+  `completed` resumes a parked `execute`.
+- **T-nexus-5/6** — `failed`→`NexusOperation`/`Application`;
+  `timed_out`→`Timeout`; `cancelled`→`Cancelled`.
+- **T-nexus-7** — start `failed` fails the start await; no result job.
+- **T-nexus-8** — `$handle->cancel` emits `RequestCancelNexusOperation`;
+  `abandon` emits none; pre-scheduled cancel raises `Cancelled`.
+- **T-nexus-9** — unknown-seq resolve → non-determinism.
+- **T-nexus-10** *(integration)* — full `sync_success` against a live worker
+  + endpoint; assert `NexusOperationScheduled`+`Completed`, NO `Started`.
+
+Handler (Python-reference):
+
+- **T-nexus-11** — `:NexusService`/`:SyncOperation` register in the registry
+  (four §10.1 constraints hold).
+- **T-nexus-12/13** *(integration)* — sync-op start →
+  `StartOperationResponse.Sync{payload}`; workflow-run-op start → `Async
+  {operation_token}` and a cancel task cancels the backing workflow.
+- **T-nexus-14** — handler error → `NexusHandler` with the right `type`
+  (spot-check the gRPC→Nexus MUST-match table); `OperationError`
+  (FAILED/CANCELED) → failure-carrying `StartOperationResponse`.
+
+### 26.6 Reference anchors (MUST-match)
+
+Caller: sdk-python `workflow/_nexus.py:28-500`; sdk-ruby
+`workflow/nexus_client.rb`, `workflow/nexus_operation_handle.rb`,
+`internal/worker/workflow_instance/outbound_implementation.rb:435-512`.
+Handler (Python-only): `worker/_nexus.py:99-582`, `nexus/_decorators.py`,
+`nexus/_operation_handlers.py:59-114`, `nexus/_operation_context.py:76-470`,
+`worker/_worker.py:103,162`, `tests/nexus/test_standalone_operations.py:133-168`.
+Protos: `workflow_commands.proto:358,401` (Schedule/RequestCancel, arms
+21/22), `workflow_activation.proto:352,370` (ResolveStart/Resolve),
+`core/nexus/nexus.proto:13,23,42,84`. Existing Perl: `Exception/NexusOperation.pm`,
+`Exception/NexusHandler.pm`, §18 (caller template),
+`Worker/ActivityDispatcher.pm` + `Activity/Definition.pm` (handler analogs).
