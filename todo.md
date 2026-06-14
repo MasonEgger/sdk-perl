@@ -274,3 +274,29 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P5.5.2 GREEN: set versions across dists
 - [x] P5.5.3 Update spec §11 + plan Current Status
 - [x] P5.5.4 Verify: full sweep green
+
+# Part II — v0.2 feature parity
+
+## Phase 6 — Workflow feature parity
+
+### P6.1 Child workflows (spec §18)
+- [ ] P6.1.1 RED: sdk/t/replay/child_workflows.t (T-child-1..12) + WfDef fixtures
+- [ ] P6.1.2 GREEN: execute/start_child_workflow + ChildWorkflowHandle + Commands builders + Runner resolve/seq/cancel-propagation
+- [ ] P6.1.3 RED: sdk/t/integration/child_workflows.t (T-child-13)
+- [ ] P6.1.4 GREEN: wire until green vs dev server
+- [ ] P6.1.5 REFACTOR: share two-future resolve with activity path if duplicated
+- [ ] P6.1.6 Verify: prove -lj4 t
+
+### P6.2 Workflow updates (spec §19)
+- [ ] P6.2.1 RED: sdk/t/replay/updates.t (T-upd-1..11) + WfDef fixtures
+- [ ] P6.2.2 GREEN: do_update dispatch + validator guard + tracked handler + UpdateResponse builder + buffer-then-drain
+- [ ] P6.2.3 RED: sdk/t/integration/updates.t (T-cli-update-1..7)
+- [ ] P6.2.4 GREEN: WorkflowHandle->execute_update/start_update + WorkflowUpdateHandle + Exception::WorkflowUpdateFailed
+- [ ] P6.2.5 Verify: prove -lj4 t
+
+### P6.3 External workflow handles (spec §20)
+- [ ] P6.3.1 RED: sdk/t/replay/external_workflow.t (T-ext-1..9) + WfDef fixtures
+- [ ] P6.3.2 GREEN: get_external_workflow_handle + ExternalWorkflowHandle + Commands builders + Runner two-counter resolve + namespace injection
+- [ ] P6.3.3 RED: sdk/t/integration/external_workflow.t (T-ext-10)
+- [ ] P6.3.4 GREEN: wire until green
+- [ ] P6.3.5 Verify: prove -lj4 t — **Phase 6 acceptance: workflow parity green**

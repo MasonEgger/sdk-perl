@@ -19,6 +19,12 @@ draft has been removed; spec.md is the sole contract.)
   `Alien::Temporalio::Core->version` reports the pinned upstream sdk-core
   release (`0.4.0`), tracked independently of the Perl dist version. Tagging
   and release to `main` are performed manually by the maintainer.
+- **v0.2 (feature parity) IN PROGRESS.** Phase 6 (workflow parity) is
+  planned: P6.1 child workflows, P6.2 workflow updates, P6.3 external
+  workflow handles, from spec contracts §18–§20. The Part II steps are
+  appended below; Phases 7–10 (activity parity, scheduling, Nexus,
+  runtime/worker hardening) are scoped in spec §11 and authored into
+  spec.md before their steps are added here.
 - The historical phase-by-phase detail below is retained as the build record.
 
 - **Phase 0: COMPLETE (P0.1–P0.11, 2026-06-12).** Acceptance per spec §11
@@ -1172,6 +1178,159 @@ queue for not-yet-registered handlers, in-progress tracking.
 3. Update spec.md §11 statuses + this plan's Current Status; final
    `prove -lj4 t xt` + cargo test sweep
 4. Verify: full suite green; tag list prepared for Mason (no pushes to main)
+```
+
+---
+
+# Part II — v0.2 feature parity
+
+These phases bring the SDK to parity with the Python/Ruby SDKs. Each step
+derives from a detailed spec contract (spec.md §18+) and is appended here
+so `/bpe:goal` / `/bpe:execute-plan` pick up at the first unchecked item.
+Phases 0–5 above remain the completed v0.1 record.
+
+## Phase 6 — Workflow feature parity
+
+### Step P6.1: Child workflows (spec §18)
+
+**NOTE**: §18 — two-stage resolution (start then result), separate seq
+space, explicit `$handle->cancel`, RNG-derived default id. Mirror the
+execute_activity pattern (P3.4). Enums are lowercase strings mapped in the
+Runner (§18.1).
+
+```text
+1. RED: Write replay tests first:
+   - Create sdk/t/replay/child_workflows.t and fixtures in sdk/t/lib/WfDef/:
+     - start_child_workflow emits one StartChildWorkflowExecution (seq=1,
+       type, id, parent task_queue, parent_close_policy=1,
+       cancellation_type=2, reuse=allow_duplicate, converted args); body
+       parks, no completion command (T-child-1)
+     - ResolveChildWorkflowExecutionStart{succeeded{run_id}} resolves start;
+       first_execution_run_id==run_id; start-only workflow completes,
+       execute workflow stays parked (T-child-2)
+     - ResolveChildWorkflowExecution{completed{result}} resumes execute;
+       workflow completes with converted result (T-child-3)
+     - result failed{failure} → Exception::ChildWorkflow (cause=mapped)
+       (T-child-4)
+     - start failed{WORKFLOW_ALREADY_EXISTS} → WorkflowAlreadyStarted on the
+       start await; start cancelled{failure} → Cancelled (T-child-5/6)
+     - $handle->cancel emits CancelChildWorkflowExecution{seq:1}; abandon
+       emits none (T-child-7)
+     - two children seq 1,2 (separate space); out-of-order resolve
+       (T-child-8); $handle->signal uses child_workflow_id arm (T-child-9)
+     - enum string mapping + bad string dies at scheduling time (T-child-10)
+     - CancelWorkflow propagation cancels a pending child handle (T-child-11)
+     - omitted id is deterministic across re-run (T-child-12)
+2. GREEN: Implement in sdk/lib/Temporalio/Workflow.pm
+   (execute_child_workflow/start_child_workflow), new
+   sdk/lib/Temporalio/Workflow/ChildWorkflowHandle.pm,
+   Commands.pm builders (start_child_workflow, cancel_child_workflow),
+   and Runner.pm: $child_workflow_seq_counter, %pending_child_workflows,
+   _apply_resolve_child_workflow_start / _apply_resolve_child_workflow,
+   enum maps, RNG-derived default id; extend _apply_cancel_workflow to
+   cancel pending child handles.
+3. RED: Add integration test sdk/t/integration/child_workflows.t
+   (skip_all without dev server): parent execute_child_workflow returns
+   child value; signal child via handle; failing child → ChildWorkflow
+   (T-child-13).
+4. GREEN: wire until green against the dev server.
+5. REFACTOR: factor the two-future handle resolution if it duplicates the
+   activity resolve path.
+6. Verify: cd sdk && prove -lj4 t
+```
+
+### Step P6.2: Workflow updates (spec §19)
+
+**NOTE**: §19 — two-phase (sync read-only validator, then async tracked
+handler). Reuse %in_progress_handlers gating and the set-1 job ordering
+(Runner.pm:595). :Update/:UpdateValidator already parse (Definition.pm).
+Add Exception::WorkflowUpdateFailed. Client half mirrors signal/query.
+
+```text
+1. RED: Write workflow-side replay tests first:
+   - Create sdk/t/replay/updates.t and fixtures in sdk/t/lib/WfDef/:
+     - accepted update (non-mutating validator + sync handler) → buffer is
+       exactly [UpdateResponse.accepted, completed{result}] with the right
+       protocol_instance_id (T-upd-1)
+     - validator throws → single rejected{failure}, no accepted, state
+       untouched (T-upd-2)
+     - no validator / run_validator:false → accepted unconditionally
+       (T-upd-3)
+     - async handler awaiting an activity: accepted first activation,
+       workflow not completed while handler pending, completed on resolve
+       (T-upd-4)
+     - handler ApplicationError post-accept → rejected{failure}, workflow
+       not failed (T-upd-5); plain die post-accept → workflow task failure
+       (T-upd-6)
+     - DoUpdate in init activation buffered then dispatched after init
+       (T-upd-7); unknown name no dynamic → immediate rejected (T-upd-8)
+     - dynamic handler gets ($name,@args), not validated (T-upd-9);
+       validator issuing a command → workflow task failure (T-upd-10)
+     - replay run_validator:false reproduces accepted/completed (T-upd-11)
+2. GREEN: Add do_update to _apply_job dispatch + set 1 of _ordered_job_sets;
+   implement _apply_do_update (lookup, read-only validator guard, accept,
+   tracked async handler, UpdateResponse) in Runner.pm; UpdateResponse
+   builder in Commands.pm; buffer-then-drain for pre-instance updates.
+3. RED: Write client-side integration tests:
+   - Create sdk/t/integration/updates.t (skip_all without dev server):
+     execute_update returns result (T-cli-update-1); start_update
+     wait_for_stage=>'accepted' + ->result polls to completion
+     (T-cli-update-2); validator-rejected → WorkflowUpdateFailed,
+     workflow running (T-cli-update-3); handler ApplicationError →
+     WorkflowUpdateFailed (T-cli-update-4); 'admitted' → Exception::Argument
+     pre-RPC (T-cli-update-5); update on closed workflow → §7.5 mapping
+     (T-cli-update-6); explicit update_id round-trips (T-cli-update-7)
+4. GREEN: Add WorkflowHandle->execute_update/start_update, new
+   sdk/lib/Temporalio/Client/WorkflowUpdateHandle.pm (UpdateWorkflowExecution
+   retry-to-accepted + PollWorkflowExecutionUpdate), new
+   sdk/lib/Temporalio/Exception/WorkflowUpdateFailed.pm; wait_for_stage map
+   with 'admitted' guard.
+5. Verify: cd sdk && prove -lj4 t
+```
+
+### Step P6.3: External workflow handles (spec §20)
+
+**NOTE**: §20 — in-workflow signal/cancel of another workflow via commands
+(not RPCs). Two independent seq counters; namespace from
+Workflow::info; no bespoke exception (from_failure verbatim).
+
+```text
+1. RED: Write replay tests first:
+   - Create sdk/t/replay/external_workflow.t and fixtures in
+     sdk/t/lib/WfDef/:
+     - get_external_workflow_handle outside a body → NoRunner; inside →
+       handle echoing workflow_id/run_id, no command emitted (T-ext-1)
+     - await $h->signal('go', args=>['x']) emits one
+       SignalExternalWorkflowExecution (seq:1, workflow_execution arm:
+       namespace=run's, workflow_id, run_id empty; signal_name; encoded
+       args); child_workflow_id arm unset (T-ext-2)
+     - ResolveSignalExternalWorkflow{seq:1} no failure → done (T-ext-3);
+       with application "not found" failure → Exception::Application
+       (T-ext-4)
+     - await $h->cancel emits RequestCancelExternalWorkflowExecution
+       (seq:1, same workflow_execution, reason unset) (T-ext-5);
+       ResolveRequestCancelExternalWorkflow done / failure→Application
+       (T-ext-6)
+     - independent seq spaces: two signals (seq 1,2) + one cancel (seq 1);
+       out-of-order resolve (T-ext-7); explicit run_id threaded (T-ext-8)
+     - cancelling an in-flight signal frame emits CancelSignalWorkflow{seq}
+       and does not pre-emptively raise; subsequent Resolve* settles
+       (T-ext-9)
+2. GREEN: Implement Temporalio::Workflow::get_external_workflow_handle, new
+   sdk/lib/Temporalio/Workflow/ExternalWorkflowHandle.pm, Commands.pm
+   builders (signal_external_workflow_execution,
+   request_cancel_external_workflow_execution, cancel_signal_workflow),
+   and Runner.pm: two seq counters, pending maps,
+   _apply_resolve_signal_external_workflow /
+   _apply_resolve_request_cancel_external_workflow, namespace injection
+   from info.
+3. RED: Add integration test sdk/t/integration/external_workflow.t
+   (skip_all without dev server): workflow B signals then cancels A by id;
+   A observes the signal and reaches cancelled; non-existent id →
+   Application (T-ext-10).
+4. GREEN: wire until green.
+5. Verify: cd sdk && prove -lj4 t — **Phase 6 acceptance: workflow parity
+   (child workflows + updates + external handles) green**
 ```
 
 ---

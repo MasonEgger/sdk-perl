@@ -2248,7 +2248,7 @@ performed manually by the maintainer; this SDK does not push to `main`.
 v0.2 brings the SDK to feature parity with the Python and Ruby SDKs:
 every capability they expose that v0.1 deferred, except the items still
 listed in §15 (Sessions, prebuilt binaries, CPAN publication, Windows).
-Each phase below is authored into a detailed contract section (§17+,
+Each phase below is authored into a detailed contract section (§18+,
 Public API + behavioral contract + failure modes + `T-*` test IDs,
 mirroring the reference SDKs per §0) before its TDD plan is generated.
 Target version `Temporalio::SDK::VERSION` = `0.2.0`.
@@ -2581,3 +2581,541 @@ Repository layout (already updated in §1):
 - `alien-core/` — `Alien::Temporalio::Core` distribution
 - `alien-perl-bridge/` — `Alien::Temporalio::PerlBridge` distribution
 - `ext/temporalio-perl-bridge/` — Rust source built by the second Alien
+
+---
+
+# Part II — v0.2 feature parity
+
+The sections below (§18+) are the detailed contracts for the v0.2
+phases declared in §11. Each mirrors the cross-SDK-consistent behavior
+of sdk-python and sdk-ruby per the prime directive (§0); proto anchors
+are in the vendored trees under `sdk/share/proto/temporal/sdk/core/`.
+Phase 6 (workflow parity) is §18–§20.
+
+## 18. Child workflows — `Temporalio::Workflow::{execute,start}_child_workflow` (v0.2, Phase 6)
+
+**Files:** `sdk/lib/Temporalio/Workflow.pm` (functional surface),
+`sdk/lib/Temporalio/Workflow/ChildWorkflowHandle.pm` (handle, new),
+`sdk/lib/Temporalio/Workflow/Commands.pm` (command builders),
+`sdk/lib/Temporalio/Workflow/Runner.pm` (seq allocation, job application).
+
+A child workflow is started by the workflow body, runs as an independent
+execution, and resolves in **two stages** — *start* (the child has been
+scheduled with a run id) and *result* (the child reached a terminal
+state). This two-stage shape is the only structural difference from
+activities (§10.2): one `StartChildWorkflowExecution` command produces
+*two* activation jobs — `ResolveChildWorkflowExecutionStart`, then later
+`ResolveChildWorkflowExecution` — against one seq.
+
+### 18.1 Public API
+
+In-workflow functions (module-level, kwargs, awaitable), mirroring
+`execute_activity`/`start_activity`:
+
+```perl
+# Awaits start AND result — resolves to the child's return value.
+my $result = await Temporalio::Workflow::execute_child_workflow(
+    $workflow,                       # type-name string | definition class/object
+    args                => \@args,   # arrayref (default [])
+    id                  => undef,    # default: a DETERMINISTIC generated id (below)
+    task_queue          => undef,    # default: the parent's task queue
+    cancellation_type   => 'wait_cancellation_completed',
+    parent_close_policy => 'terminate',
+    id_reuse_policy     => 'allow_duplicate',
+    execution_timeout   => undef,    # seconds → workflow_execution_timeout
+    run_timeout         => undef,    # seconds → workflow_run_timeout
+    task_timeout        => undef,    # seconds → workflow_task_timeout
+    retry_policy        => undef,    # Temporalio::Common::RetryPolicy
+    cron_schedule       => undef,
+    memo                => undef,    # { name => Perl value }
+    search_attributes   => undef,
+    headers             => {},
+);
+
+# Awaits start ONLY — resolves to a handle once the child has STARTED.
+my $handle = await Temporalio::Workflow::start_child_workflow($workflow, %opts);
+my $result = await $handle->result;
+```
+
+Both functions are `async` and are themselves `await`ed: unlike
+`start_activity` (which returns a Future synchronously),
+`start_child_workflow` suspends until the start job arrives, then
+resolves to the handle (mirrors sdk-python `await ... _start_fut` and
+sdk-ruby fiber-blocking start). `execute_child_workflow` is the sugar
+over `start` + `->result`. The first positional resolves to a
+workflow-type name the same way `continue_as_new` does.
+
+**Default `id` (resolved decision).** When `id` is omitted the SDK MUST
+supply a *deterministic* id derived from the workflow RNG
+(`Temporalio::Workflow::random`), never `rand`/OS entropy, so replay
+reproduces it. (sdk-python's `str(uuid4())` default is deterministic only
+because it runs under their sandbox-patched RNG; Perl has no global
+patch, so the determinism is explicit here.) Authors are encouraged to
+pass an explicit `id`.
+
+#### Handle — `Temporalio::Workflow::ChildWorkflowHandle`
+
+Constructed only by `start_child_workflow`; never directly.
+
+```perl
+$handle->id;                          # child workflow id
+$handle->first_execution_run_id;      # run id from start-success
+my $r = await $handle->result;        # child return value, or raises the mapped failure
+await $handle->signal($name, args => \@args);   # SignalExternalWorkflowExecution (child_workflow_id target)
+$handle->cancel;                      # CancelChildWorkflowExecution { child_workflow_seq }
+```
+
+`result` is idempotent (same resolved Future). `signal` targets the
+`child_workflow_id` oneof arm (not `workflow_execution`). **`cancel` is an
+explicit handle method (resolved decision):** Ruby routes child cancel
+through a `Cancellation` token and Python through task cancellation;
+neither has a literal `->cancel`. Perl exposes `->cancel` for parity with
+the Runner's existing activity/timer Future-cancel model — the *behavior*
+(emit `CancelChildWorkflowExecution`, honor `cancellation_type`) is
+cross-SDK-consistent; only the surface differs.
+
+#### Enums (lowercase string constants → proto numbers, mapped in the Runner)
+
+Follows the existing `cancellation_type` precedent (§10.2). Authors pass
+strings; no constants module.
+
+- `cancellation_type` → `ChildWorkflowCancellationType`: `abandon`=0,
+  `try_cancel`=1, `wait_cancellation_completed`=2,
+  `wait_cancellation_requested`=3. **Default `wait_cancellation_completed`**
+  (NOT the proto zero `abandon`, NOT activities' `try_cancel`).
+- `parent_close_policy` → `ParentClosePolicy`: `unspecified`=0,
+  `terminate`=1, `abandon`=2, `request_cancel`=3. **Default `terminate`.**
+- `id_reuse_policy` → `WorkflowIdReusePolicy`. **Default `allow_duplicate`.**
+
+### 18.2 Behavioral contract
+
+**Seq.** Child workflows use a **separate seq space**
+(`$child_workflow_seq_counter` from 1), distinct from activity and timer
+counters — a workflow's first child, first activity, and first timer are
+each seq 1 in their own space.
+
+**Start.** The Runner's `start_child_workflow(%opts)`: allocates seq;
+converts args/memo/headers to payloads, retry/search-attributes to proto,
+the three timeouts to `google.protobuf.Duration` (before building the
+command, so converter errors surface at the call site); resolves `id`,
+`task_queue`, and the three enums; buffers a `StartChildWorkflowExecution`
+command; registers a **start Future** and **result Future** in
+`%pending_child_workflows{$seq}` wrapped in a `ChildWorkflowHandle`;
+returns the start Future.
+
+**`ResolveChildWorkflowExecutionStart`:** `succeeded` → set
+`first_execution_run_id`, `->done` the start Future, **do not** pop the
+seq (the result job still comes); `failed` → pop, `->fail` the start
+Future (`WorkflowAlreadyStarted` on `WORKFLOW_ALREADY_EXISTS`, else a
+generic error); `cancelled` → pop, `->fail` the start Future with
+`Cancelled` (from the core-built `ChildWorkflowFailure`→`CancelledFailure`).
+
+**`ResolveChildWorkflowExecution`:** look up by seq (unknown seq → a
+non-determinism error via the existing `_record_nondeterminism`); read
+`ChildWorkflowResult` — `completed` → `->done` with the converted result;
+`failed`/`cancelled` → `->fail` via the failure converter; pop the seq.
+
+**Cancellation propagation.** `$handle->cancel`, or a `CancelWorkflow`
+job propagating down the tree (extend `_apply_cancel_workflow`, which
+already cancels pending activity/timer Futures, to also cancel pending
+child handles), emits `CancelChildWorkflowExecution { child_workflow_seq }`
+— except under `abandon`, which stops waiting and emits no command
+(parallels the activity ABANDON branch). Under
+`wait_cancellation_completed` the body stays parked on `result` until the
+cancelled resolve arrives. `parent_close_policy` is a start-command field
+only; the server enforces the child's fate when the parent closes.
+
+**Determinism.** Monotonic per-space seq; RNG-derived default id; pure
+conversions — identical replay guarantees to §10.2/§10.3.
+
+### 18.3 Failure modes
+
+- **`WorkflowAlreadyStarted`** — start-failure cause
+  `WORKFLOW_ALREADY_EXISTS` fails the *start* await (before any result),
+  carrying `workflow_id`/`workflow_type`.
+- **Other start-failure cause** — generic `Temporalio::Exception`.
+- **Cancelled before start** — `Temporalio::Exception::Cancelled`; no
+  result job follows.
+- **Result failure** — `ResolveChildWorkflowExecution{failed}` fails the
+  *result* Future with **`Temporalio::Exception::ChildWorkflow`** (existing
+  §6.2 class) whose `cause` is the underlying failure;
+  `result{cancelled}` → `ChildWorkflow` with cause `Cancelled`.
+- **Unknown-seq resolve** — non-determinism error (T-wf-13 routing).
+
+### 18.4 Test scenarios
+
+Replay (`sdk/t/replay/child_workflows.t`, the `activations.t` pattern;
+fixtures in `sdk/t/lib/WfDef/`):
+
+- **T-child-1** — `start_child_workflow` emits one
+  `StartChildWorkflowExecution` (seq 1, type, id, parent task_queue,
+  `parent_close_policy=1`, `cancellation_type=2`, reuse `allow_duplicate`,
+  converted args); body parks, no completion command.
+- **T-child-2** — `ResolveChildWorkflowExecutionStart{succeeded{run_id}}`
+  resolves start; `first_execution_run_id == run_id`; a `start` workflow
+  completes (returns the handle id), an `execute` workflow stays parked.
+- **T-child-3** — `ResolveChildWorkflowExecution{completed{result}}`
+  resumes `execute_child_workflow`; workflow completes with the converted
+  result.
+- **T-child-4** — result `failed{failure}` raises
+  `Temporalio::Exception::ChildWorkflow` (cause = mapped failure); workflow
+  fails per the §10.3 outcome table.
+- **T-child-5** — start `failed{cause: WORKFLOW_ALREADY_EXISTS}` →
+  `WorkflowAlreadyStarted` on the start await; no result job.
+- **T-child-6** — start `cancelled{failure}` → `Cancelled` on start.
+- **T-child-7** — `$handle->cancel` emits
+  `CancelChildWorkflowExecution{seq 1}`; subsequent `cancelled` resolve →
+  `ChildWorkflow`/`Cancelled`. With `cancellation_type=abandon`, assert no
+  cancel command is emitted.
+- **T-child-8** — two children get seq 1, 2 (separate space; a child and
+  an activity are both seq 1); out-of-order resolution settles the right
+  handles.
+- **T-child-9** — `$handle->signal` emits `SignalExternalWorkflowExecution`
+  with the `child_workflow_id` arm set (not `workflow_execution`).
+- **T-child-10** — enum string mapping (`parent_close_policy 'abandon'`→2,
+  `cancellation_type 'try_cancel'`→1, bad string dies at scheduling time).
+- **T-child-11** — a `CancelWorkflow` job cancels a pending child handle
+  (emits the cancel unless abandon) and fails the awaiting `result`
+  (mirrors T-act-9).
+- **T-child-12** — omitting `id` yields a deterministic id (re-running the
+  init activation reproduces it).
+- **T-child-13** *(integration, `sdk/t/integration/child_workflows.t`,
+  `skip_all` without a dev server)* — a parent `execute_child_workflow`s a
+  real registered child and asserts the value; a second case signals the
+  child via the handle; a third asserts a failing child surfaces
+  `ChildWorkflow`.
+
+### 18.5 Reference anchors (MUST-match)
+
+Protos (`sdk/share/proto/temporal/sdk/core/`):
+`StartChildWorkflowExecution` `workflow_commands/workflow_commands.proto:240-273`;
+`CancelChildWorkflowExecution{child_workflow_seq}` `:276-284`;
+`SignalExternalWorkflowExecution` child arm `:295-303`;
+`ResolveChildWorkflowExecutionStart(+Success/Failure/Cancelled)`
+`workflow_activation/workflow_activation.proto:234-262`;
+`ResolveChildWorkflowExecution` `:265-269`; `ChildWorkflowResult`
+`child_workflow/child_workflow.proto:11-34`; `ParentClosePolicy` `:38-47`;
+`StartChildWorkflowExecutionFailedCause` `:50-53`;
+`ChildWorkflowCancellationType` `:56-65`.
+sdk-python: `temporalio/workflow/_workflow_ops.py:53-510` (handle, ops,
+defaults, enum maps); `temporalio/worker/_workflow_instance.py:859-931,
+1977-2017, 3205-3343` (start/result resolution, seq space, command
+mapping). sdk-ruby: `workflow.rb:206-224,442-460`,
+`workflow/child_workflow_handle.rb:8-49`, `parent_close_policy.rb`,
+`child_workflow_cancellation_type.rb`.
+
+## 19. Workflow updates — `:Update`/`:UpdateValidator` dispatch + client update calls (v0.2, Phase 6)
+
+**Files:** `sdk/lib/Temporalio/Workflow/Runner.pm` (DoUpdate dispatch),
+`sdk/lib/Temporalio/Workflow/Commands.pm` (UpdateResponse builder),
+`sdk/lib/Temporalio/Client/WorkflowHandle.pm` (client calls),
+`sdk/lib/Temporalio/Client/WorkflowUpdateHandle.pm` (new),
+`sdk/lib/Temporalio/Exception/WorkflowUpdateFailed.pm` (new).
+
+The `:Update`/`:UpdateValidator` attributes already parse in
+`Workflow::Definition` (registries exist); this section adds dispatch. An
+update is a **two-phase** job inside the runner: a synchronous validation
+phase (read-only, query-like — must not mutate state or emit commands)
+then an asynchronous execution phase (signal-like — tracked for
+completion gating). On the client it is a blocking `UpdateWorkflowExecution`
+RPC governed by a wait-for-stage policy, with `PollWorkflowExecutionUpdate`
+to retrieve the outcome.
+
+### 19.1 Public API
+
+**Workflow side:** `:Update`/`:Update('name')`/`:Update(dynamic=1)` marks
+an update handler (name defaults to the method name; `(dynamic=1)` is the
+catch-all called as `($name, @args)`, mirroring `:Signal(dynamic=1)`); a
+handler may be `async` and may return a result.
+`:UpdateValidator('updateName')` pairs a **synchronous** validator with
+the named update — same parameter signature as the handler, MUST NOT
+mutate state / await / issue commands / return a meaningful value; a
+validator that throws *rejects* the update. There is no dynamic validator
+(a named update with no validator is treated as accepted; the dynamic
+handler is never validated).
+
+**Client side** (on `Temporalio::Client::WorkflowHandle`):
+
+```perl
+# Sugar: start with wait_for_stage 'completed', return the decoded result.
+my $r = await $handle->execute_update($name, \@args, %opts);
+
+# Returns a Temporalio::Client::WorkflowUpdateHandle.
+my $uh = await $handle->start_update($name, \@args, wait_for_stage => 'accepted', %opts);
+my $r  = await $uh->result;     # polls if needed; returns decoded result or throws
+```
+
+`wait_for_stage` maps `'accepted'`→`..._ACCEPTED`(2),
+`'completed'`→`..._COMPLETED`(3). `'admitted'`(1) is **rejected** with
+`Temporalio::Exception::Argument` (not a supported wait stage). `%opts`
+accepts an explicit `update_id` (default: a fresh UUID) and
+`rpc_metadata`/`rpc_timeout`. `WorkflowUpdateHandle` carries
+`workflow_id`, `run_id`, `update_id`, a client back-reference, and any
+known outcome.
+
+### 19.2 Behavioral contract
+
+**Runner — `_apply_do_update`** (dispatched from `_apply_job` for variant
+`do_update`):
+
+1. **Ordering.** `DoUpdate` sorts into **job set 1** with `SignalWorkflow`
+   (the `_ordered_job_sets` comment at Runner.pm:595 already reserves
+   this), applied before `InitializeWorkflow` (set 2), with
+   `_pump(check_conditions => 1)` after. An update arriving in the init
+   activation (no instance yet) is **buffered** like a pre-instance signal
+   and re-applied after `_apply_initialize` (mirrors `%pending_signals`).
+2. **Lookup.** Resolve `defs->{updates}{$name}` then `defs->{dynamic}{update}`.
+   No handler on a live instance → **reject immediately** with
+   `UpdateResponse.rejected` ("Update handler for '$name' expected but not
+   found, and there is no dynamic handler"). Unlike signals, updates get
+   no indefinite buffering for a never-registered handler.
+3. **Validation (sync, read-only).** Only when the job's `run_validator`
+   is true AND a validator is registered: run it under a read-only guard
+   (dynamically-scoped flag, like the query path, that makes any
+   command/mutation throw). Validator **throws** → one
+   `UpdateResponse.rejected` (converted failure); workflow unaffected.
+   Validator **returns** (or none ran) → `UpdateResponse.accepted`, then
+   the handler. A validator that mutates/commands is a **workflow task
+   failure**, not a rejection. `run_validator` is false on replay, so the
+   accept/reject decision recorded in history is reproduced without
+   re-validating.
+4. **Execution (async, tracked).** Invoke the handler via `Future->call`
+   (sync or async, as `_dispatch_signal`); register the pending Future in
+   the existing `%in_progress_handlers` set so `_all_handlers_finished`
+   gates `CompleteWorkflowExecution` while the handler is in-flight
+   (existing Runner.pm:1034 gate, no change). Handler **returns** →
+   `UpdateResponse.completed` with the encoded result. Handler **throws** a
+   Temporal-failure exception (a mapped `Temporalio::Exception::*`, or a
+   class in the worker's failure-exception types) →
+   `UpdateResponse.rejected` (completed-with-failure). **Any other** `die`
+   post-acceptance is a **workflow task failure**, not an update failure.
+   An accepted update emits **two** `UpdateResponse` commands
+   (`accepted`, then `completed`/`rejected`), possibly across activations;
+   a pre-acceptance rejection emits **one**. All carry the job's
+   `protocol_instance_id`.
+
+**Completion gating (resolved decision).** Perl follows sdk-python's
+*hard* gate (already implemented via `%in_progress_handlers`): updates
+slot into the same set as signals, so completion waits on in-flight
+update handlers. (sdk-ruby is advisory/warn-only; Perl is deliberately
+stricter, matching existing code.)
+
+**Client side.** Build `UpdateWorkflowExecutionRequest` (namespace,
+`workflow_execution`, `first_execution_run_id`,
+`wait_policy.lifecycle_stage` = mapped stage, `request.meta{update_id,
+identity}`, `request.input{name, args}`; args converter-encoded). Call
+`UpdateWorkflowExecution` via `_rpc_call` in a **retry loop** until the
+response `stage` is at least `..._ACCEPTED` (durability). Seed the
+`WorkflowUpdateHandle` with the ref and any returned `outcome`.
+`execute_update` and `start_update(wait_for_stage=>'completed')` then poll
+to the outcome via `PollWorkflowExecutionUpdate`
+(`wait_policy.lifecycle_stage = ..._COMPLETED`, looping with transient
+retry like `result()`'s long-poll); `start_update(wait_for_stage=>
+'accepted')` returns the handle without polling. **Outcome decode:**
+`outcome.success` → decode the single result payload (warn if >1);
+`outcome.failure` → throw `Temporalio::Exception::WorkflowUpdateFailed`
+whose `cause` is the decoded failure.
+
+### 19.3 Failure modes
+
+- **Validator rejection** — not retryable; caller sees
+  `WorkflowUpdateFailed` (cause = decoded validator failure); workflow
+  unaffected. No `accepted`/`completed` emitted.
+- **Handler exception (Temporal-failure type)** — update fails;
+  `WorkflowUpdateFailed` (cause = decoded failure); workflow keeps running.
+- **Handler exception (non-Temporal `die`)** — workflow task failure (WFT
+  retried), NOT an update failure.
+- **Unknown update name** (live instance, no dynamic handler) — immediate
+  `UpdateResponse.rejected`.
+- **Update on a closed workflow** — the RPC fails; mapped via the §7.5
+  table.
+- **`wait_for_stage => 'admitted'`** — `Exception::Argument` before any RPC.
+- **RPC deadline/cancellation during start or poll (resolved decision)** —
+  distinct from the update's own outcome; v0.2 maps it onto the existing
+  `Exception::Timeout`/`Cancelled` rather than a dedicated
+  `WorkflowUpdateRPCTimeoutOrCancelled` subclass (divergence from
+  Python/Ruby, which have a dedicated class — noted).
+
+### 19.4 Test scenarios
+
+Workflow-side (replay, `sdk/t/replay/updates.t`):
+
+- **T-upd-1** — accepted update (non-mutating validator + sync handler
+  returning a value): command buffer is exactly
+  `[accepted, completed{result}]` with the right `protocol_instance_id`.
+- **T-upd-2** — validator throws → single `rejected{failure}`, no
+  `accepted`, body state untouched.
+- **T-upd-3** — no validator (or `run_validator:false`) → `accepted`
+  unconditionally before the handler.
+- **T-upd-4** — async handler awaiting an activity: `accepted` in the
+  first activation, workflow NOT completed while the handler Future is
+  pending, `completed` in the activation resolving the activity.
+- **T-upd-5** — handler throws `ApplicationError` post-acceptance →
+  `rejected{failure}`, workflow not failed.
+- **T-upd-6** — handler `die "boom"` post-acceptance → workflow task
+  failure, NOT `rejected`.
+- **T-upd-7** — `DoUpdate` in the init activation is buffered and
+  dispatched after init, in arrival order vs signals.
+- **T-upd-8** — unknown name, no dynamic handler → immediate `rejected`.
+- **T-upd-9** — dynamic handler receives `($name, @args)` and emits
+  `accepted`/`completed`; dynamic handler is not validated.
+- **T-upd-10** — validator issuing a command → workflow task failure.
+- **T-upd-11** — replay with `run_validator:false`: validator not invoked,
+  same `accepted`/`completed` reproduced.
+
+Client-side (integration, `sdk/t/integration/updates.t`, `skip_all`
+without a dev server):
+
+- **T-cli-update-1** — `execute_update` returns the decoded result.
+- **T-cli-update-2** — `start_update(wait_for_stage=>'accepted')` returns a
+  handle; later `->result` returns the completed result (poll path).
+- **T-cli-update-3** — validator-rejected update → `execute_update` raises
+  `WorkflowUpdateFailed`; workflow still running.
+- **T-cli-update-4** — handler `ApplicationError` → `WorkflowUpdateFailed`
+  (cause = the `ApplicationError`).
+- **T-cli-update-5** — `wait_for_stage=>'admitted'` → `Exception::Argument`
+  before any RPC.
+- **T-cli-update-6** — update on a closed workflow → mapped §7.5 exception.
+- **T-cli-update-7** — explicit `update_id` round-trips into
+  `Request.meta.update_id` and the handle.
+
+### 19.5 Reference anchors (MUST-match)
+
+Protos: `workflow_activation.proto:329-352` (DoUpdate + `run_validator`);
+`workflow_commands.proto:330-356` (UpdateResponse variants);
+`request_response.proto:1762-1806,1904-1932` (Update/Poll RPCs +
+`stage`); `enums/v1/update.proto:21-35` (lifecycle stage);
+`update/v1/message.proto` (WaitPolicy, Request, Outcome).
+sdk-python: `worker/_workflow_instance.py:608-724` (`_apply_do_update`),
+`:1142-1143` (gating), `:2939-2941` (no dynamic validator);
+`workflow/_handlers.py`, `_definition.py:350-356`; `_workflow.py:836,
+955-956,1894-1984`, `_impl.py:735-757`, `_exceptions.py:73-85`.
+sdk-ruby: `internal/worker/workflow_instance.rb:500-590`,
+`workflow/definition.rb:197-220`, `client/implementation.rb:469-471,
+504-579`, `workflow_update_handle.rb:52-68`, `error.rb:72`.
+Perl precedent: Runner.pm:595 (job-set comment), :842-843/:956/:1034
+(handler tracking + gate), Definition.pm:60-86; client `signal`/`query`
+shape in `WorkflowHandle.pm:209-267`.
+
+## 20. External workflow handles (v0.2, Phase 6)
+
+**Files:** `sdk/lib/Temporalio/Workflow.pm`,
+`sdk/lib/Temporalio/Workflow/ExternalWorkflowHandle.pm` (new),
+`sdk/lib/Temporalio/Workflow/Commands.pm`,
+`sdk/lib/Temporalio/Workflow/Runner.pm`.
+
+A workflow body obtains a handle to an arbitrary already-running workflow
+(by id, in the current namespace) and signals or cancels it **through the
+command stream** — never via a client RPC. This is the in-workflow
+counterpart to the client-side `WorkflowHandle->signal`/`->cancel`, and is
+distinct from child workflows (an external handle targets a workflow this
+run did not start).
+
+### 20.1 Public API
+
+```perl
+my $h = Temporalio::Workflow::get_external_workflow_handle($workflow_id, run_id => undef);
+$h->workflow_id;  $h->run_id;
+await $h->signal($signal, args => \@args);   # SignalExternalWorkflowExecution
+await $h->cancel;                            # RequestCancelExternalWorkflowExecution
+```
+
+`get_external_workflow_handle` is a **synchronous, non-command**
+constructor — it captures `($workflow_id, $run_id)` plus the runner
+reference, emits nothing (mirrors Python/Ruby plain, non-async
+constructors); raises `Temporalio::Exception::Workflow::NoRunner` outside
+a workflow body. `run_id` undef targets the most-recent run.
+`ExternalWorkflowHandle` lives in
+`Temporalio::Workflow::ExternalWorkflowHandle`, is never instantiated
+directly. `signal($signal, args => [])` and `cancel()` are `async`,
+returning a `Workflow::Future` that resolves to nothing on success.
+
+### 20.2 Behavioral contract
+
+Both operations follow the timer/activity precedent (§10.3): allocate a
+deterministic seq, emit one command, register the seq → a fresh
+`Workflow::Future`, resolve it on the matching `Resolve*` job. The Runner
+owns **two independent seq counters** — external-signal and
+external-cancel (mirrors Python `_next_seq("external_signal")` /
+`"external_cancel"`, Ruby's two counters) — separate from timer/activity.
+
+**signal:** resolve `$signal` to a name; convert `args` to payloads;
+allocate the external-signal seq; emit `SignalExternalWorkflowExecution`
+(the **`workflow_execution`** oneof arm, not `child_workflow_id`) with
+`seq`, `signal_name`, `args`, and `workflow_execution =
+NamespacedWorkflowExecution{namespace, workflow_id, run_id}`. **`namespace`
+is the current workflow's namespace** from `Temporalio::Workflow::info`
+(never a user argument); `run_id` empty when undef. On
+`ResolveSignalExternalWorkflow{seq, failure}`: pop; unset failure → done;
+populated → fail via `failure_converter->from_failure`.
+
+**cancel:** allocate the external-cancel seq; emit
+`RequestCancelExternalWorkflowExecution` with `seq` and the same
+`workflow_execution` (reason unset). On
+`ResolveRequestCancelExternalWorkflow{seq, failure}`: same done/fail rule.
+
+**Wait semantics:** both resolve only when the `Resolve*` job arrives (the
+server-acknowledged send / cancel-request). No fire-and-forget variant.
+
+**In-flight cancellation:** if a `signal`'s awaiting frame is cancelled
+before its resolve, the Runner emits `CancelSignalWorkflow{seq}` and lets
+the eventual `Resolve*` settle the Future (mirrors Python `asyncio.shield`
++ `cancel_signal_workflow`, Ruby's cancel callback). A `cancel` request
+has **no** counter-cancel ("there is no cancelling a cancel request").
+
+Three new `Commands` builders: `signal_external_workflow_execution`,
+`request_cancel_external_workflow_execution`, `cancel_signal_workflow`.
+
+### 20.3 Failure modes
+
+No bespoke `ExternalWorkflow` exception (resolved decision): both
+references raise `from_failure(resolution.failure)` verbatim. External
+workflow not found / signal-send failed / cancel-request failed → the
+converted `Temporalio::Exception::Application` (the server's
+`application_failure_info`) at the await site. A server-reported cancelled
+operation → `Temporalio::Exception::Cancelled`. The constructor's only
+failure mode is `NoRunner`.
+
+### 20.4 Test scenarios
+
+Replay (`sdk/t/replay/external_workflow.t`):
+
+- **T-ext-1** — constructor outside a body raises `NoRunner`; inside,
+  returns a handle echoing `workflow_id`/`run_id` and emits no command.
+- **T-ext-2** — `await $h->signal('go', args => ['x'])` emits one
+  `SignalExternalWorkflowExecution` (seq 1, `workflow_execution` arm:
+  namespace = run's namespace, workflow_id = handle id, run_id empty when
+  undef; `signal_name='go'`; encoded args). Assert `child_workflow_id` arm
+  unset.
+- **T-ext-3** — `ResolveSignalExternalWorkflow{seq 1}` (no failure)
+  resolves done; run completes.
+- **T-ext-4** — resolve with `failure: <application "not found">` →
+  `Exception::Application` (message/type round-trip).
+- **T-ext-5** — `await $h->cancel` emits one
+  `RequestCancelExternalWorkflowExecution` (seq 1, same
+  `workflow_execution`, reason unset).
+- **T-ext-6** — `ResolveRequestCancelExternalWorkflow{seq 1}` resolves
+  done; with failure → `Application`.
+- **T-ext-7** — independent seq spaces: two signals then a cancel →
+  signals seq 1,2 and cancel seq 1; out-of-order resolves settle correctly.
+- **T-ext-8** — explicit `run_id` threads into
+  `NamespacedWorkflowExecution.run_id` for both commands.
+- **T-ext-9** — cancelling an in-flight `signal`'s frame emits
+  `CancelSignalWorkflow{seq}` (does not pre-emptively raise); the
+  subsequent `Resolve*` settles the Future.
+- **T-ext-10** *(integration, `sdk/t/integration/external_workflow.t`)* —
+  workflow B signals then cancels workflow A by id; assert A observes the
+  signal and reaches a cancelled state; signalling a non-existent id →
+  `Application`. `skip_all` without a dev server.
+
+### 20.5 Reference anchors (MUST-match)
+
+Protos: `workflow_commands.proto:285-311` (RequestCancel/Signal external
+with `target` oneof), `:313+` (CancelSignalWorkflow);
+`workflow_activation.proto:311-327` (Resolve jobs);
+`common/common.proto:9-15` (NamespacedWorkflowExecution, run_id may be
+empty). sdk-python: `workflow/_workflow_ops.py:551-655`,
+`worker/_workflow_instance.py:1009-1055,2104-2118,2578-2601,3366-3394`.
+sdk-ruby: `workflow.rb:294-296`, `workflow/external_workflow_handle.rb:10-41`,
+`internal/worker/workflow_instance/outbound_implementation.rb:25-58,218-281`,
+`workflow_instance.rb:389-395`.
