@@ -308,3 +308,18 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P7.1.2 GREEN: execute/start_local_activity + ScheduleLocalActivity/RequestCancelLocalActivity + backoff→timer loop (runner-owned)
 - [ ] P7.1.3 REFACTOR: share resolve/cancel paths with regular activities
 - [ ] P7.1.4 Verify: prove -lj4 t
+
+### P7.2 Async activity completion (spec §22)
+- [ ] P7.2.1 RED: sdk/t/unit/async_activity.t + sdk/t/integration/async_activity.t (T-asyncact-1..9)
+- [ ] P7.2.2 GREEN: Client->async_activity_handle + AsyncActivityHandle + CompleteAsync/AsyncActivityCancelled exceptions + complete_async + WillCompleteAsync reporting
+- [ ] P7.2.3 Verify: prove -lj4 t
+
+### P7.3 Eager start (spec §23)
+- [ ] P7.3.1 RED: sdk/t/unit/eager.t + sdk/t/integration/eager.t (T-eager-1..6)
+- [ ] P7.3.2 GREEN: WorkflowHandle->eagerly_started; Worker disable_eager_activity_execution + no_remote_activities; thread eager flag through schedule_activity
+- [ ] P7.3.3 Verify: prove -lj4 t
+
+### P7.4 In-workflow upsert search-attributes & memo (spec §24)
+- [ ] P7.4.1 RED: sdk/t/replay/upsert.t (T-upsert-1..9) + WfDef fixtures
+- [ ] P7.4.2 GREEN: upsert_search_attributes/upsert_memo + Commands builders + Runner conversion/info-view + SearchAttributeKey value_set/value_unset
+- [ ] P7.4.3 Verify: prove -lj4 t — **Phase 7 acceptance: activity parity green**

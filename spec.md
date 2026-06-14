@@ -3291,3 +3291,237 @@ Protos: `ScheduleLocalActivity`/`RequestCancelLocalActivity`/`ActivityCancellati
 LA fields), `:3195-3202` (cancel). sdk-ruby `workflow.rb:228-287`. Perl host
 code: `Workflow.pm`, `Workflow/Runner.pm` (schedule_local_activity,
 backoff branch), `Workflow/Commands.pm`.
+
+## 22. Async activity completion (v0.2, Phase 7)
+
+An activity body can declare it will complete **out of band**; some external
+process later completes/fails/cancels/heartbeats it through a client-side
+handle, addressed by opaque **task token** or **id reference**
+(`workflow_id` + optional `run_id` + `activity_id`) — the "id-or-token"
+union both reference SDKs converge on.
+
+### 22.1 Public API
+
+**Worker side** — a new public exception
+`Temporalio::Exception::Activity::CompleteAsync` and a package verb
+`Temporalio::Activity::complete_async` that throws it (resolved decision:
+ship the verb + public class, no context method). The activity dispatcher
+(`Worker/ActivityDispatcher.pm`) catches it specifically and reports
+`activity_result.ActivityExecutionResult{will_complete_async}` to core
+instead of Completed/Failed. (Caveat: catching/swallowing `CompleteAsync`
+in user code defeats async completion — the dispatcher only honors it when
+it propagates out of the body.)
+
+**Client side** — a keyword-union factory (resolved decision: keyword-only,
+no public `ActivityIDReference` value object in v0.2):
+
+```perl
+my $h = $client->async_activity_handle(task_token => $bytes);
+my $h = $client->async_activity_handle(workflow_id => $w, run_id => $r, activity_id => $a);
+
+await $h->heartbeat(@details);                 # may throw AsyncActivityCancelled
+await $h->complete($result);                   # $result optional (no-result activities)
+await $h->fail($error, last_heartbeat_details => \@details);
+await $h->report_cancellation(@details);
+```
+
+`task_token` is mutually exclusive with the id triple; `workflow_id`
+requires `activity_id`. No RPC at construction. Returns a
+`Temporalio::Client::AsyncActivityHandle`.
+
+### 22.2 Behavioral contract
+
+1. Each method picks the `*ById*` RPC for an id reference, else the
+   task-token RPC. `namespace` and `identity` are injected from the client
+   on every request, both branches.
+2. **`heartbeat` inspects the response** and raises
+   `Temporalio::Exception::Activity::AsyncActivityCancelled` (carrying a
+   cancellation-details value from `cancel_requested`/`activity_paused`/
+   `activity_reset`) when any is set — this is the only cancellation-delivery
+   channel to an out-of-band activity. (Resolved naming: double-L
+   `Cancelled`, matching the existing `Cancelled` class.)
+3. `complete` result is optional (empty result payloads for no-result
+   activities). `fail` carries `last_heartbeat_details` (default empty).
+   Details/result convert through `$client->data_converter`'s payload
+   converter (sync path, matching v0.1 heartbeat).
+4. RPCs route via `_rpc_call` (`service => 'workflow'`, `retry => 1`).
+5. **Proto field-number caution:** in the by-token request messages
+   `result`/`failure`/`last_heartbeat_details`/`details` occupy
+   **non-sequential** tags (deprecated `worker_version`/`deployment`/
+   `resource_id` fields sit between) — encode by explicit field number; set
+   only `task_token`/`namespace`/`identity` + payload/failure.
+
+The 8 RPCs (`workflowservice/v1/request_response.proto`):
+RecordActivityTaskHeartbeat(ById), RespondActivityTaskCompleted(ById),
+RespondActivityTaskFailed(ById), RespondActivityTaskCanceled(ById).
+
+### 22.3 Failure modes
+
+- `task_token` + any id field, or `workflow_id` without `activity_id`, or
+  neither → `Temporalio::Exception::Argument`.
+- RPC failure (e.g. NOT_FOUND) → mapped `RpcError` via `_rpc_call`.
+- `heartbeat` against a cancel/pause/reset response →
+  `AsyncActivityCancelled`.
+
+### 22.4 Test scenarios
+
+Integration (`sdk/t/integration/async_activity.t`, skip without dev server):
+
+- **T-asyncact-1/2** — `complete($result)` by token → `RespondActivityTaskCompletedRequest`;
+  by-id → the ById variant.
+- **T-asyncact-3** — `fail(..., last_heartbeat_details => [...])` (+ById).
+- **T-asyncact-4** — `report_cancellation` (+ById).
+- **T-asyncact-5** — `heartbeat` success issues the heartbeat RPC; details
+  converted.
+- **T-asyncact-6** — heartbeat response `cancel_requested`/`activity_paused`/
+  `activity_reset` raises `AsyncActivityCancelled` with the right flags.
+- **T-asyncact-7** — body calls `complete_async` → `WillCompleteAsync` to
+  core; later completed via handle; workflow result reflects the out-of-band
+  value (end-to-end).
+- **T-asyncact-8** — arg validation (unit): the three invalid combos raise
+  `Argument`.
+- **T-asyncact-9** — `complete()` with no `$result` sends empty result.
+
+### 22.5 Reference anchors (MUST-match)
+
+sdk-python `client/_client.py:2588-2662`, `client/_activity.py:532-677`,
+`client/_impl.py:1000-1136`, `activity.py:441-449`. sdk-ruby
+`client.rb:729-737`, `client/async_activity_handle.rb:12-92`,
+`internal/worker/activity_worker.rb:281-287`. Protos
+`request_response.proto:569-773`. Perl: `Client.pm:403` (_rpc_call),
+`Activity/Context.pm:66-80`, `Worker/ActivityDispatcher.pm`.
+
+## 23. Eager start (v0.2, Phase 7)
+
+Two distinct knobs, not to be conflated.
+
+### 23.1 Public API & contract — eager workflow start (detect-only)
+
+`start_workflow(..., request_eager_start => 1)` already sets proto
+`StartWorkflowExecutionRequest.request_eager_execution` (`Client.pm:252`).
+v0.2 completes the path **detect-only** (resolved decision — the C header
+exposes no eager API; the embedded first-task dispatch is owned entirely by
+the Rust core when client and worker share a core client; the lang layer
+does not route the embedded task): expose a read-only
+`$handle->eagerly_started` set from
+`StartWorkflowExecutionResponse.eager_workflow_task`. No error if the server
+has eager-start disabled — the workflow simply starts normally and
+`eagerly_started` is false; integration tests **skip** (not fail) when the
+server returns no eager task.
+
+### 23.2 Public API & contract — eager activity dispatch
+
+```perl
+my $worker = Temporalio::Worker->new(...,
+    disable_eager_activity_execution => 0,   # default 0 (eager ON); workflow-side flag
+    no_remote_activities             => 0,   # default 0; bridge enable_remote_activities = !this
+);
+```
+
+- `disable_eager_activity_execution` is a **workflow-side** flag that
+  suppresses the eager-execution request attached when a workflow schedules
+  an activity — it threads into the `schedule_activity` command path
+  (`Workflow/Commands.pm`/`Runner.pm`), NOT the bridge WorkerOptions.
+- `no_remote_activities` **IS** a bridge WorkerOptions field: today
+  `Worker.pm` hardcodes `enable_remote_activities => 1`; v0.2 makes it
+  `!$no_remote_activities` (and implicitly true when no activities are
+  registered). An eager activity declined for lack of remote slots degrades
+  to remote scheduling, which may time out **schedule-to-start** (the
+  expected compliance outcome).
+
+### 23.3 Test scenarios
+
+- **T-eager-1** — `request_eager_start => 1` sets `request_eager_execution`
+  on the wire (unit). *(features/eager_workflow/successful_start)*
+- **T-eager-2** — response with `eager_workflow_task` → `eagerly_started`
+  true; workflow returns its value; **skips** if the server returned none.
+- **T-eager-3** — no `eager_workflow_task` → `eagerly_started` false;
+  workflow completes normally.
+- **T-eager-4** — `no_remote_activities => 1` sets bridge
+  `enable_remote_activities => 0`; worker starts (unit).
+  *(features/eager_activity/non_remote_activities_worker)*
+- **T-eager-5** — workflow schedules an activity (short schedule-to-close)
+  on a `no_remote_activities` worker → eager declined → activity times out
+  with type `SCHEDULE_TO_START`.
+- **T-eager-6** — `disable_eager_activity_execution => 1` suppresses the
+  eager flag on the emitted `schedule_activity` command (unit).
+
+### 23.4 Reference anchors (MUST-match)
+
+sdk-python `client/_client.py:413-549`, `client/_impl.py:182-213`,
+`worker/_worker.py:123-288,532-534,624-631`, `bridge/worker.py:48`. Protos
+`request_response.proto:169,206-217,295`. Perl `Client.pm:238-253`,
+`Client/WorkflowHandle.pm` (add `eagerly_started`), `Worker.pm:100-144`.
+
+## 24. In-workflow upsert of search attributes & memo (v0.2, Phase 7)
+
+In-workflow verbs emitting `UpsertWorkflowSearchAttributes` and
+`ModifyWorkflowProperties`.
+
+### 24.1 Public API
+
+```perl
+Temporalio::Workflow::upsert_search_attributes(@updates);   # typed updates
+Temporalio::Workflow::upsert_memo({ reason => 'x', stale => undef });  # undef removes
+```
+
+Search attributes are **typed-only** (resolved decision — adopt Ruby's
+surface; reject Python's deprecated untyped-dict form): updates are built
+from the existing `Temporalio::Common::SearchAttributeKey` via new
+`$key->value_set($v)` / `$key->value_unset` methods. Memo takes a hashref;
+an `undef` value removes that key.
+
+### 24.2 Behavioral contract
+
+- `upsert_search_attributes` → `UpsertWorkflowSearchAttributes` (oneof tag
+  18): each update encodes into `search_attributes.indexed_fields{key}`;
+  `value_unset` writes a proper null Payload (the key is still present); the
+  server merges, new values winning. `Workflow::info->{search_attributes}`
+  is updated in place (not with `BinaryChecksums`).
+- `upsert_memo` → `ModifyWorkflowProperties` (oneof tag 19): writes
+  `upserted_memo.fields{key}`; `undef` → empty Payload (deletion convention);
+  removals are emitted even for absent keys; the in-workflow memo view stays
+  in sync. **Early-return on empty** updates (no command).
+- Both **pre-convert** through the workflow's payload converter before
+  buffering, so a conversion failure leaves no partial command. New
+  `Workflow/Commands.pm` builders following the `$fields`-hashref pattern;
+  the public verbs validate `_runner()` and delegate.
+
+### 24.3 Failure modes
+
+- Outside a workflow body → `Temporalio::Exception::Workflow::NoRunner`.
+- Unencodable SA/memo value → conversion exception before any command.
+- Empty updates → early return, no command, no error.
+- Untyped SA mapping passed to `upsert_search_attributes` →
+  `Temporalio::Exception::Argument` (resolved decision: reject the
+  Python-deprecated overload).
+
+### 24.4 Test scenarios
+
+Replay (`sdk/t/replay/upsert.t`):
+
+- **T-upsert-1** — `value_set` emits one `UpsertWorkflowSearchAttributes`
+  with the encoded `indexed_fields{key}`. *(features/search_attributes/upsert)*
+- **T-upsert-2** — `value_unset` emits a null Payload (delete), command
+  present.
+- **T-upsert-3** — two sequential upserts; final
+  `info->{search_attributes}` keeps untouched keys, shows cleared/added keys,
+  no `BinaryChecksums`.
+- **T-upsert-4** — start-time SAs reflected in `info->{search_attributes}`.
+  *(features/search_attributes/set)*
+- **T-upsert-5** — `upsert_memo({reason=>'x'})` → `ModifyWorkflowProperties`
+  with `upserted_memo.fields{reason}`.
+- **T-upsert-6** — `upsert_memo({stale=>undef})` → empty Payload (delete),
+  command present even if absent.
+- **T-upsert-7** — empty updates → no command.
+- **T-upsert-8** — conversion failure → raises before any command.
+- **T-upsert-9** — either verb outside a workflow body → `NoRunner`.
+
+### 24.5 Reference anchors (MUST-match)
+
+sdk-python `worker/_workflow_instance.py:1294-1336,1659-1762`,
+`workflow/_context.py:655-663,845-863`. sdk-ruby `workflow.rb:502-516`.
+Protos `workflow_commands.proto:319-330` (oneof tags 18/19),
+`common/v1/message.proto:47-54`. Perl `Workflow.pm:31-38,63,177-189`,
+`Workflow/Commands.pm`, `Workflow/Runner.pm`,
+`Common/SearchAttributeKey.pm` (add value_set/value_unset).

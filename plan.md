@@ -1368,6 +1368,76 @@ side unchanged — core runs the LA.
 4. Verify: cd sdk && prove -lj4 t
 ```
 
+### Step P7.2: Async activity completion (spec §22)
+
+**NOTE**: §22 — client-side AsyncActivityHandle (token-or-id union) + the
+8 Respond/Record RPCs + worker-side complete_async. heartbeat raises
+AsyncActivityCancelled on cancel/pause/reset. Detect-only: keyword-only
+factory; package verb + public CompleteAsync class.
+
+```text
+1. RED: Write tests first:
+   - sdk/t/unit/async_activity.t: arg-validation (token+id / wf-without-act /
+     neither → Argument, T-asyncact-8); request building per RPC by explicit
+     field number
+   - sdk/t/integration/async_activity.t (skip without dev server):
+     complete/fail/report_cancellation/heartbeat by token and by id
+     (T-asyncact-1..5,9); heartbeat cancel/pause/reset → AsyncActivityCancelled
+     (T-asyncact-6); complete_async end-to-end (T-asyncact-7)
+2. GREEN: Client->async_activity_handle + Client/AsyncActivityHandle.pm
+   (heartbeat/complete/fail/report_cancellation via _rpc_call);
+   Exception/Activity/CompleteAsync.pm + AsyncActivityCancelled.pm;
+   Temporalio::Activity::complete_async; ActivityDispatcher reports
+   WillCompleteAsync.
+3. Verify: cd sdk && prove -lj4 t
+```
+
+### Step P7.3: Eager start (spec §23)
+
+**NOTE**: §23 — eager workflow start is DETECT-ONLY (request flag already
+wired; add eagerly_started accessor; core owns dispatch). Eager activity:
+disable_eager_activity_execution (schedule_activity flag) +
+no_remote_activities (bridge enable_remote_activities).
+
+```text
+1. RED: Write tests first:
+   - sdk/t/unit/eager.t: request_eager_start sets request_eager_execution
+     (T-eager-1); eagerly_started true/false off the response (T-eager-2/3,
+     unit with a stubbed response); no_remote_activities → bridge
+     enable_remote_activities=0 (T-eager-4);
+     disable_eager_activity_execution suppresses the eager flag on
+     schedule_activity (T-eager-6)
+   - sdk/t/integration/eager.t (skip without dev server / skip when server
+     eager disabled): T-eager-2 live; T-eager-5 schedule-to-start timeout on
+     a no_remote_activities worker
+2. GREEN: WorkflowHandle->eagerly_started; Worker.pm
+   disable_eager_activity_execution + no_remote_activities →
+   enable_remote_activities; thread the eager flag through schedule_activity.
+3. Verify: cd sdk && prove -lj4 t
+```
+
+### Step P7.4: In-workflow upsert search-attributes & memo (spec §24)
+
+**NOTE**: §24 — typed-only SA (value_set/value_unset on SearchAttributeKey),
+memo hashref with undef-deletes. Commands UpsertWorkflowSearchAttributes
+(tag 18) / ModifyWorkflowProperties (tag 19); update info view; pre-convert.
+
+```text
+1. RED: Write replay tests first:
+   - sdk/t/replay/upsert.t + WfDef fixtures: value_set → one command with
+     indexed_fields (T-upsert-1); value_unset → null Payload (T-upsert-2);
+     sequential upserts update info->{search_attributes} correctly, no
+     BinaryChecksums (T-upsert-3); start-time SAs in info (T-upsert-4);
+     upsert_memo set/delete (T-upsert-5/6); empty → no command (T-upsert-7);
+     conversion failure before buffer (T-upsert-8); outside body → NoRunner
+     (T-upsert-9)
+2. GREEN: Workflow.pm upsert_search_attributes/upsert_memo; Commands.pm two
+   builders; Runner.pm conversion+buffer+info-view update;
+   SearchAttributeKey value_set/value_unset.
+3. Verify: cd sdk && prove -lj4 t — **Phase 7 acceptance: activity parity
+   (local activities, async completion, eager, upsert) green**
+```
+
 ---
 
 ## Implementation Guidelines
