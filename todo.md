@@ -347,3 +347,15 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P9.2.1 RED: sdk/t/unit/nexus_definition.t + sdk/t/integration/nexus.t (T-nexus-10..14)
 - [ ] P9.2.2 GREEN: Nexus/{Definition,OperationContext,OperationResult,WorkflowHandle} + Worker/NexusDispatcher + NexusRegistry + Worker nexus_services + gRPC→Nexus error table
 - [ ] P9.2.3 Verify: prove -lj4 t — **Phase 9 acceptance: Nexus green**
+
+## Phase 10 — Runtime, observability & worker hardening
+
+### P10.1 Interceptor framework (spec §27)
+- [ ] P10.1.1 RED: sdk/t/unit/interceptors.t + replay fixtures (T-icpt-1..10)
+- [ ] P10.1.2 GREEN: Client + Worker interceptor base classes + Input classes + chain build/install + interceptors => [] args
+- [ ] P10.1.3 Verify: prove -lj4 t
+
+### P10.2 OpenTelemetry tracing interceptor (spec §27.4)
+- [ ] P10.2.1 RED: sdk/t/unit/tracing.t (T-trace-1..9, skip_all without OTel)
+- [ ] P10.2.2 GREEN: Contrib/OpenTelemetry/TracingInterceptor + durable_scheduler_disabled Runner primitive + W3C fallback
+- [ ] P10.2.3 Verify: prove -lj4 t

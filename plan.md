@@ -1535,6 +1535,50 @@ slice natively. Attribute pattern :NexusService/:SyncOperation/
 3. Verify: cd sdk && prove -lj4 t — **Phase 9 acceptance: Nexus green**
 ```
 
+## Phase 10 — Runtime, observability & worker hardening
+
+### Step P10.1: Interceptor framework (spec §27)
+
+**NOTE**: §27 — four surfaces (client outbound, worker activity/workflow
+inbound, workflow outbound) as :isa base classes; chain folds first-listed
+outermost; args/headers-writable Inputs; workflow interceptors deterministic.
+
+```text
+1. RED: Write tests first (sdk/t/unit/interceptors.t + replay fixtures):
+   - client outbound start_workflow injects header, workflow inbound reads it
+     (T-icpt-1); client_interceptor compliance: start_workflow_update
+     increments args[0] (T-icpt-2); first-listed outermost (T-icpt-3);
+     activity/workflow inbound wrapping (T-icpt-4,6); workflow outbound
+     execute_activity header → activity inbound (T-icpt-5); worker inherits
+     client interceptors (T-icpt-7); no-op default delegation (T-icpt-8);
+     exception rejects Future (T-icpt-9); replay-determinism (T-icpt-10)
+2. GREEN: Client/Interceptor.pm + Client/OutboundInterceptor.pm;
+   Worker/Interceptor.pm + Activity/Workflow Inbound/Outbound base classes +
+   Input classes; chain-build + install at Client/Worker/Runner sites;
+   interceptors => [] args on Client->connect and Worker->new.
+3. Verify: cd sdk && prove -lj4 t
+```
+
+### Step P10.2: OpenTelemetry tracing interceptor (spec §27)
+
+**NOTE**: §27.4 — TracingInterceptor consuming client+activity+workflow roles;
+header _tracer-data; OTel soft dep + W3C fallback; needs the
+durable_scheduler_disabled Runner primitive; replay-safe completed spans.
+
+```text
+1. RED: Write tests first (sdk/t/unit/tracing.t, skip_all without OTel):
+   - end-to-end span tree via in-memory exporter (T-trace-1); header key +
+     carrier (T-trace-2); always_create_workflow_spans (T-trace-3); span-name
+     table (T-trace-4); replay safety, no span on replay except query
+     (T-trace-5); CompleteWorkflow failure span, benign ApplicationError not
+     ERROR (T-trace-6); context survives await (T-trace-7); skip without OTel
+     (T-trace-8); signal/query/update linking (T-trace-9)
+2. GREEN: Contrib/OpenTelemetry/TracingInterceptor.pm; add
+   Workflow::Unsafe::durable_scheduler_disabled primitive to the Runner;
+   Syntax::Keyword::Dynamically context carrying; W3C fallback shim.
+3. Verify: cd sdk && prove -lj4 t
+```
+
 ---
 
 ## Implementation Guidelines

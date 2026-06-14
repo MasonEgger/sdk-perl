@@ -3884,3 +3884,128 @@ Protos: `workflow_commands.proto:358,401` (Schedule/RequestCancel, arms
 `core/nexus/nexus.proto:13,23,42,84`. Existing Perl: `Exception/NexusOperation.pm`,
 `Exception/NexusHandler.pm`, §18 (caller template),
 `Worker/ActivityDispatcher.pm` + `Activity/Definition.pm` (handler analogs).
+
+---
+
+# Phase 10 — Runtime, observability & worker hardening (§27–§32)
+
+## 27. Interceptors & OpenTelemetry tracing (v0.2, Phase 10)
+
+### 27.1 Interceptors — Public API
+
+Four interceptor surfaces mirroring Python/Ruby, as `feature 'class'` base
+classes (resolved decision: `:isa` base classes, not Role::Tiny — the SDK
+uses `feature 'class'` throughout) whose default methods delegate to
+`$self->next->$method($input)`. Inputs are `Temporalio::*::Input::*` objects
+with **writable `args`/`headers`** and all other fields read-only (resolved
+decision — covers exactly what compliance mutates).
+
+- **Client outbound** — `Temporalio::Client::Interceptor` (`intercept_client
+  ($next) -> OutboundInterceptor`) with methods `start_workflow`,
+  `signal_with_start_workflow`, `signal_workflow`, `query_workflow`,
+  `start_workflow_update` (v0.2 required subset; the rest stubbed), each
+  taking one Input, returning a Future. Input classes carry the scheduling
+  fields + `headers` (`SignalWithStartWorkflowInput` has **no** top-level
+  headers — they live on the embedded start op).
+- **Worker inbound** — `Temporalio::Worker::Interceptor` with
+  `intercept_activity($next) -> ActivityInbound` and `intercept_workflow
+  ($next) -> WorkflowInbound` (resolved decision: Ruby's instance-returning
+  shape, not Python's class-returning). `ActivityInbound`: `init($outbound)`,
+  `execute_activity($input)`. `WorkflowInbound`: `init($outbound)`,
+  `execute_workflow`, `handle_signal`, `handle_query`, `validate_update`,
+  `handle_update`.
+- **Workflow outbound** — `Temporalio::Worker::WorkflowOutbound`:
+  `execute_activity`, `execute_local_activity`, `start_child_workflow`,
+  `signal_child_workflow`, `signal_external_workflow`, `continue_as_new`.
+  These run on the workflow scheduler thread and MUST be deterministic.
+
+### 27.2 Interceptors — Behavioral contract
+
+Supplied as `interceptors => [...]` to `Client->connect` and `Worker->new`;
+the worker inherits the client's list and appends its own. The chain folds
+so the **first-listed interceptor is outermost** (built by iterating in
+reverse, each `intercept_*($next)` wrapping the accumulator over a root
+"impl" that performs the real RPC/dispatch). Install points: client
+build-request path becomes the root impl (header writes flow through the
+existing encode at `Client.pm:289`); the activity/workflow dispatchers
+invoke the inbound chains; the in-workflow API calls the workflow-outbound
+chain head (header writes land in the command encode at `Runner.pm:313`).
+Headers are `Str → Payload` on each Input; interceptors deal in
+already-decoded Payloads. **Determinism:** workflow interceptor bodies run
+under the dynamically-scoped `$Runner::CURRENT`; interceptor-scoped state
+crossing an `await` uses `Syntax::Keyword::Dynamically`, never `local`
+(§16.1).
+
+### 27.3 Interceptors — Failure modes & test scenarios
+
+A raising interceptor method propagates as a rejected Future (not
+swallowed); `intercept_*` returning a non-conforming object is a load-time
+die; mutating a read-only Input field dies; Input constructors are private.
+Test scenarios (T-icpt-1..10, mostly unit/replay): header round-trip
+client→workflow→activity (T-icpt-1,5); the `client_interceptor` compliance
+case (outbound `start_workflow_update` increments `args[0]`, T-icpt-2);
+first-listed-is-outermost ordering (T-icpt-3); activity/workflow inbound
+wrapping (T-icpt-4,6); worker inherits client interceptors (T-icpt-7);
+no-op default delegation (T-icpt-8); exception rejects the caller Future
+(T-icpt-9); replay-determinism of an outbound interceptor (T-icpt-10).
+
+### 27.4 OpenTelemetry tracing
+
+A single `Temporalio::Contrib::OpenTelemetry::TracingInterceptor` consuming
+the client + activity-inbound + workflow-inbound roles, passed to both
+`Client->connect` and `Worker->new`.
+
+```perl
+my $i = Temporalio::Contrib::OpenTelemetry::TracingInterceptor->new(
+    tracer => $otel_tracer, header_key => '_tracer-data',
+    propagator => $w3c_composite, always_create_workflow_spans => 0);
+```
+
+- **Header key `_tracer-data`** (MUST-match): value is a Payload whose body
+  is the propagator carrier (`Str→Str` of W3C `traceparent`/`tracestate`/
+  `baggage`); default propagator = W3C TraceContext + Baggage composite.
+- **Optional dependency** (resolved decision): `OpenTelemetry` +
+  `OpenTelemetry::SDK` are recommends, not hard deps; `require`-ing the
+  interceptor dies loudly if absent; tests `skip_all` without them. If a
+  needed propagator class is missing, fall back to a built-in W3C
+  tracecontext carrier shim so header propagation still works headlessly.
+- **Span names (MUST-match)**: client `StartWorkflow:{wf}` (or
+  `SignalWithStartWorkflow:{wf}`), `SignalWorkflow:{signal}`,
+  `QueryWorkflow:{query}`, `StartWorkflowUpdate:{update}`; activity-inbound
+  `RunActivity:{type}`; workflow-inbound (zero-duration completed spans
+  stamped at `Workflow::now`, replay-safe) `RunWorkflow`/`CompleteWorkflow`/
+  `HandleSignal`/`HandleQuery`/`ValidateUpdate`/`HandleUpdate`/`FailHandle*`;
+  workflow-outbound completed `StartActivity`/`StartChildWorkflow`/
+  `SignalChildWorkflow`/`SignalExternalWorkflow` spans whose context is
+  injected into the outbound headers.
+- **Propagation**: client injects into the start headers → workflow inbound
+  extracts to parent its spans → workflow outbound injects per call →
+  activity/child inbound extracts. `always_create_workflow_spans=0` (default)
+  creates workflow spans only when an inbound parent context is present
+  (no orphans for CLI/schedule starts).
+- **Workflow-side context (resolved decisions)**: the root interceptor
+  pointer is stashed on the runner; OTel context crossing an `await` is
+  bound with `Syntax::Keyword::Dynamically`; span attach/extract that
+  touches a mutex or `time` is wrapped in a **new
+  `Temporalio::Workflow::Unsafe::durable_scheduler_disabled` primitive** that
+  v0.2 adds to the Runner ("run this block without recording on / yielding to
+  the durable scheduler"). Span status is set ERROR on exception **except**
+  for a benign `ApplicationError` (MUST-match).
+
+Test scenarios (T-trace-1..9): end-to-end span tree with parent/child links
+via an in-memory exporter (T-trace-1); header key + carrier (T-trace-2);
+`always_create_workflow_spans` behavior (T-trace-3); span-name table
+(T-trace-4); replay safety, no span on replay except query (T-trace-5);
+`CompleteWorkflow` failure span, benign ApplicationError not ERROR
+(T-trace-6); context survives an await (T-trace-7); `skip_all` without OTel
+(T-trace-8); signal/query/update span linking (T-trace-9).
+
+### 27.5 Reference anchors (MUST-match)
+
+sdk-python `worker/_interceptor.py:27-528`, `client/_interceptor.py:674-771`,
+`contrib/opentelemetry/_interceptor.py:61-843`. sdk-ruby
+`worker/interceptor.rb`, `client/interceptor.rb`,
+`contrib/open_telemetry.rb:13-565`. Compliance
+`features/update/client_interceptor/feature.py:43-67`,
+`features/tracing/README.md`. Perl install points: `Client.pm:289`,
+`Worker.pm:266,309`, `Workflow.pm:107`, `Runner.pm:313,514,1136`.
