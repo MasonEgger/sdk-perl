@@ -1271,6 +1271,10 @@ Add Exception::WorkflowUpdateFailed. Client half mirrors signal/query.
    implement _apply_do_update (lookup, read-only validator guard, accept,
    tracked async handler, UpdateResponse) in Runner.pm; UpdateResponse
    builder in Commands.pm; buffer-then-drain for pre-instance updates.
+   ALSO (M1): relax the existing v0.1 hard completion-gate (Runner.pm:1034) to
+   warn-and-complete on unfinished handlers (parity with sdk-python/ruby) +
+   expose Temporalio::Workflow::all_handlers_finished; update the affected
+   v0.1 signal test.
 3. RED: Write client-side integration tests:
    - Create sdk/t/integration/updates.t (skip_all without dev server):
      execute_update returns result (T-cli-update-1); start_update
@@ -1610,9 +1614,15 @@ threading: aggregate record_* in the Rust shim, main-thread-marshal rare
 metric_new/attributes_new/free. Ruby-shaped meter interface (no MetricBuffer).
 
 ```text
+0. SPIKE (do first, M3): instrument the shim trampoline with a thread-id
+   check to determine whether core EVER invokes a meter callback on the main
+   thread while it is inside a bridge FFI call. If it can, the marshalling
+   path MUST detect "already on the main thread" and run the Perl method
+   inline (no condvar) to avoid self-deadlock. Record the finding in §28.2.
 1. RED: Write tests first:
    - ext/temporalio-perl-bridge cargo test: 8-thread concurrent record exact
-     under shim aggregation, no off-main-thread Perl call (T-meter-7)
+     under shim aggregation, no off-main-thread Perl call (T-meter-7); a
+     main-thread-reentrant create runs inline, no deadlock (spike guard)
    - sdk/t/unit/metric_meter.t: config sets custom_meter non-NULL others NULL
      (T-meter-1); meter+Prometheus → Argument (T-meter-2); metric_new once,
      handle identity (T-meter-3); record kinds × value types (T-meter-4);
@@ -1641,7 +1651,11 @@ metric_new/attributes_new/free. Ruby-shaped meter interface (no MetricBuffer).
      + behavior guard → Argument (T-wkrver-2); packer emits correct tag/body,
      buffer stays 464 (T-wkrver-3); :VersioningBehavior attribute parses
    - sdk/t/integration/deployment_versioning.t (skip without dev server):
-     routing_pinned (T-wkrver-4); routing_auto_upgrade (T-wkrver-5)
+     routing_pinned (T-wkrver-4); routing_auto_upgrade (T-wkrver-5);
+     routing_with_override (T-wkrver-6, may need a start-time pinned override —
+     flag if deferred); routing_with_ramp (T-wkrver-7, harness drives the ramp
+     RPC); legacy build-id (T-wkrver-8/9) gated on ENABLE_VERSIONING_TESTS +
+     the deferred build-id-compat client RPCs — skip otherwise
 2. GREEN: Worker/DeploymentOptions.pm + DeploymentVersion.pm; Worker.pm
    deployment_options/use_worker_versioning; WorkerOptions versioning packers;
    :VersioningBehavior attribute on the workflow definition → activation
@@ -1693,7 +1707,10 @@ overrides with SimpleMaximum).
 
 ### Step P10.8: Determinism enforcement (spec §29.4)
 
-**NOTE**: §29.4 — best-effort CORE::GLOBAL:: overrides; act only in workflow
+**NOTE**: §29.4 (NARROWED, M2) — best-effort CORE::GLOBAL:: overrides of the
+TIME/ENTROPY surface ONLY (time/localtime/gmtime/rand/srand/sleep +
+Time::HiRes::*); do NOT override open/fork/kill/system/exec/readpipe by
+default (risk trapping IO::Async + the fork pool). Act only in workflow
 context; Unsafe escape via Syntax::Keyword::Dynamically; default ON. Document
 the gaps (CORE::-qualified, raw sockets not trapped).
 
@@ -1703,9 +1720,10 @@ the gaps (CORE::-qualified, raw sockets not trapped).
    - time/rand/sleep in a workflow body throw Nondeterminism; same outside a
      workflow return real values (T-det-1); Unsafe::illegal_call_tracing_disabled
      suppresses + restores (T-det-2); suppression survives await (T-det-3); SDK
-     now/random never throw (T-det-4); backticks/system throw (T-det-5);
-     idempotent double-install, third-party unaffected (T-det-6); CORE::time NOT
-     trapped — pins the best-effort boundary (T-det-7)
+     now/random never throw (T-det-4); Time::HiRes::time in a workflow throws
+     (T-det-5); idempotent double-install, third-party unaffected (T-det-6);
+     CORE::time AND system/open NOT trapped by default — pins the
+     best-effort/narrowed boundary (T-det-7)
 2. GREEN: Workflow/Unsafe.pm + Workflow/DeterminismGuard.pm (CORE::GLOBAL::
    overrides gated on $Runner::CURRENT + dynamically-scoped suppression);
    Worker kwarg to disable; self-exemption for SDK primitives.
@@ -1734,24 +1752,27 @@ Client.pm:589 gap (new ClientHttpConnectProxyOptions FFI record).
 
 ### Step P10.10: Client environment configuration (spec §31)
 
-**NOTE**: §31 — reimplement envconfig.rs in pure Perl (TOML::Tiny + internal
-per-OS path helper); replay the Rust test corpus; no connect signature
-change.
+**NOTE**: §31 (CORRECTED) — call the env-config FFI
+(temporal_core_client_env_config_load / _profile_load, header :918/:925), do
+NOT reimplement envconfig.rs. Build the options struct, parse the returned
+JSON into value classes. No TOML parser / per-OS path helper. No connect
+signature change.
 
 ```text
-1. RED: Write unit tests first (sdk/t/unit/envconfig.t), replaying the Rust
-   envconfig.rs test corpus as fixtures:
-   - multi-profile parse (T-envcfg-1); full TLS+codec+grpc_meta normalization
-     (T-envcfg-2); profile precedence (T-envcfg-3); missing-profile behaviors
-     (T-envcfg-4); env layering incl empty-delete (T-envcfg-5); path/data
-     conflicts (T-envcfg-6); both-disabled error (T-envcfg-7); strict unknown
-     key (T-envcfg-8); disabled tri-state round-trip (T-envcfg-9);
-     to_connect_config mapping (T-envcfg-10); missing/empty file (T-envcfg-11);
-     per-OS default path with stubbed dir (T-envcfg-12)
-   - sdk/t/integration/envconfig.t: load temp toml → connect → one RPC
+1. RED: Write unit tests first (sdk/t/unit/envconfig.t), using override_env_vars:
+   - options-struct built correctly from each kwarg combo; parse representative
+     FFI JSON (multi-profile, TLS block, grpc_meta, codec) into value classes
+     (T-envcfg-1..6); fail-string return → Argument (profile-not-found, strict
+     unknown key, path+data conflict, both-disabled)
+   - to_connect_config mapping (address→target, api_key-implies-tls,
+     explicit-tls-overrides, grpc_meta→rpc_metadata), disabled tri-state,
+     DataSource path-vs-data → TlsConfig (T-envcfg-7..9)
+   - sdk/t/integration/envconfig.t: write temp toml → load_client_connect_config
+     → connect → one RPC (T-envcfg-int-1)
 2. GREEN: Temporalio/EnvConfig.pm + EnvConfig/{ClientConfigTLS,
-   ClientConfigProfile,ClientConfig}.pm (pure-Perl envconfig.rs port);
-   TOML::Tiny dep; internal per-OS config-dir helper.
+   ClientConfigProfile,ClientConfig}.pm; Core/FFI env-config options-struct
+   record + load/profile_load attaches; JSON parse → value classes;
+   to_connect_config. Add a pin check that the two FFI symbols are present.
 3. Verify: cd sdk && prove -lj4 t — **Phase 10 / v0.2 SDK feature contracts
    complete**
 ```

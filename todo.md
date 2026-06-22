@@ -289,7 +289,7 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 
 ### P6.2 Workflow updates (spec §19)
 - [ ] P6.2.1 RED: sdk/t/replay/updates.t (T-upd-1..11) + WfDef fixtures
-- [ ] P6.2.2 GREEN: do_update dispatch + validator guard + tracked handler + UpdateResponse builder + buffer-then-drain
+- [ ] P6.2.2 GREEN: do_update dispatch + validator guard + tracked handler + UpdateResponse builder + buffer-then-drain; relax the v0.1 hard completion-gate to warn-and-complete + expose all_handlers_finished (M1) + update the affected v0.1 signal test
 - [ ] P6.2.3 RED: sdk/t/integration/updates.t (T-cli-update-1..7)
 - [ ] P6.2.4 GREEN: WorkflowHandle->execute_update/start_update + WorkflowUpdateHandle + Exception::WorkflowUpdateFailed
 - [ ] P6.2.5 Verify: prove -lj4 t
@@ -371,7 +371,7 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P10.4.3 Verify: cargo test && prove -lj4 t
 
 ### P10.5 Worker versioning (spec §29.1)
-- [ ] P10.5.1 RED: sdk/t/unit/worker_versioning.t + sdk/t/integration/deployment_versioning.t (T-wkrver-1..5)
+- [ ] P10.5.1 RED: sdk/t/unit/worker_versioning.t + sdk/t/integration/deployment_versioning.t (T-wkrver-1..9; 6-9 = override/ramp/legacy, gated/skip)
 - [ ] P10.5.2 GREEN: DeploymentOptions/DeploymentVersion + Worker kwargs + WorkerOptions versioning packers + :VersioningBehavior attribute + MD5-%INC build_id
 - [ ] P10.5.3 Verify: prove -lj4 t
 
@@ -396,6 +396,6 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [ ] P10.9.3 Verify: prove -lj4 t
 
 ### P10.10 Client environment configuration (spec §31)
-- [ ] P10.10.1 RED: sdk/t/unit/envconfig.t (T-envcfg-1..12, replay Rust corpus) + integration
-- [ ] P10.10.2 GREEN: Temporalio/EnvConfig + EnvConfig/{ClientConfigTLS,ClientConfigProfile,ClientConfig} (pure-Perl envconfig.rs port) + TOML::Tiny + per-OS path helper
+- [ ] P10.10.1 RED: sdk/t/unit/envconfig.t (options-struct build, FFI-JSON parse, fail→Argument, to_connect_config; T-envcfg-1..9) + integration (T-envcfg-int-1)
+- [ ] P10.10.2 GREEN: Temporalio/EnvConfig + EnvConfig/{ClientConfigTLS,ClientConfigProfile,ClientConfig} via the env-config FFI (load/_profile_load, parse JSON) — NOT a pure-Perl port; + pin check for the two symbols
 - [ ] P10.10.3 Verify: prove -lj4 t — **v0.2 SDK feature contracts complete**

@@ -2279,7 +2279,7 @@ Target version `Temporalio::SDK::VERSION` = `0.2.0`.
 - **Async activity completion**: an activity signals "completes
   asynchronously"; a client async-activity handle (by task token or
   ids) supports heartbeat / complete / fail / cancel out of band.
-  T-async-act-*.
+  T-asyncact-*.
 
 #### Phase 8 — Scheduling
 
@@ -2299,13 +2299,13 @@ Target version `Temporalio::SDK::VERSION` = `0.2.0`.
 #### Phase 10 — Runtime, observability & worker hardening
 
 - **core → Perl log forwarding**: the seventh deep-copy shim trampoline
-  (§3); forwarded core logs surface through a Perl logger. T-log-fwd-*.
+  (§3); forwarded core logs surface through a Perl logger. T-logfwd-*.
 - **Custom metric meters**: `TemporalCoreCustomMetricMeter` callbacks
   bridged to a Perl meter interface (counter / histogram / gauge), in
   addition to the existing Prometheus/OTel exporters. T-meter-*.
 - **Advanced worker tuning**: custom slot suppliers, autoscaling pollers,
   and deployment-based worker versioning (build IDs / worker
-  deployments). T-wkr-ver-*.
+  deployments). T-wkrver-*.
 - **Determinism enforcement**: detect and forbid illegal
   non-deterministic calls in workflow context (Ruby-style illegal-call
   detection; a Python-style import sandbox stays out of scope — §15).
@@ -2881,9 +2881,10 @@ known outcome.
    re-validating.
 4. **Execution (async, tracked).** Invoke the handler via `Future->call`
    (sync or async, as `_dispatch_signal`); register the pending Future in
-   the existing `%in_progress_handlers` set so `_all_handlers_finished`
-   gates `CompleteWorkflowExecution` while the handler is in-flight
-   (existing Runner.pm:1034 gate, no change). Handler **returns** →
+   the existing `%in_progress_handlers` set. On workflow exit with handlers
+   still in-flight the runner **warns and completes** (the handler's work is
+   abandoned), matching both references — see "Completion gating" below; it
+   does NOT block completion. Handler **returns** →
    `UpdateResponse.completed` with the encoded result. Handler **throws** a
    Temporal-failure exception (a mapped `Temporalio::Exception::*`, or a
    class in the worker's failure-exception types) →
@@ -2894,11 +2895,20 @@ known outcome.
    a pre-acceptance rejection emits **one**. All carry the job's
    `protocol_instance_id`.
 
-**Completion gating (resolved decision).** Perl follows sdk-python's
-*hard* gate (already implemented via `%in_progress_handlers`): updates
-slot into the same set as signals, so completion waits on in-flight
-update handlers. (sdk-ruby is advisory/warn-only; Perl is deliberately
-stricter, matching existing code.)
+**Completion gating (resolved decision, corrected v0.2.1).** **Both**
+sdk-python (`_workflow_instance.py:2359` `_warn_if_unfinished_handlers`,
+called at workflow exit `:547`) and sdk-ruby are **warn-and-complete**:
+when `:Run` returns with a signal/update handler still in-flight, they
+emit a warning and complete the workflow, abandoning the handler. v0.2
+adopts that parity. `%in_progress_handlers` becomes a **tracking set** that
+feeds a public `Temporalio::Workflow::all_handlers_finished` predicate (so
+authors can `wait_condition(\&all_handlers_finished)` to gate explicitly,
+the recommended Temporal pattern) plus an exit-time warning keyed by each
+handler's unfinished-policy — it does **not** block `CompleteWorkflowExecution`.
+NOTE: the v0.1 runner currently HARD-gates signal completion
+(Runner.pm:1034); P6.2 must relax that gate to warn-and-complete and update
+the affected v0.1 signal test, since the hard gate diverges from both
+references and can hang a workflow the compliance suite expects to finish.
 
 **Client side.** Build `UpdateWorkflowExecutionRequest` (namespace,
 `workflow_execution`, `first_execution_run_id`,
@@ -3593,8 +3603,13 @@ they encode payloads). Load-bearing proto remaps:
 - `Action::StartWorkflow->new($type_name, args=>[], id=>, task_queue=>,
   execution_timeout=>, run_timeout=>, task_timeout=>, retry_policy=>,
   memo=>, search_attributes=>, headers=>, priority=>)` → wraps
-  `NewWorkflowExecutionInfo`. `workflow_id_reuse_policy` and `cron_schedule`
-  are INVALID in a schedule action — reject as unknown kwargs.
+  `NewWorkflowExecutionInfo`. (That proto DOES carry
+  `workflow_id_reuse_policy=8` and `cron_schedule=10`, but the reference SDKs
+  do not surface them on a schedule action — the schedule owns its own
+  overlap/spec — so the Perl surface omits them too; passing either is an
+  unknown-kwarg `Argument`. This is an SDK convention, not a proto
+  restriction; confirm Python/Ruby reject rather than forward before
+  finalizing.)
 - `Backfill->new(start_at=>, end_at=>, overlap=>)` — write-only; `start_at`
   is **exclusive**, `end_at` inclusive.
 - `Update->new(schedule=>, search_attributes=>)`; the updater receives
@@ -3831,11 +3846,15 @@ operation_token/scheduled_event_id. Unknown-seq resolve → non-determinism.
 carrying a Nexus `type` + `retry_behavior`. The dispatcher's error mapping
 mirrors Python `_exception_to_handler_error`: HandlerError passes through;
 `Application`(non_retryable)→`INTERNAL`; `WorkflowAlreadyStarted`→`INTERNAL`
-non-retryable; **gRPC status→Nexus type is a MUST-match table**
-(INVALID_ARGUMENT→BAD_REQUEST, NOT_FOUND→NOT_FOUND,
-RESOURCE_EXHAUSTED→RESOURCE_EXHAUSTED, UNIMPLEMENTED→NOT_IMPLEMENTED,
-DEADLINE_EXCEEDED→UPSTREAM_TIMEOUT, UNAVAILABLE/ABORTED→UNAVAILABLE, else
-INTERNAL); else→`INTERNAL`. A handler `OperationError` (op failed/cancelled,
+non-retryable; **gRPC status→Nexus type is a MUST-match table**, transcribed
+verbatim from `sdk-python/temporalio/worker/_nexus.py:517-573` (do not infer
+from the nexus HTTP spec): INVALID_ARGUMENT→BAD_REQUEST;
+ALREADY_EXISTS/FAILED_PRECONDITION/OUT_OF_RANGE→INTERNAL (retryable=false);
+RESOURCE_EXHAUSTED→RESOURCE_EXHAUSTED; UNIMPLEMENTED→NOT_IMPLEMENTED;
+DEADLINE_EXCEEDED→UPSTREAM_TIMEOUT; NOT_FOUND→NOT_FOUND;
+CANCELLED/DATA_LOSS/INTERNAL/UNKNOWN/UNAUTHENTICATED/PERMISSION_DENIED→INTERNAL;
+UNAVAILABLE/ABORTED→UNAVAILABLE; else→INTERNAL. A handler `OperationError`
+(op failed/cancelled,
 not infra) produces a failure-carrying `StartOperationResponse`
 (`CANCELED`→`Cancelled`, `FAILED`→`Application`).
 
@@ -3887,7 +3906,7 @@ Protos: `workflow_commands.proto:358,401` (Schedule/RequestCancel, arms
 
 ---
 
-# Phase 10 — Runtime, observability & worker hardening (§27–§32)
+# Phase 10 — Runtime, observability & worker hardening (§27–§31)
 
 ## 27. Interceptors & OpenTelemetry tracing (v0.2, Phase 10)
 
@@ -4091,7 +4110,17 @@ metric×attribute-set cardinality, never dropping), and **main-thread-marshal
 the rare `metric_new`/`attributes_new`/`*_free`** (push a request entry,
 signal the eventfd, block the core thread on a condvar until the main-thread
 drain runs the Perl method and posts the result). This never touches Perl
-off the main thread and never blocks a hot path. Handles are shim-allocated
+off the main thread and never blocks a hot path. **Reentrancy spike
+(required, M3):** the header (`:438-440`) does not exclude the *calling*
+thread, so if core ever invokes a meter callback synchronously while the
+main thread is already inside a bridge FFI call (e.g. metric creation during
+worker construction), the main thread would block on a condvar waiting for a
+drain only it can run — self-deadlock. P10.4 MUST first instrument the
+trampoline with a thread-id check to determine whether core ever calls back
+on the main thread; if it can, the marshalling path detects "already on the
+main thread" and runs the Perl method **inline** instead of blocking. The
+pure-Rust `record_*` aggregation path is not at risk. Handles are
+shim-allocated
 ids into a Rust table; attributes decode from the tagged
 `TemporalCoreCustomMetricAttributeValue` union (string/int/float/bool, null
 = empty set); `meter_free` runs at `Runtime->shutdown` (double-free no-ops);
@@ -4208,13 +4237,22 @@ scenario).
 A **best-effort** guard (resolved WH-11) — Perl has neither Python's import
 sandbox (out of scope, §15) nor Ruby's TracePoint, so it follows Ruby's
 *model* (trap globally, act only in workflow context, escape via `Unsafe`)
-with a coarser *mechanism*: `CORE::GLOBAL::` overrides of `time`/`localtime`/
-`gmtime`/`rand`/`srand`/`sleep`/`system`/`exec`/`readpipe`/`open`/`fork`/
-`kill` plus symbol-table overrides for `Time::HiRes::*`. Each override:
-`if (in workflow context && !suppressed) throw Nondeterminism else goto
-&CORE::builtin`. "In context" = `defined $Runner::CURRENT`. Suppression is
-**dynamically-scoped** (`Syntax::Keyword::Dynamically`, never `local`) via a
-new `Temporalio::Workflow::Unsafe::illegal_call_tracing_disabled(&)` escape
+with a coarser *mechanism*. **Resolved decision (narrowed per review, M2):**
+the default override set is the **time/entropy** surface only —
+`CORE::GLOBAL::` overrides of `time`/`localtime`/`gmtime`/`rand`/`srand`/
+`sleep` plus symbol-table overrides for `Time::HiRes::{time,gettimeofday,
+sleep}`. These are the determinism offenders that matter and are cheap to
+trap. The IO/process builtins (`open`/`fork`/`kill`/`system`/`exec`/
+`readpipe`) are **NOT** overridden by default: a process-global override of
+`open`/`fork` risks trapping IO::Async loop internals and the sync-activity
+fork pool (which run on the same main thread where `$Runner::CURRENT` is
+set), for little gain (such ops already break replay with no matching
+command). They may be added behind a separate, default-OFF "paranoid" worker
+flag in a later revision. Each override: `if (in workflow context &&
+!suppressed) throw Nondeterminism else goto &CORE::builtin`. "In context" =
+`defined $Runner::CURRENT`. Suppression is **dynamically-scoped**
+(`Syntax::Keyword::Dynamically`, never `local`) via a new
+`Temporalio::Workflow::Unsafe::illegal_call_tracing_disabled(&)` escape
 hatch. The SDK's own deterministic primitives self-exempt (they call
 `CORE::`-qualified builtins / construct the RNG under suppression). **Default
 ON** (resolved WH-12), disable via a worker kwarg. **Documented gaps:** can't
@@ -4312,17 +4350,28 @@ Reset: proto `request_response.proto:906-933`, `enums/v1/reset.proto:13-45`;
 
 Loading client connection settings from a TOML profile file and `TEMPORAL_*`
 env vars. The canonical schema lives in Rust core
-(`sdk-rust/crates/common/src/envconfig.rs`); both reference SDKs delegate to
-it over their bridge. **The C bridge exposes no envconfig symbol**, so Perl
-**reimplements `envconfig.rs` in pure Perl** (resolved decision — a
-*mechanism* fork; every TOML key, env var, default, precedence rule, and
-error is a cross-SDK MUST-match copied from the Rust oracle, whose test
-corpus is replayed as a compliance fixture).
+(`sdk-rust/crates/common/src/envconfig.rs`), and **the C bridge DOES expose
+it** — `temporal_core_client_env_config_load` and
+`temporal_core_client_env_config_profile_load`
+(`temporal-sdk-core-c-bridge.h:918,925`), taking the option structs at
+`:282-312` and returning a JSON-serialized config / profile (or a fail
+string). Both reference SDKs delegate to exactly these symbols.
+
+**Resolved decision (corrected v0.2.1): call the FFI, do NOT reimplement
+`envconfig.rs` in Perl.** Earlier drafts asserted no symbol existed and
+specced a pure-Perl port of the TOML/env/precedence engine; that was wrong
+and would have drifted from the oracle. The Perl layer builds the options
+struct, invokes the FFI through the existing client-FFI path, and parses the
+returned JSON into the value classes. No TOML parser dependency and no
+per-OS default-path helper are needed — core does the parsing and computes
+the default path.
 
 ### 31.1 Public API
 
 A `Temporalio::EnvConfig` namespace module with three `feature 'class'`
-value classes: `ClientConfigTLS`, `ClientConfigProfile`, `ClientConfig`.
+value classes: `ClientConfigTLS`, `ClientConfigProfile`, `ClientConfig`. The
+surface matches sdk-python `envconfig.py` / sdk-ruby `env_config.rb` (which
+are themselves thin wrappers over the same FFI).
 
 - **`ClientConfigTLS`** — `disabled` (tri-state undef/0/1), `server_name`,
   `server_root_ca_cert`, `client_cert`, `client_private_key`,
@@ -4332,69 +4381,81 @@ value classes: `ClientConfigTLS`, `ClientConfigProfile`, `ClientConfig`.
   disabled) or a `Temporalio::Client::TlsConfig` (reads each DataSource into
   the path-or-content scalar TlsConfig already accepts).
 - **`ClientConfigProfile`** — `address`/`namespace`/`api_key`/`tls`/
-  `grpc_meta`; codec parsed+round-tripped but not surfaced (resolved
-  decision, matches references). `->load(profile=>, config_source=>,
-  disable_file=>, disable_env=>, config_file_strict=>, override_env_vars=>)`
-  loads one profile (TOML + env overrides). `to_connect_config()` → a
-  hashref of `connect` kwargs (`address`→`target`, `grpc_meta`→`rpc_metadata`).
-- **`ClientConfig`** — holds all `profiles`; `->load(...)` (no env overrides,
-  only `TEMPORAL_CONFIG_FILE` to locate the file) and the convenience
-  `->load_client_connect_config(...)`.
+  `grpc_meta`; codec parsed but not surfaced (resolved decision, matches
+  references). `->load(profile=>, config_source=>, disable_file=>,
+  disable_env=>, config_file_strict=>, override_env_vars=>)` builds a
+  `TemporalCoreClientEnvConfigProfileLoadOptions` and calls
+  `temporal_core_client_env_config_profile_load`, parsing the returned JSON
+  profile. `to_connect_config()` → a hashref of `connect` kwargs
+  (`address`→`target`, `grpc_meta`→`rpc_metadata`).
+- **`ClientConfig`** — holds all `profiles`; `->load(...)` calls
+  `temporal_core_client_env_config_load` (the all-profiles loader, which
+  applies no env overrides) and the convenience
+  `->load_client_connect_config(...)` (profile-load + `to_connect_config`).
+
+The option-struct fields map 1:1 to the kwargs: `profile`, `path`/`data`
+(from `config_source`), `disable_file`, `disable_env`, `config_file_strict`,
+`env_vars` (from `override_env_vars`; the live `%ENV` when omitted). The FFI
+applies all precedence, env-override, TLS-auto-instantiation, gRPC-meta
+normalization, conflict-detection, and default-path rules — Perl does not
+re-derive them.
 
 Integration: **no change to `connect`'s signature** (resolved decision:
 keep positional `$target`); the user splats the loaded kwargs and `delete`s
 `target` for the positional slot.
 
-### 31.2 Behavioral contract (MUST-match the Rust oracle)
+### 31.2 Behavioral contract
 
-- **File precedence**: explicit `config_source` → `TEMPORAL_CONFIG_FILE` →
-  per-OS default (`<config_dir>/temporalio/temporal.toml`). Non-existent
-  file / empty TOML → empty config (not an error).
-- **Profile precedence**: explicit `profile` → `TEMPORAL_PROFILE` →
-  `"default"`. An explicit/env-named missing profile → `ProfileNotFound`
-  (`Argument`); a missing `"default"` (name unset) → empty profile, no error.
-- **Env overrides** apply on top of the TOML profile (override wins);
-  `disable_file`/`disable_env` skip the respective source; **both disabled →
-  `Argument`**. The all-profiles `ClientConfig->load` applies no env
-  overrides. The full `TEMPORAL_*` var table and TOML schema (`[profile.<name>]`
-  + `.tls`/`.codec`/`.grpc_meta`) match `envconfig.rs` exactly, incl. the
-  `server_ca_cert_*`/`client_key_*` TOML spelling vs the
-  `server_root_ca_cert`/`client_private_key` field names.
-- **gRPC meta**: keys normalized (lowercase, `_`→`-`); empty env value
-  **deletes** a header.
-- **`disabled` tri-state**: `TEMPORAL_TLS=true`→`disabled=0` (note inversion).
-- **`to_connect_config`**: `api_key` implies `tls=>1` unless an explicit tls
-  block overrides it (`tls=>0` when disabled, else a TlsConfig).
+- Build the options struct, invoke the FFI (through the client-FFI machinery,
+  like the other client option structs), and parse the returned JSON. A
+  populated fail string on the `*OrFail` return is mapped to
+  `Temporalio::Exception::Argument` (profile-not-found, malformed TOML,
+  strict-mode unknown key, path+data conflicts, both-disabled — all decided
+  by core, surfaced verbatim).
+- **`to_connect_config`** is the only Perl-side semantic mapping: from the
+  parsed profile, `address`→`target`; `namespace`→`namespace`;
+  `api_key`→`api_key` and imply `tls=>1` unless an explicit tls block
+  overrides it (`tls=>0` when disabled, else a `TlsConfig` from
+  `to_tls_config`); `grpc_meta`→`rpc_metadata`. This mirrors
+  `envconfig.py:222-241` / `env_config.rb:206-222`.
+- DataSource resolution in `to_tls_config`: `{path=>}` slurped, `{data=>}`
+  passed through, into the path-or-content scalar the existing `TlsConfig`
+  accepts.
 
 ### 31.3 Failure modes & deps
 
-All config-assembly failures raise `Temporalio::Exception::Argument` before
-any RPC: missing explicit/env profile; malformed TOML; strict-mode unknown
-key; both path+data for the same material (TOML or env or cross); both
-`disable_file`+`disable_env`; bare-scalar DataSource. Resolved dependency
-decision: **`TOML::Tiny`** (pure Perl) for parsing, and a small internal
-per-OS path helper (Linux `~/.config`, macOS `~/Library/Application
-Support`, Windows `%APPDATA%`) rather than a heavyweight `dirs`-equivalent.
+All load failures surface as `Temporalio::Exception::Argument` (carrying the
+FFI fail string) before any RPC. No new parsing/path dependencies (core
+owns both). The only new code is the options-struct FFI record, the JSON
+parse (the vendored proto/JSON machinery already present), the value
+classes, and `to_connect_config`.
 
 ### 31.4 Test scenarios
 
-Unit (offline, `override_env_vars` for hermetic tests) **T-envcfg-1..12**
-replaying the Rust `envconfig.rs:1046-1776` test corpus: multi-profile parse;
-full TLS block + codec + grpc_meta normalization; profile-selection
-precedence; missing-profile behaviors; env layering incl. empty-delete;
-path/data conflicts; both-disabled error; strict-mode unknown key; `disabled`
-tri-state round-trip; `to_connect_config` mapping; non-existent/empty file;
-per-OS default path. Integration **T-envcfg-int-1**: write a temp
-`temporal.toml`, load, splat into `connect`, issue one RPC.
+- **T-envcfg-1..6** (unit, `override_env_vars` for hermetic tests): build the
+  options struct correctly from each kwarg combination; parse representative
+  FFI JSON outputs (multi-profile, full TLS block, grpc_meta, codec) into the
+  value classes; a fail-string return maps to `Argument` (profile-not-found,
+  strict unknown key, path+data conflict, both-disabled).
+- **T-envcfg-7..9** (unit): `to_connect_config` mapping — `address`→`target`,
+  api_key-implies-tls, explicit-tls-overrides, `grpc_meta`→`rpc_metadata`;
+  `disabled` tri-state; DataSource path-vs-data → `TlsConfig`.
+- **T-envcfg-int-1** (integration, skip without dev server): write a temp
+  `temporal.toml`, `load_client_connect_config`, splat into `connect`, issue
+  one RPC. Optionally cross-check a few cases against the Rust
+  `envconfig.rs:1046-1776` corpus to confirm the FFI behaves as the oracle
+  documents (the FFI IS the oracle, so this guards the pin, not our logic).
 
 ### 31.5 Reference anchors (MUST-match)
 
-Oracle `sdk-rust/crates/common/src/envconfig.rs` (env docs `:9-29`, loaders
-`:255-378`, env apply `:415-543`, conflicts `:557-591`, default path
-`:608-616`, TOML structs `:736-764`, strict `:890-933`, tests `:1046-1776`).
-sdk-python `envconfig.py:101-409`. sdk-ruby `env_config.rb:24-314`. Perl
-`Client.pm:498-505` (connect), `Client/TlsConfig.pm:22-73`,
-`Exception/Argument`.
+C header `temporal-sdk-core-c-bridge.h:274-312` (option/return structs),
+`:918,925` (`env_config_load` / `_profile_load`). Oracle (for documented
+behavior, not re-implemented) `sdk-rust/crates/common/src/envconfig.rs`.
+sdk-python `envconfig.py:101-409` (thin FFI wrapper). sdk-ruby
+`env_config.rb:24-314`. Perl `Client.pm:498-505` (connect),
+`Client/TlsConfig.pm:22-73`, `Core/FFI.pm` (client option-struct records),
+`Exception/Argument`. **Pin note:** bumping the sdk-rust tag must re-verify
+these two symbols remain present (add to the P0.10 echo-test pin check).
 
 ---
 
