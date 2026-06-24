@@ -351,9 +351,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 10 — Runtime, observability & worker hardening
 
 ### P10.1 Interceptor framework (spec §27)
-- [ ] P10.1.1 RED: sdk/t/unit/interceptors.t + replay fixtures (T-icpt-1..10)
-- [ ] P10.1.2 GREEN: Client + Worker interceptor base classes + Input classes + chain build/install + interceptors => [] args
-- [ ] P10.1.3 Verify: prove -lj4 t
+- [x] P10.1.1 RED: sdk/t/unit/interceptors.t + replay fixtures (T-icpt-1..10)
+- [x] P10.1.2 GREEN: Client + Worker interceptor base classes + Input classes + chain build/install + interceptors => [] args
+- [x] P10.1.3 Verify: prove -lj4 t
 
 ### P10.2 OpenTelemetry tracing interceptor (spec §27.4)
 - [ ] P10.2.1 RED: sdk/t/unit/tracing.t (T-trace-1..9, skip_all without OTel)

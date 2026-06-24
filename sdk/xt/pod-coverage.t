@@ -27,6 +27,7 @@ Test::Pod::Coverage->import;
 my $also_private = [
     qr/^_/,                      # private helpers
     qr/^(?:BUILD|ADJUST|DESTROY)$/,
+    qr/^new$/,                   # constructor is infrastructure (see above)
     qr/^import$/,
     qr/^unimport$/,
 ];
@@ -47,6 +48,10 @@ my %TRUSTME = (
     'Temporalio::Workflow::Logger' => [
         qr/^(?:is_)?(?:trace|debug|info|notice|warning|warn|error|err|critical|crit|fatal|alert|emergency)f?$/,
     ],
+    # The client outbound chain root (spec section 27.2): an internal mechanism
+    # whose methods mirror the OutboundInterceptor surface and perform the real
+    # RPC. Documented collectively in Temporalio::Client::Interceptor's POD.
+    'Temporalio::Client::_RootOutbound' => [ qr/^[a-z]/ ],
 );
 
 my @modules = all_modules('lib');

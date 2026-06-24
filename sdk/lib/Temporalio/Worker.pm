@@ -20,6 +20,7 @@ use Temporalio::Exception::Runtime ();
 use Temporalio::Activity::Pool ();
 use Temporalio::Worker::ActivityDispatcher ();
 use Temporalio::Worker::ActivityRegistry ();
+use Temporalio::Worker::Interceptor ();
 use Temporalio::Worker::NexusRegistry ();
 use Temporalio::Worker::PollLoop ();
 use Temporalio::Worker::WorkflowDispatcher ();
@@ -34,6 +35,11 @@ class Temporalio::Worker {
     field $workflows  :param = [];
     field $activities :param = [];
     field $nexus_services :param = [];
+    # Interceptors (spec section 27): the worker inherits the client's list and
+    # appends its own; the combined list folds first-listed outermost for the
+    # inbound activity/workflow chains.
+    field $interceptors :param = [];
+    field $all_interceptors;
 
     # WorkerOptions kwargs (spec 8.1). Defaults verified against sdk-ruby
     # worker.rb (lines 447-465) + the FixedSize tuner default of 100
@@ -101,6 +107,14 @@ class Temporalio::Worker {
         # names.
         $nexus_registry = Temporalio::Worker::NexusRegistry->new(
             nexus_services => $nexus_services);
+
+        # The worker inherits the client's interceptor list and appends its own
+        # (spec section 27.2). The combined list drives both inbound chains; the
+        # client list already drives the client outbound chain. (A test double
+        # client may not implement ->interceptors; treat that as an empty list.)
+        my $client_list =
+            $client->can('interceptors') ? $client->interceptors : [];
+        $all_interceptors = [ @{ $client_list // [] }, @$interceptors ];
     }
 
     method client             { $client }
@@ -110,6 +124,20 @@ class Temporalio::Worker {
     method workflow_registry  { $workflow_registry }
     method nexus_registry     { $nexus_registry }
     method is_shutdown        { $is_shutdown }
+    method interceptors       { $all_interceptors }
+
+    # build_activity_inbound($root) / build_workflow_inbound($root) — fold the
+    # combined interceptor list (client + worker) over the supplied root impl,
+    # first-listed outermost (spec section 27.2). The dispatchers call these to
+    # wrap the real activity/workflow dispatch.
+    method build_activity_inbound ($root) {
+        return Temporalio::Worker::Interceptor::build_activity_inbound(
+            $all_interceptors, $root);
+    }
+    method build_workflow_inbound ($root) {
+        return Temporalio::Worker::Interceptor::build_workflow_inbound(
+            $all_interceptors, $root);
+    }
 
     # _build_worker_options(\@keep) -> opaque pointer to the packed
     # TemporalCoreWorkerOptions buffer (spec 8.1). The pointer is valid while
@@ -591,6 +619,23 @@ Accessor returning the C<activity_registry> value.
 =head2 client
 
 Accessor returning the C<client> value.
+
+=head2 interceptors
+
+Accessor returning the combined interceptor list (the client's interceptors
+followed by the worker's own, spec section 27.2). This list drives the inbound
+activity and workflow chains.
+
+=head2 build_activity_inbound
+
+C<< $worker->build_activity_inbound($root) >> folds the combined interceptor
+list over C<$root> (a L<Temporalio::Worker::ActivityInbound>), first-listed
+outermost, and returns the chain head (spec section 27.2).
+
+=head2 build_workflow_inbound
+
+C<< $worker->build_workflow_inbound($root) >> is the workflow-inbound analogue
+of L</build_activity_inbound>.
 
 =head2 is_shutdown
 

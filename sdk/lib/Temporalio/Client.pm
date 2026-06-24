@@ -18,6 +18,8 @@ use Temporalio::Client::Connection ();
 use Temporalio::Client::KeepAliveConfig ();
 use Temporalio::Client::RetryConfig ();
 use Temporalio::Client::TlsConfig ();
+use Temporalio::Client::Interceptor ();
+use Temporalio::Client::_RootOutbound ();
 use Temporalio::Client::WorkflowHandle ();
 use Temporalio::Client::WorkflowExecutionIterator ();
 use Temporalio::Client::ScheduleHandle ();
@@ -68,12 +70,29 @@ class Temporalio::Client {
     field $identity       :param;
     field $data_converter :param;
     field $runtime        :param;
+    # Interceptors (spec section 27): the ordered list passed to connect; the
+    # first-listed interceptor is outermost. The worker inherits this list and
+    # appends its own (Worker.pm). $_outbound_chain is built lazily from the
+    # list folded over a root impl that performs the real RPC.
+    field $interceptors   :param = [];
+    field $_outbound_chain;
 
     method connection     { $connection }
     method namespace      { $namespace }
     method identity       { $identity }
     method data_converter { $data_converter }
     method runtime        { $runtime }
+    method interceptors   { $interceptors }
+
+    # _outbound — the client outbound interceptor chain head (spec section 27.2).
+    # Built once: a root OutboundInterceptor whose methods perform the real
+    # RPC, wrapped by the interceptor list (first-listed outermost).
+    method _outbound () {
+        return $_outbound_chain //=
+            Temporalio::Client::Interceptor::build_outbound_chain(
+                $interceptors,
+                Temporalio::Client::_RootOutbound->new(client => $self));
+    }
 
     # Rotation is manual and explicit (spec section 7.3): no refresh timer,
     # no refresh-on-UNAUTHENTICATED. Synchronous, no RPC.
@@ -154,8 +173,23 @@ class Temporalio::Client {
     # the spec section 7.5 mapping), and returns a WorkflowHandle whose run_id
     # is the response's first run id.
     async method start_workflow ($workflow, $args = [], %kwargs) {
+        my $headers = delete $kwargs{headers} // {};
+        my $input = Temporalio::Client::Interceptor::Input::StartWorkflow->new(
+            workflow => $workflow,
+            args     => [ @$args ],
+            headers  => { %$headers },
+            kwargs   => { %kwargs },
+        );
+        return await $self->_outbound->start_workflow($input);
+    }
+
+    # _root_start_workflow($input) — the chain root: performs the real RPC
+    # using the (possibly interceptor-mutated) args/headers (spec section 27.2).
+    async method _root_start_workflow ($input) {
+        my %kwargs = %{ $input->get('kwargs') };
         my $request = await $self->_build_start_workflow_request(
-            $workflow, $args, %kwargs);
+            $input->get('workflow'), $input->args,
+            %kwargs, headers => $input->headers);
         my $workflow_id = $request->workflow_id;
         my $response = await $self->_rpc_call(
             'StartWorkflowExecution', $request,
@@ -186,8 +220,21 @@ class Temporalio::Client {
     # (spec section 7.4). Same kwargs as start_workflow plus signal =>
     # $name, signal_args => \@args.
     async method signal_with_start_workflow ($workflow, $args = [], %kwargs) {
+        # SignalWithStartWorkflowInput has no top-level headers (they live on
+        # the embedded start op, spec section 27.1).
+        my $input =
+            Temporalio::Client::Interceptor::Input::SignalWithStartWorkflow->new(
+                workflow => $workflow,
+                args     => [ @$args ],
+                kwargs   => { %kwargs },
+            );
+        return await $self->_outbound->signal_with_start_workflow($input);
+    }
+
+    async method _root_signal_with_start_workflow ($input) {
+        my %kwargs = %{ $input->get('kwargs') };
         my $request = await $self->_build_signal_with_start_workflow_request(
-            $workflow, $args, %kwargs);
+            $input->get('workflow'), $input->args, %kwargs);
         my $workflow_id = $request->workflow_id;
         my $response = await $self->_rpc_call(
             'SignalWithStartWorkflowExecution', $request,
@@ -706,6 +753,7 @@ class Temporalio::Client {
             : {};
         my $data_converter = delete $options{data_converter}
                           // Temporalio::Converter::Data->new;
+        my $interceptors   = delete $options{interceptors} // [];
         my $lazy           = delete $options{lazy} // 0;
 
         if (my @unknown = sort keys %options) {
@@ -818,9 +866,11 @@ class Temporalio::Client {
             identity       => $identity,
             data_converter => $data_converter,
             runtime        => $runtime,
+            interceptors   => $interceptors,
         );
     }
 }
+
 
 1;
 
@@ -990,6 +1040,12 @@ Accessor returning the C<namespace> value.
 =head2 runtime
 
 Accessor returning the C<runtime> value.
+
+=head2 interceptors
+
+Accessor returning the ordered interceptor list passed to C<connect> (spec
+section 27). The first-listed interceptor is outermost; the worker inherits this
+list and appends its own.
 
 =head2 signal_with_start_workflow
 

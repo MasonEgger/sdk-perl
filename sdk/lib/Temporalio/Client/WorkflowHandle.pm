@@ -8,6 +8,7 @@ no warnings 'experimental::class';
 
 use Future::AsyncAwait;
 use Scalar::Util ();
+use Temporalio::Client::Interceptor ();
 use Temporalio::Client::HistoryEventIterator ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
@@ -221,6 +222,21 @@ class Temporalio::Client::WorkflowHandle {
         Temporalio::Exception::Argument->throw(
             message => 'signal requires a signal name (string)')
             unless defined $name && !ref $name && length $name;
+        my $headers = delete $opts{headers} // {};
+        my $input =
+            Temporalio::Client::Interceptor::Input::SignalWorkflow->new(
+                signal  => $name,
+                args    => [ @$args ],
+                headers => { %$headers },
+                id      => $workflow_id,
+                run_id  => $run_id,
+                _root   => async sub ($in) { await $self->_root_signal($in) },
+            );
+        return await $client->_outbound->signal_workflow($input);
+    }
+
+    async method _root_signal ($input) {
+        my $name = $input->get('signal');
         my %fields = (
             namespace          => $client->namespace,
             workflow_execution => $self->_execution_message,
@@ -228,6 +244,7 @@ class Temporalio::Client::WorkflowHandle {
             identity           => $client->identity,
             request_id         => Temporalio::Client::_new_uuid(),
         );
+        my $args = $input->args;
         if (@$args) {
             $fields{input} = await $self->_encode_payloads($args);
         }
@@ -245,6 +262,24 @@ class Temporalio::Client::WorkflowHandle {
         Temporalio::Exception::Argument->throw(
             message => 'query requires a query name (string)')
             unless defined $name && !ref $name && length $name;
+        my $headers = delete $opts{headers} // {};
+        my $input =
+            Temporalio::Client::Interceptor::Input::QueryWorkflow->new(
+                query   => $name,
+                args    => [ @$args ],
+                headers => { %$headers },
+                id      => $workflow_id,
+                run_id  => $run_id,
+                opts    => { %opts },
+                _root   => async sub ($in) { await $self->_root_query($in) },
+            );
+        return await $client->_outbound->query_workflow($input);
+    }
+
+    async method _root_query ($input) {
+        my $name = $input->get('query');
+        my $args = $input->args;
+        my %opts = %{ $input->get('opts') // {} };
 
         my $WorkflowQuery =
             _resolve('temporal.api.query.v1.WorkflowQuery');
@@ -305,6 +340,24 @@ class Temporalio::Client::WorkflowHandle {
         Temporalio::Exception::Argument->throw(
             message => 'start_update requires an update name (string)')
             unless defined $name && !ref $name && length $name;
+        my $headers = delete $opts{headers} // {};
+        my $input =
+            Temporalio::Client::Interceptor::Input::StartWorkflowUpdate->new(
+                update  => $name,
+                args    => [ @$args ],
+                headers => { %$headers },
+                id      => $workflow_id,
+                run_id  => $run_id,
+                opts    => { %opts },
+                _root   => async sub ($in) { await $self->_root_start_update($in) },
+            );
+        return await $client->_outbound->start_workflow_update($input);
+    }
+
+    async method _root_start_update ($input) {
+        my $name = $input->get('update');
+        my $args = $input->args;
+        my %opts = %{ $input->get('opts') // {} };
 
         my $stage_name = delete $opts{wait_for_stage} // 'accepted';
         if ($stage_name eq 'admitted') {
