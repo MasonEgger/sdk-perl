@@ -199,6 +199,21 @@ sub get_external_workflow_handle ($workflow_id, %opts) {
     return _runner()->get_external_workflow_handle($workflow_id, %opts);
 }
 
+# --- Nexus (spec section 26) ------------------------------------------------
+
+# create_nexus_client(endpoint => $endpoint, service => $service) -> a
+# Temporalio::Workflow::NexusClient bound to that endpoint + service (spec
+# section 26.1). A SYNCHRONOUS, non-command constructor: it captures the
+# endpoint/service plus the runner reference and emits nothing (mirrors
+# get_external_workflow_handle). The returned client's start_operation /
+# execute_operation emit the ScheduleNexusOperation command through the runner.
+# The endpoint is a plain string naming a server/operator-managed registry entry
+# — there is no client-side endpoint creation (F4). Raises
+# Temporalio::Exception::Workflow::NoRunner outside a workflow body.
+sub create_nexus_client (%opts) {
+    return _runner()->create_nexus_client(%opts);
+}
+
 # --- timers (spec section 10.2) ---------------------------------------------
 
 # start_timer($seconds) -> a Workflow::Future that resolves when the timer
@@ -395,6 +410,15 @@ running workflow by id in the current namespace (spec section 20). A
 synchronous, non-command constructor; the handle's C<signal>/C<cancel> emit
 commands through the stream. Raises
 L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
+
+=head2 create_nexus_client
+
+C<create_nexus_client(endpoint =E<gt> $endpoint, service =E<gt> $service)>
+returns a L<Temporalio::Workflow::NexusClient> bound to that Nexus endpoint and
+service (spec section 26.1). A synchronous, non-command constructor; the client's
+C<start_operation>/C<execute_operation> emit a C<ScheduleNexusOperation> command
+through the stream. Raises L<Temporalio::Exception::Workflow::NoRunner> outside a
+workflow body.
 
 =head2 info
 

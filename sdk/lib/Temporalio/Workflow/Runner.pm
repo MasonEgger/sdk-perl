@@ -26,6 +26,7 @@ use Temporalio::Exception::Timeout ();
 use Temporalio::Exception::Nondeterminism ();
 use Temporalio::Exception::Workflow::NoRunner ();
 use Temporalio::Exception::Argument ();
+use Temporalio::Exception::NexusOperation ();
 use Temporalio::Common::SearchAttributeUpdate ();
 
 # The dynamically-scoped pointer to the currently-active runner. Every
@@ -139,6 +140,24 @@ class Temporalio::Workflow::Runner {
     # on ResolveRequestCancelExternalWorkflow.
     field %pending_external_cancels;
     field $external_cancel_seq_counter = 0;   # external-cancel seq space.
+
+    # Nexus operations use a SEPARATE seq space from activities, timers, child
+    # workflows, and external signals/cancels (spec section 26.3; MUST-match
+    # sdk-python _next_seq("nexus_operation")): a workflow's first nexus operation
+    # is seq 1 in its own space. Each ScheduleNexusOperation is matched in two
+    # stages on the corresponding ResolveNexusOperationStart then
+    # ResolveNexusOperation job (mirrors the child-workflow two-stage shape).
+    field $nexus_operation_seq_counter = 0;
+
+    # Pending nexus operation handles keyed by their ScheduleNexusOperation seq:
+    # { seq => $handle }. Each Temporalio::Workflow::NexusOperationHandle owns a
+    # start Future and a result Future, resolved imperatively in two stages (spec
+    # section 26.3): an async start (operation_token) or sync start (started_sync)
+    # ->dones the start Future and KEEPS the seq mapped (the result job still
+    # comes); a start `failed` pops the seq and fails the start Future (no result
+    # job follows); the terminal ResolveNexusOperation pops the seq and settles
+    # the result Future.
+    field %pending_nexus_operations;
 
     # Pending activity Futures keyed by their command seq: { seq => $future }.
     # The Workflow::Future for each in-flight activity, resolved imperatively
@@ -947,6 +966,164 @@ class Temporalio::Workflow::Runner {
         return $future;
     }
 
+    # --- Nexus (spec section 26) --------------------------------------------
+
+    # create_nexus_client(endpoint => ..., service => ...) -> a
+    # Temporalio::Workflow::NexusClient bound to that endpoint + service (spec
+    # section 26.1). A synchronous, non-command constructor (mirrors
+    # get_external_workflow_handle): captures the endpoint/service plus the runner
+    # reference and emits nothing. The returned client's start_operation /
+    # execute_operation emit the ScheduleNexusOperation command through this
+    # runner. Both endpoint and service are required.
+    method create_nexus_client (%opts) {
+        my $endpoint = $opts{endpoint}
+            // die "Temporalio::Workflow::Runner: create_nexus_client needs an "
+                 . "endpoint";
+        my $service = $opts{service}
+            // die "Temporalio::Workflow::Runner: create_nexus_client needs a "
+                 . "service";
+        require Temporalio::Workflow::NexusClient;
+        return Temporalio::Workflow::NexusClient->new(
+            endpoint => $endpoint,
+            service  => $service,
+            runner   => $self,
+        );
+    }
+
+    # start_nexus_operation(endpoint => ..., service => ..., operation => ...,
+    # arg => ..., %opts) -> the start Temporalio::Workflow::Future (->done with
+    # the NexusOperationHandle once ResolveNexusOperationStart arrives). Mirrors
+    # start_child_workflow's two-stage shape (spec section 26.3): allocates a
+    # NEXUS seq (separate space), converts the SINGLE arg -> input Payload, the
+    # three timeouts -> Duration, cancellation_type -> enum, summary ->
+    # user_metadata, all BEFORE buffering the command (so a converter error
+    # surfaces at the call site). Buffers one ScheduleNexusOperation (oneof arm
+    # 21), registers a handle wrapping a start Future and a result Future in
+    # %pending_nexus_operations{$seq} plus a cancel hook, and returns the start
+    # Future. A pre-scheduled cancel (the run is already cancel-requested) raises
+    # Cancelled immediately (spec section 26.3). %opts mirror spec section 26.1:
+    #   schedule_to_close_timeout / schedule_to_start_timeout /
+    #   start_to_close_timeout (seconds), cancellation_type (default
+    #   wait_cancellation_completed), summary, headers (the nexus_header string
+    #   map, NOT Temporal-header Payloads).
+    method start_nexus_operation (%opts) {
+        $self->_assert_writable('start_operation/execute_operation');
+        my $endpoint  = $opts{endpoint}  // die
+            "Temporalio::Workflow::Runner: start_nexus_operation needs an endpoint";
+        my $service   = $opts{service}   // die
+            "Temporalio::Workflow::Runner: start_nexus_operation needs a service";
+        my $operation = $opts{operation} // die
+            "Temporalio::Workflow::Runner: start_nexus_operation needs an operation";
+
+        my $seq = ++$nexus_operation_seq_counter;  # nexus seq space, from 1.
+
+        # The proto carries a SINGLE input Payload (not a repeated list), so
+        # convert exactly one arg. Convert up front (parity with
+        # schedule_activity: a converter error must surface at the call site).
+        my $input = $payload_converter->to_payload($opts{arg});
+
+        my %fields = (
+            seq       => $seq,
+            endpoint  => $endpoint,
+            service   => $service,
+            operation => $operation,
+            input     => $input,
+            # cancellation_type: spec string -> NexusOperationCancellationType
+            # enum number, DEFAULT wait_cancellation_completed (0) — the Nexus
+            # proto zero, unlike activities/children whose default is non-zero.
+            cancellation_type =>
+                _nexus_cancellation_type_number($opts{cancellation_type}),
+        );
+
+        # The three timeouts: seconds -> google.protobuf.Duration, only when set.
+        my %timeout_field = (
+            schedule_to_close_timeout => 'schedule_to_close_timeout',
+            schedule_to_start_timeout => 'schedule_to_start_timeout',
+            start_to_close_timeout    => 'start_to_close_timeout',
+        );
+        for my $opt (keys %timeout_field) {
+            next unless defined $opts{$opt};
+            $fields{ $timeout_field{$opt} } = _duration($opts{$opt});
+        }
+
+        # headers -> nexus_header: a PLAIN string -> string map transmitted to
+        # the (possibly external) Nexus handler as-is — NOT Temporal-header
+        # Payloads (spec section 26.1). Stringify values defensively.
+        if (my $h = $opts{headers}) {
+            if (%$h) {
+                $fields{nexus_header} = { map { $_ => "$h->{$_}" } keys %$h };
+            }
+        }
+
+        # summary -> the WorkflowCommand user_metadata.summary Payload (the
+        # ScheduleNexusOperation message itself has no summary field).
+        my $summary = defined $opts{summary}
+            ? $payload_converter->to_payload($opts{summary}) : undef;
+
+        push @commands,
+            Temporalio::Workflow::Commands::schedule_nexus_operation(
+                \%fields, $summary);
+
+        # cancellation_type governs cancel behaviour (spec section 26.3, mirrors
+        # the child-workflow semantics over NexusOperationCancellationType):
+        #   wait_cancellation_completed (0, default): emit the cancel command but
+        #     stay parked on `result` (observe cancellation on the later resolve).
+        #   abandon (1): emit NO cancel command; stop waiting immediately.
+        #   try_cancel (2): emit the cancel command AND report cancellation now.
+        #   wait_cancellation_requested (3): emit the cancel command but stay
+        #     parked on `result`.
+        my $ct         = $fields{cancellation_type};
+        my $is_abandon = $ct == 1 ? 1 : 0;
+        my $report_now = ($ct == 1 || $ct == 2) ? 1 : 0;
+        my $cancel_emitted = 0;   # emit the cancel command at most once.
+
+        my $start_future  = Temporalio::Workflow::Future->new;
+        my $result_future = Temporalio::Workflow::Future->new;
+
+        require Temporalio::Workflow::NexusOperationHandle;
+        my $handle = Temporalio::Workflow::NexusOperationHandle->new(
+            nexus_operation_seq => $seq,
+            endpoint            => $endpoint,
+            service             => $service,
+            operation           => $operation,
+            start_future        => $start_future,
+            result_future       => $result_future,
+            # cancel hook: emit RequestCancelNexusOperation (unless abandon), then
+            # either fail the pending awaits now (abandon / try_cancel) or stay
+            # parked until the cancelled resolve (wait_* types). Under the wait_*
+            # types the seq STAYS mapped so the later ResolveNexusOperation
+            # {cancelled} settles it.
+            on_cancel => sub ($h) {
+                return unless exists $pending_nexus_operations{$seq};
+                if (!$is_abandon && !$cancel_emitted) {
+                    push @commands,
+                        Temporalio::Workflow::Commands::request_cancel_nexus_operation(
+                            $seq);
+                    $cancel_emitted = 1;
+                }
+                return unless $report_now;
+                delete $pending_nexus_operations{$seq};
+                for my $f ($start_future, $result_future) {
+                    next if $f->is_ready;
+                    $f->fail(Temporalio::Exception::Cancelled->new(
+                        message => 'Nexus operation cancelled',
+                    ));
+                }
+            },
+        );
+
+        $pending_nexus_operations{$seq} = $handle;
+
+        # Pre-scheduled cancel (spec section 26.3): if the run is already
+        # cancel-requested, raise Cancelled on the start await immediately
+        # (mirrors the activity/child pre-scheduled-cancel behaviour).
+        if ($cancel_requested) {
+            $handle->cancel;
+        }
+
+        return $start_future;
+    }
+
     # A deterministic default child workflow id (spec section 18.1): a UUIDish
     # string derived from the workflow RNG (never rand/OS entropy), so replay
     # reproduces it. Uses the same ISAAC generator that backs
@@ -1260,6 +1437,12 @@ class Temporalio::Workflow::Runner {
                 $f->cancel unless $f->is_ready;
             }
         }
+        # Nexus handles likewise own a start AND a result Future.
+        for my $handle (values %pending_nexus_operations) {
+            for my $f ($handle->start_future, $handle->result_future) {
+                $f->cancel unless $f->is_ready;
+            }
+        }
         %pending_activities             = ();
         %pending_timers                 = ();
         %local_activity_state           = ();
@@ -1268,6 +1451,7 @@ class Temporalio::Workflow::Runner {
         %pending_child_workflows        = ();
         %pending_external_signals       = ();
         %pending_external_cancels       = ();
+        %pending_nexus_operations       = ();
         @conditions                     = ();
         if (defined $main_run_future && !$main_run_future->is_ready) {
             $main_run_future->cancel;
@@ -1301,6 +1485,14 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'resolve_request_cancel_external_workflow') {
             return $self->_apply_resolve_request_cancel_external_workflow(
                 $job->resolve_request_cancel_external_workflow);
+        }
+        if ($variant eq 'resolve_nexus_operation_start') {
+            return $self->_apply_resolve_nexus_operation_start(
+                $job->resolve_nexus_operation_start);
+        }
+        if ($variant eq 'resolve_nexus_operation') {
+            return $self->_apply_resolve_nexus_operation(
+                $job->resolve_nexus_operation);
         }
         if ($variant eq 'cancel_workflow') {
             return $self->_apply_cancel_workflow($job->cancel_workflow);
@@ -1697,6 +1889,139 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
+    # ResolveNexusOperationStart { seq, operation_token|started_sync|failed } —
+    # the first stage of the nexus two-stage resolution (spec section 26.3). Look
+    # up by seq (unknown -> non-determinism via _record_nondeterminism, matching
+    # the codebase's child-workflow start handling):
+    #   operation_token -> ASYNC start: store the token, ->done the start Future,
+    #     do NOT pop (the ResolveNexusOperation result job is still to come).
+    #   started_sync    -> SYNC start: token undef, ->done the start Future, do
+    #     NOT pop (the result job is in the SAME activation, per the proto).
+    #   failed          -> the start failed: POP the seq and ->fail the start
+    #     Future with the mapped failure (NO result job follows).
+    # MUST-match sdk-python _apply_resolve_nexus_operation_start.
+    method _apply_resolve_nexus_operation_start ($job) {
+        my $seq    = $job->seq;
+        my $handle = $pending_nexus_operations{$seq};
+        unless (defined $handle) {
+            $self->_record_nondeterminism(
+                "ResolveNexusOperationStart for unknown seq $seq (no pending "
+                . "nexus operation) — non-determinism: the workflow never "
+                . "scheduled this operation");
+            return;
+        }
+
+        my $status = $job->which_status // '';
+        if ($status eq 'operation_token') {
+            # Async operation started: keep the seq mapped (result job follows).
+            $handle->_resolve_started($job->operation_token);
+        }
+        elsif ($status eq 'started_sync') {
+            # Sync operation: token undef; the result job is in this activation.
+            $handle->_resolve_started(undef);
+        }
+        elsif ($status eq 'failed') {
+            # Start failed: no result job follows. Pop and fail the start await
+            # with a NexusOperation exception (spec section 26.4). The start
+            # `failed` Failure may itself be a nexus_operation_execution_failure
+            # (then from_failure yields a NexusOperation directly) or a bare inner
+            # failure (then wrap it, carrying the handle's endpoint/service/op).
+            delete $pending_nexus_operations{$seq};
+            my $failure = $job->failed;
+            my $mapped = defined $failure
+                ? $failure_converter->from_failure($failure, $payload_converter)
+                : undef;
+            my $exc = (defined $mapped
+                    && $mapped->isa('Temporalio::Exception::NexusOperation'))
+                ? $mapped
+                : Temporalio::Exception::NexusOperation->new(
+                      message   => 'Nexus operation failed to start',
+                      endpoint  => $handle->endpoint,
+                      service   => $handle->service,
+                      operation => $handle->operation,
+                      (defined $mapped ? (cause => $mapped) : ()),
+                  );
+            $handle->start_future->fail($exc)
+                unless $handle->start_future->is_ready;
+        }
+        else {
+            die "Temporalio::Workflow::Runner: ResolveNexusOperationStart seq "
+              . "$seq had no recognized status (got '$status')";
+        }
+        return;
+    }
+
+    # ResolveNexusOperation { seq, result } — the second (terminal) stage (spec
+    # section 26.3). Look up by seq (unknown -> non-determinism per spec section
+    # 26.4 / T-nexus-9; note sdk-python tolerates an unknown seq here, but the
+    # spec mandates non-determinism — spec wins). Read the NexusOperationResult
+    # oneof: `completed` -> ->done with the converted result; `failed` /
+    # `cancelled` / `timed_out` -> ->fail with the mapped failure. The wire
+    # failure for a nexus resolve is itself a nexus_operation_execution_failure
+    # whose cause is the inner (Application / Timeout / Cancelled), so
+    # from_failure yields a Temporalio::Exception::NexusOperation with the mapped
+    # cause (spec section 26.4). Pop the seq.
+    method _apply_resolve_nexus_operation ($job) {
+        my $seq    = $job->seq;
+        my $handle = delete $pending_nexus_operations{$seq};
+        unless (defined $handle) {
+            $self->_record_nondeterminism(
+                "ResolveNexusOperation for unknown seq $seq (no pending nexus "
+                . "operation) — non-determinism: the workflow never scheduled "
+                . "this operation");
+            return;
+        }
+
+        my $future = $handle->result_future;
+        return if $future->is_ready;   # already cancelled via the handle.
+
+        my $resolution = $job->result;
+        my $status     = defined $resolution ? $resolution->which_status : '';
+        $status //= '';
+
+        if ($status eq 'completed') {
+            my $payload = $resolution->completed;
+            my $value   = defined $payload
+                ? $payload_converter->from_payload($payload)
+                : undef;
+            $future->done($value);
+        }
+        elsif ($status eq 'failed' || $status eq 'cancelled'
+            || $status eq 'timed_out')
+        {
+            # The wire Failure for a nexus resolve is itself a
+            # nexus_operation_execution_failure whose cause is the mapped inner
+            # (Application for `failed`, Cancelled for `cancelled`, Timeout for
+            # `timed_out`), so from_failure yields a
+            # Temporalio::Exception::NexusOperation with the mapped cause directly
+            # (spec section 26.4; MUST-match sdk-python, which calls from_failure
+            # on the arm). If core ever sends a bare inner failure (no nexus
+            # wrapper), wrap it in a NexusOperation carrying the handle's
+            # endpoint/service/operation so the surface stays consistent.
+            my $failure = $resolution->$status;
+            my $mapped = defined $failure
+                ? $failure_converter->from_failure($failure, $payload_converter)
+                : undef;
+            my $exc = (defined $mapped
+                    && $mapped->isa('Temporalio::Exception::NexusOperation'))
+                ? $mapped
+                : Temporalio::Exception::NexusOperation->new(
+                      message         => 'Nexus operation failed',
+                      endpoint        => $handle->endpoint,
+                      service         => $handle->service,
+                      operation       => $handle->operation,
+                      operation_token => $handle->operation_token,
+                      (defined $mapped ? (cause => $mapped) : ()),
+                  );
+            $future->fail($exc);
+        }
+        else {
+            die "Temporalio::Workflow::Runner: ResolveNexusOperation seq $seq "
+              . "had no recognized result status (got '$status')";
+        }
+        return;
+    }
+
     # CancelWorkflow (spec section 10.3 / T-wf-12): mark the run cancel-requested
     # and cancel the run's pending Futures. Cancelling a pending activity/timer
     # Future fails it with Temporalio::Exception::Cancelled (the timer Future
@@ -1773,6 +2098,25 @@ class Temporalio::Workflow::Runner {
                 next if $f->is_ready;
                 $f->fail(Temporalio::Exception::Cancelled->new(
                     message => 'Child workflow cancelled (workflow cancelled)',
+                ));
+            }
+        }
+        # Nexus operations join the cancel chain (spec section 26.3): a
+        # whole-workflow CancelWorkflow cancels the primary task, so each pending
+        # nexus handle is cancelled (emitting RequestCancelNexusOperation unless
+        # abandon) AND its pending start/result awaits are failed with Cancelled
+        # so the awaiting body observes the cancellation in this activation —
+        # unlike an explicit $handle->cancel, which honours the wait_*
+        # cancellation_type and may stay parked. The handle's cancel de-registers
+        # the seq, so snapshot the keys first.
+        for my $seq (keys %pending_nexus_operations) {
+            my $handle = $pending_nexus_operations{$seq} // next;
+            $handle->cancel;   # emit the cancel command (honours abandon).
+            delete $pending_nexus_operations{$seq};
+            for my $f ($handle->start_future, $handle->result_future) {
+                next if $f->is_ready;
+                $f->fail(Temporalio::Exception::Cancelled->new(
+                    message => 'Nexus operation cancelled (workflow cancelled)',
                 ));
             }
         }
@@ -2523,6 +2867,26 @@ class Temporalio::Workflow::Runner {
                  . "cancellation_type '$name'";
     }
 
+    # Nexus operation cancellation_type: spec string ->
+    # NexusOperationCancellationType enum number (verified against
+    # core/nexus/nexus.proto:84): wait_cancellation_completed=0, abandon=1,
+    # try_cancel=2, wait_cancellation_requested=3. DEFAULT is
+    # wait_cancellation_completed (0) per spec section 26.1 — here the proto ZERO,
+    # unlike activities (try_cancel) and child workflows
+    # (wait_cancellation_completed=2). A bad string dies at scheduling time.
+    my %NEXUS_CANCELLATION_TYPE = (
+        wait_cancellation_completed  => 0,
+        abandon                      => 1,
+        try_cancel                   => 2,
+        wait_cancellation_requested  => 3,
+    );
+    sub _nexus_cancellation_type_number ($name) {
+        return 0 unless defined $name;   # default: wait_cancellation_completed.
+        return $NEXUS_CANCELLATION_TYPE{$name}
+            // die "Temporalio::Workflow::Runner: unknown nexus operation "
+                 . "cancellation_type '$name'";
+    }
+
     # parent_close_policy: spec string -> ParentClosePolicy enum number (verified
     # against child_workflow.proto): unspecified=0, terminate=1, abandon=2,
     # request_cancel=3. DEFAULT is terminate (1) per spec section 18.1.
@@ -2901,6 +3265,22 @@ Constructs a L<Temporalio::Workflow::ExternalWorkflowHandle> for an arbitrary
 running workflow by id (spec section 20). A synchronous, non-command
 constructor; the handle's C<signal>/C<cancel> emit the external-workflow
 commands.
+
+=head2 create_nexus_client
+
+Constructs a L<Temporalio::Workflow::NexusClient> bound to the given C<endpoint>
+and C<service> (spec section 26.1). A synchronous, non-command constructor; the
+client's C<start_operation>/C<execute_operation> emit the ScheduleNexusOperation
+command through this runner.
+
+=head2 start_nexus_operation
+
+Emits a ScheduleNexusOperation command (oneof arm 21) on its own nexus seq space
+and returns the start awaitable that resolves to a
+L<Temporalio::Workflow::NexusOperationHandle> once the operation has started
+(spec section 26.3). Converts the single argument, timeouts, cancellation_type,
+and summary before buffering; registers the start and result Futures plus a
+cancel hook honouring the C<NexusOperationCancellationType>.
 
 =head2 info
 

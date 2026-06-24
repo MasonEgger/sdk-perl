@@ -299,6 +299,39 @@ sub set_patch_marker ($patch_id, $deprecated = 0) {
     });
 }
 
+# schedule_nexus_operation { ... } — emitted when the workflow body calls a
+# NexusClient's start_operation / execute_operation (spec section 26.1, oneof arm
+# 21; MUST-match the ScheduleNexusOperation proto, workflow_commands.proto:358).
+# $fields is the already-assembled field hashref: seq, endpoint, service,
+# operation, the SINGLE `input` Payload (the proto carries one input, not a
+# repeated list), the three timeout Durations (schedule_to_close_timeout,
+# schedule_to_start_timeout, start_to_close_timeout), nexus_header (a plain
+# string -> string map, NOT Temporal-header Payloads), and cancellation_type (the
+# NexusOperationCancellationType enum number). An optional $summary_payload (a
+# temporal.api.common.v1.Payload) is placed on the WorkflowCommand
+# user_metadata.summary (spec section 26.1; matching the timer / local-activity
+# summary convention — ScheduleNexusOperation itself has no user_metadata field).
+# The runner owns nexus-seq allocation, payload conversion, timeout/enum mapping.
+sub schedule_nexus_operation ($fields, $summary_payload = undef) {
+    return _command_class()->new({
+        schedule_nexus_operation => $fields,
+        (defined $summary_payload
+            ? (user_metadata => { summary => $summary_payload }) : ()),
+    });
+}
+
+# request_cancel_nexus_operation { seq } — emitted when a NexusOperationHandle's
+# ->cancel is called (or a whole-workflow CancelWorkflow propagates), spec
+# section 26.3, oneof arm 22; MUST-match the RequestCancelNexusOperation proto
+# (workflow_commands.proto:401, keyed on the ScheduleNexusOperation seq). An
+# ABANDON-typed operation never emits this command (the workflow stops waiting
+# without asking core to cancel — see the runner's nexus cancel hook).
+sub request_cancel_nexus_operation ($seq) {
+    return _command_class()->new({
+        request_cancel_nexus_operation => { seq => $seq },
+    });
+}
+
 1;
 
 __END__
@@ -485,6 +518,25 @@ emitted when the workflow body calls C<Temporalio::Workflow::upsert_memo>.
 C<$memo> is a built C<temporal.api.common.v1.Memo> proto whose C<fields> map
 carries one Payload per key (an C<undef> value encodes an empty/null Payload, the
 deletion convention). The runner owns the conversion.
+
+=item C<schedule_nexus_operation($fields, $summary_payload)>
+
+C<ScheduleNexusOperation { ... }> (spec section 26.1, oneof arm 21) — emitted
+when the workflow body calls a Nexus client's C<start_operation> /
+C<execute_operation>. C<$fields> is the assembled field hashref (C<seq>,
+C<endpoint>, C<service>, C<operation>, the SINGLE C<input> Payload, the three
+timeout Durations, C<nexus_header> string map, C<cancellation_type> enum number).
+The optional C<$summary_payload> (a C<temporal.api.common.v1.Payload>) is placed
+on the C<WorkflowCommand> C<user_metadata.summary> (the proto message itself has
+no summary field). The runner owns nexus-seq allocation and all conversion.
+
+=item C<request_cancel_nexus_operation($seq)>
+
+C<RequestCancelNexusOperation { seq }> (spec section 26.3, oneof arm 22) —
+emitted when a C<Temporalio::Workflow::NexusOperationHandle>'s C<< ->cancel >> is
+called (or a whole-workflow C<CancelWorkflow> propagates). C<$seq> is the seq of
+the C<ScheduleNexusOperation> being cancelled; an C<abandon>-typed operation
+never emits this command.
 
 =back
 
