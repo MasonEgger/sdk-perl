@@ -20,6 +20,7 @@ use Temporalio::Exception::Runtime ();
 use Temporalio::Activity::Pool ();
 use Temporalio::Worker::ActivityDispatcher ();
 use Temporalio::Worker::ActivityRegistry ();
+use Temporalio::Worker::NexusRegistry ();
 use Temporalio::Worker::PollLoop ();
 use Temporalio::Worker::WorkflowDispatcher ();
 use Temporalio::Worker::WorkflowRegistry ();
@@ -32,6 +33,7 @@ class Temporalio::Worker {
     field $task_queue :param = undef;
     field $workflows  :param = [];
     field $activities :param = [];
+    field $nexus_services :param = [];
 
     # WorkerOptions kwargs (spec 8.1). Defaults verified against sdk-ruby
     # worker.rb (lines 447-465) + the FixedSize tuner default of 100
@@ -72,6 +74,7 @@ class Temporalio::Worker {
 
     field $activity_registry;
     field $workflow_registry;
+    field $nexus_registry;
     field $activity_pool;    # Temporalio::Activity::Pool, built lazily in run
     field $worker_ptr;       # TemporalCoreWorker*, NULL until _ensure_worker
     field $worker_keep;      # @keep pinning the packed options buffer
@@ -93,6 +96,11 @@ class Temporalio::Worker {
         # workflow type, requiring one :Run and rejecting duplicates.
         $workflow_registry = Temporalio::Worker::WorkflowRegistry->new(
             workflows => $workflows);
+        # Nexus service registration (spec section 26.2): resolve each class name
+        # or instance to its service + operations, rejecting duplicate service
+        # names.
+        $nexus_registry = Temporalio::Worker::NexusRegistry->new(
+            nexus_services => $nexus_services);
     }
 
     method client             { $client }
@@ -100,6 +108,7 @@ class Temporalio::Worker {
     method workflows          { $workflows }
     method activity_registry  { $activity_registry }
     method workflow_registry  { $workflow_registry }
+    method nexus_registry     { $nexus_registry }
     method is_shutdown        { $is_shutdown }
 
     # _build_worker_options(\@keep) -> opaque pointer to the packed
@@ -586,6 +595,10 @@ Accessor returning the C<client> value.
 =head2 is_shutdown
 
 Accessor returning the C<is_shutdown> value.
+
+=head2 nexus_registry
+
+Accessor returning the C<nexus_registry> value (the L<Temporalio::Worker::NexusRegistry> built from C<nexus_services>).
 
 =head2 run
 

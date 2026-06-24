@@ -344,9 +344,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P9.1.3 Verify: prove -lj4 t
 
 ### P9.2 Nexus handler side (spec §26)
-- [ ] P9.2.1 RED: sdk/t/unit/nexus_definition.t + sdk/t/integration/nexus.t (T-nexus-10..14)
-- [ ] P9.2.2 GREEN: Nexus/{Definition,OperationContext,OperationResult,WorkflowHandle} + Worker/NexusDispatcher + NexusRegistry + Worker nexus_services + gRPC→Nexus error table
-- [ ] P9.2.3 Verify: prove -lj4 t — **Phase 9 acceptance: Nexus green**
+- [x] P9.2.1 RED: sdk/t/unit/nexus_definition.t + sdk/t/integration/nexus.t (T-nexus-10..14)
+- [x] P9.2.2 GREEN: Nexus/{Definition,OperationContext,OperationResult,WorkflowHandle} + Worker/NexusDispatcher + NexusRegistry + Worker nexus_services + gRPC→Nexus error table
+- [x] P9.2.3 Verify: prove -lj4 t — **Phase 9 acceptance: Nexus green**
 
 ## Phase 10 — Runtime, observability & worker hardening
 
