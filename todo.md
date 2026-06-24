@@ -310,9 +310,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P7.1.4 Verify: prove -lj4 t
 
 ### P7.2 Async activity completion (spec §22)
-- [ ] P7.2.1 RED: sdk/t/unit/async_activity.t + sdk/t/integration/async_activity.t (T-asyncact-1..9)
-- [ ] P7.2.2 GREEN: Client->async_activity_handle + AsyncActivityHandle + CompleteAsync/AsyncActivityCancelled exceptions + complete_async + WillCompleteAsync reporting
-- [ ] P7.2.3 Verify: prove -lj4 t
+- [x] P7.2.1 RED: sdk/t/unit/async_activity.t + sdk/t/integration/async_activity.t (T-asyncact-1..9)
+- [x] P7.2.2 GREEN: Client->async_activity_handle + AsyncActivityHandle + CompleteAsync/AsyncActivityCancelled exceptions + complete_async + WillCompleteAsync reporting
+- [x] P7.2.3 Verify: prove -lj4 t
 
 ### P7.3 Eager start (spec §23)
 - [ ] P7.3.1 RED: sdk/t/unit/eager.t + sdk/t/integration/eager.t (T-eager-1..6)

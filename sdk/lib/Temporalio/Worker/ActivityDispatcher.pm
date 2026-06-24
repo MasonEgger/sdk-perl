@@ -19,6 +19,7 @@ use Temporalio::Activity::Context ();
 use Temporalio::Activity::Invocation ();
 use Temporalio::Cancellation ();
 use Temporalio::Core::Proto ();
+use Temporalio::Exception::Activity::CompleteAsync ();
 use Temporalio::Exception::Application ();
 use Temporalio::Exception::Cancelled ();
 use Temporalio::Worker::ActivityCompletion ();
@@ -172,8 +173,22 @@ class Temporalio::Worker::ActivityDispatcher {
                 $task_token, $payload);
         }
         catch ($error) {
-            $completion = await $self->_failure_completion(
-                $task_token, $cancellation, $error);
+            # Out-of-band completion (spec section 22): an activity body that
+            # threw CompleteAsync (via Temporalio::Activity::complete_async)
+            # reports will_complete_async to core instead of Completed/Failed.
+            # Only honored when it propagates out of the body — user code that
+            # catches it defeats async completion.
+            if (Scalar::Util::blessed($error)
+                && $error->isa('Temporalio::Exception::Activity::CompleteAsync'))
+            {
+                $completion =
+                    Temporalio::Worker::ActivityCompletion::will_complete_async(
+                        $task_token);
+            }
+            else {
+                $completion = await $self->_failure_completion(
+                    $task_token, $cancellation, $error);
+            }
         }
 
         # Step 7: send the completion, then drop the running entry.
@@ -333,8 +348,12 @@ panics across an await). On normal return it builds a success
 C<ActivityTaskCompletion> with the converted + codec-encoded result; on a
 thrown error it builds a failed completion (or a cancelled completion when a
 L<Temporalio::Exception::Cancelled> coincides with an actually-cancelled
-token, mirroring sdk-ruby). The completion bytes are handed to the injected
-C<completer> and the running entry is removed.
+token, mirroring sdk-ruby). A body that throws
+L<Temporalio::Exception::Activity::CompleteAsync> (via
+L<Temporalio::Activity/complete_async>) instead reports
+C<will_complete_async> to core: the activity will complete out of band through
+a L<Temporalio::Client::AsyncActivityHandle> (spec section 22). The completion
+bytes are handed to the injected C<completer> and the running entry is removed.
 
 =back
 

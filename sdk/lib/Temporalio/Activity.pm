@@ -10,6 +10,7 @@ use warnings;
 # here means the author does not have to `use` it separately.
 use Temporalio::Activity::Definition ();
 use Temporalio::Activity::Context ();
+use Temporalio::Exception::Activity::CompleteAsync ();
 use Temporalio::Exception::Runtime ();
 
 # The activity context() functional surface (spec section 9.3), mirroring the
@@ -33,6 +34,19 @@ sub info () { context()->info }
 
 # heartbeat(@details) -> record a heartbeat on the current activity.
 sub heartbeat (@details) { context()->heartbeat(@details) }
+
+# complete_async() -> declare the activity will complete out of band (spec
+# section 22). Throws Temporalio::Exception::Activity::CompleteAsync; the
+# activity dispatcher catches that class specifically and reports
+# ActivityExecutionResult{will_complete_async} to core instead of a normal
+# Completed/Failed outcome. Unlike context()/info()/heartbeat(), this does NOT
+# require an active context — it is a pure sentinel throw (mirrors sdk-python
+# activity.raise_complete_async / sdk-ruby Activity.complete_async). Catching it
+# in user code defeats async completion.
+sub complete_async () {
+    Temporalio::Exception::Activity::CompleteAsync->throw(
+        message => 'activity will complete asynchronously');
+}
 
 1;
 
@@ -69,6 +83,16 @@ in a later phase.
 =head2 context
 
 Returns the current L<Temporalio::Activity::Context>; dies if called outside an activity.
+
+=head2 complete_async
+
+Declares that the current activity will complete B<out of band> (spec section
+22) by throwing L<Temporalio::Exception::Activity::CompleteAsync>. The activity
+dispatcher reports C<will_complete_async> to sdk-core; some external process
+later completes, fails, cancels, or heartbeats the activity through a
+L<Temporalio::Client::AsyncActivityHandle>. Does not require an active activity
+context. Catching the thrown exception in the activity body defeats async
+completion.
 
 =head2 heartbeat
 

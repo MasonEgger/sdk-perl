@@ -19,6 +19,8 @@ my $Failure    = Temporalio::Core::Proto::resolve(
     'coresdk.activity_result.Failure');
 my $Cancellation = Temporalio::Core::Proto::resolve(
     'coresdk.activity_result.Cancellation');
+my $WillCompleteAsync = Temporalio::Core::Proto::resolve(
+    'coresdk.activity_result.WillCompleteAsync');
 
 # success($task_token, $result_payload) -> serialized ActivityTaskCompletion.
 # $result_payload is a temporal.api.common.v1.Payload (already converted +
@@ -46,6 +48,16 @@ sub cancelled ($task_token, $failure_proto) {
         $Result->new({ cancelled => $Cancellation->new({ failure => $failure_proto }) }));
 }
 
+# will_complete_async($task_token) -> serialized ActivityTaskCompletion. The
+# activity declared (via Temporalio::Activity::complete_async, spec section 22)
+# that it will complete out of band; core records that and does not expect a
+# Completed/Failed/Cancelled outcome from this task. WillCompleteAsync is an
+# empty message — the variant tag is the whole signal.
+sub will_complete_async ($task_token) {
+    return _completion($task_token,
+        $Result->new({ will_complete_async => $WillCompleteAsync->new({}) }));
+}
+
 sub _completion ($task_token, $result) {
     return $Completion->new({ task_token => $task_token, result => $result })->encode;
 }
@@ -70,6 +82,8 @@ Temporalio::Worker::ActivityCompletion - build ActivityTaskCompletion protos
         $task_token, $failure_proto);
     my $bytes = Temporalio::Worker::ActivityCompletion::cancelled(
         $task_token, $cancelled_failure_proto);
+    my $bytes = Temporalio::Worker::ActivityCompletion::will_complete_async(
+        $task_token);
 
 =head1 DESCRIPTION
 
@@ -97,5 +111,9 @@ Class method building an activity-completion representing a failure with the giv
 =head2 success
 
 Class method building an activity-completion representing a successful result with the given payload.
+
+=head2 will_complete_async
+
+Class method building an activity-completion representing an out-of-band (async) completion: an C<ActivityExecutionResult{will_complete_async}>. Takes only the task token; the activity will be completed later through a L<Temporalio::Client::AsyncActivityHandle>.
 
 =cut

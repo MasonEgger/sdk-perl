@@ -13,6 +13,7 @@ use Sys::Hostname ();
 use Temporalio::Converter::Data;
 use Temporalio::Core::Callback ();
 use Temporalio::Core::FFI ();
+use Temporalio::Client::AsyncActivityHandle ();
 use Temporalio::Client::Connection ();
 use Temporalio::Client::KeepAliveConfig ();
 use Temporalio::Client::RetryConfig ();
@@ -86,6 +87,57 @@ class Temporalio::Client {
             workflow_id            => $workflow_id,
             run_id                 => $opts{run_id},
             first_execution_run_id => $opts{first_execution_run_id},
+        );
+    }
+
+    # async_activity_handle(%kw) — keyword-union factory (spec section 22.1) for
+    # an activity completing out of band. Either:
+    #   task_token => $bytes
+    #   workflow_id => $w, run_id => $r (optional), activity_id => $a
+    # task_token is mutually exclusive with the id triple; workflow_id requires
+    # activity_id. No RPC at construction. Returns a
+    # Temporalio::Client::AsyncActivityHandle.
+    method async_activity_handle (%kw) {
+        my $task_token  = delete $kw{task_token};
+        my $workflow_id = delete $kw{workflow_id};
+        my $run_id      = delete $kw{run_id};
+        my $activity_id = delete $kw{activity_id};
+
+        if (my @unknown = sort keys %kw) {
+            Temporalio::Exception::Argument->throw(
+                message => 'unknown async_activity_handle option(s): '
+                         . join(', ', @unknown));
+        }
+
+        my $has_token = defined $task_token;
+        my $has_any_id = defined $workflow_id
+            || defined $run_id || defined $activity_id;
+
+        if ($has_token && $has_any_id) {
+            Temporalio::Exception::Argument->throw(
+                message => 'async_activity_handle: task_token is mutually '
+                         . 'exclusive with workflow_id/run_id/activity_id');
+        }
+        if ($has_token) {
+            return Temporalio::Client::AsyncActivityHandle->new(
+                client     => $self,
+                task_token => $task_token,
+            );
+        }
+        # id-reference path: workflow_id AND activity_id are required.
+        unless (defined $workflow_id && length $workflow_id
+            && defined $activity_id && length $activity_id) {
+            Temporalio::Exception::Argument->throw(
+                message => 'async_activity_handle requires either a task_token '
+                         . 'or both workflow_id and activity_id');
+        }
+        return Temporalio::Client::AsyncActivityHandle->new(
+            client       => $self,
+            id_reference => {
+                workflow_id => $workflow_id,
+                run_id      => $run_id,
+                activity_id => $activity_id,
+            },
         );
     }
 
@@ -739,6 +791,18 @@ Accessor returning the C<connection> value.
 =head2 count_workflows
 
 Async. Returns a L<Future> resolving to the count of executions matching the given visibility query.
+
+=head2 async_activity_handle
+
+    my $h = $client->async_activity_handle(task_token => $bytes);
+    my $h = $client->async_activity_handle(
+        workflow_id => $w, run_id => $r, activity_id => $a);
+
+Returns a L<Temporalio::Client::AsyncActivityHandle> for an activity completing
+out of band (spec section 22), addressed by an opaque task token or an id
+reference (C<workflow_id> + optional C<run_id> + C<activity_id>). The two forms
+are mutually exclusive; C<workflow_id> requires C<activity_id>. No RPC is made.
+Invalid combinations raise L<Temporalio::Exception::Argument>.
 
 =head2 data_converter
 
