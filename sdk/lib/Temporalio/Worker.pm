@@ -311,6 +311,7 @@ class Temporalio::Worker {
             registry       => $workflow_registry,
             data_converter => $client->data_converter,
             task_queue     => $task_queue,
+            namespace      => $client->namespace,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_workflow_activation($completion_bytes);
             },

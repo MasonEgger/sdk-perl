@@ -28,6 +28,11 @@ class Temporalio::Worker::WorkflowDispatcher {
     # for activities the workflow schedules without an explicit queue.
     field $task_queue :param = undef;
 
+    # The worker's namespace (the client's namespace) — handed to each Runner so
+    # Temporalio::Workflow::info and external-workflow signal/cancel commands
+    # carry the correct NamespacedWorkflowExecution namespace (spec section 20).
+    field $namespace :param = 'default';
+
     # A coderef ($completion_bytes) -> Future: sends the serialized
     # WorkflowActivationCompletion to core (worker_complete_workflow_activation
     # over the callback bridge). Injectable so unit tests capture completions
@@ -147,6 +152,7 @@ class Temporalio::Worker::WorkflowDispatcher {
             payload_converter => $data_converter->payload_converter,
             failure_converter => $data_converter->failure_converter,
             task_queue        => $task_queue,
+            namespace         => $namespace,
         );
         $runners{$run_id} = $runner;
         return $runner;

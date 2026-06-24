@@ -48,6 +48,12 @@ class Temporalio::Workflow::Runner {
     field $workflow_class :param;
     field $run_id         :param = undef;
 
+    # The workflow namespace (spec section 20): surfaced through `info` and used
+    # to populate the NamespacedWorkflowExecution arm of external-workflow
+    # signal/cancel commands. The worker injects the client's namespace; the
+    # replay harness defaults it. Never a user argument to signal/cancel.
+    field $namespace :param = 'default';
+
     # Payload converter for arguments (in) and the result (out). The replay
     # harness uses the default composite; a worker injects its data converter.
     field $payload_converter :param = undef;
@@ -106,12 +112,24 @@ class Temporalio::Workflow::Runner {
     # handle's ->signal live in %pending_external_signals below.
     field %pending_child_workflows;
 
-    # Pending child-workflow signal Futures keyed by their
-    # SignalExternalWorkflowExecution seq (a child-targeted signal shares the
-    # external-signal seq space). Resolved on ResolveSignalExternalWorkflow
-    # (full external-handle support is P6.3; here it backs $handle->signal).
+    # Pending external-signal Futures keyed by their
+    # SignalExternalWorkflowExecution seq. Both a child-targeted signal
+    # ($handle->signal on the child_workflow_id arm, spec section 18) and an
+    # external-handle signal (the workflow_execution arm, spec section 20) draw
+    # from this one seq space and pending map — they are the same coresdk
+    # command (MUST-match sdk-python _next_seq("external_signal")). Resolved on
+    # ResolveSignalExternalWorkflow.
     field %pending_external_signals;
-    field $external_op_seq_counter = 0;   # external signal/cancel seq space.
+    field $external_signal_seq_counter = 0;   # external-signal seq space.
+
+    # Pending external-cancel Futures keyed by their
+    # RequestCancelExternalWorkflowExecution seq (spec section 20). This is a
+    # SEPARATE seq space from external signals (MUST-match sdk-python
+    # _next_seq("external_cancel") / sdk-ruby's two counters): a workflow's
+    # first external signal and first external cancel are both seq 1. Resolved
+    # on ResolveRequestCancelExternalWorkflow.
+    field %pending_external_cancels;
+    field $external_cancel_seq_counter = 0;   # external-cancel seq space.
 
     # Pending activity Futures keyed by their command seq: { seq => $future }.
     # The Workflow::Future for each in-flight activity, resolved imperatively
@@ -269,6 +287,10 @@ class Temporalio::Workflow::Runner {
         return {
             run_id        => $run_id,
             workflow_type => $workflow_type,
+            # The workflow namespace (spec section 20): read by
+            # get_external_workflow_handle to populate the
+            # NamespacedWorkflowExecution arm of signal/cancel commands.
+            namespace     => $namespace,
             # The patch ids the server has notified for this run (spec section
             # 10.3 "record in workflow info"). Sorted for a stable view.
             patches       => [ sort keys %patches_notified ],
@@ -554,7 +576,7 @@ class Temporalio::Workflow::Runner {
     # later ResolveSignalExternalWorkflow settles it. Returns the Future the
     # $handle->signal caller awaits.
     method _signal_child_workflow ($handle, $name, %opts) {
-        my $seq = ++$external_op_seq_counter;
+        my $seq = ++$external_signal_seq_counter;
 
         my @args = map { $payload_converter->to_payload($_) }
             (($opts{args} // [])->@*);
@@ -580,6 +602,108 @@ class Temporalio::Workflow::Runner {
 
         my $future = Temporalio::Workflow::Future->new;
         $pending_external_signals{$seq} = $future;
+        return $future;
+    }
+
+    # --- external workflow handles (spec section 20) -------------------------
+
+    # get_external_workflow_handle($workflow_id, %opts) -> a
+    # Temporalio::Workflow::ExternalWorkflowHandle. A synchronous, non-command
+    # constructor (spec section 20.1): it captures the target id/run_id plus the
+    # runner reference and emits nothing. %opts: run_id (undef targets the most
+    # recent run). The handle's signal/cancel methods delegate back to the two
+    # methods below.
+    method get_external_workflow_handle ($workflow_id, %opts) {
+        require Temporalio::Workflow::ExternalWorkflowHandle;
+        return Temporalio::Workflow::ExternalWorkflowHandle->new(
+            workflow_id => $workflow_id,
+            run_id      => $opts{run_id},
+            runner      => $self,
+        );
+    }
+
+    # Emit a SignalExternalWorkflowExecution targeting an arbitrary workflow
+    # (spec section 20; the workflow_execution oneof arm, NOT child_workflow_id)
+    # and register the pending signal Future so a later
+    # ResolveSignalExternalWorkflow settles it. The namespace comes from this
+    # runner's namespace (never a user argument). Cancelling the returned Future
+    # before its resolve emits CancelSignalWorkflow{seq} and does NOT
+    # pre-emptively settle it — the eventual Resolve* still arrives (spec section
+    # 20.2 in-flight cancellation; MUST-match sdk-python asyncio.shield +
+    # cancel_signal_workflow). Returns the Future the $handle->signal caller awaits.
+    method _signal_external_workflow ($workflow_id, $run_id, $name, %opts) {
+        my $seq = ++$external_signal_seq_counter;
+
+        my @args = map { $payload_converter->to_payload($_) }
+            (($opts{args} // [])->@*);
+
+        my %fields = (
+            seq                => $seq,
+            workflow_execution => {
+                namespace   => $namespace,
+                workflow_id => $workflow_id,
+                run_id      => ($run_id // ''),
+            },
+            signal_name        => $name,
+            (@args ? (args => [@args]) : ()),
+        );
+        if (my $h = $opts{headers}) {
+            if (%$h) {
+                $fields{headers} = {
+                    map { $_ => $payload_converter->to_payload($h->{$_}) }
+                        keys %$h
+                };
+            }
+        }
+
+        push @commands,
+            Temporalio::Workflow::Commands::signal_external_workflow_execution(
+                \%fields);
+
+        my $future = Temporalio::Workflow::Future->new;
+        $pending_external_signals{$seq} = $future;
+
+        # In-flight cancellation (spec section 20.2): if the awaiting frame is
+        # cancelled before the resolve, emit CancelSignalWorkflow{seq} but leave
+        # the seq mapped so the eventual ResolveSignalExternalWorkflow settles
+        # it. The hook must NOT fail the Future here (cancelling a Future already
+        # marks it ready/cancelled); we only emit the cancel command at most once.
+        my $cancel_emitted = 0;
+        $future->on_cancel(sub {
+            return if $cancel_emitted;
+            $cancel_emitted = 1;
+            push @commands,
+                Temporalio::Workflow::Commands::cancel_signal_workflow($seq);
+        });
+
+        return $future;
+    }
+
+    # Emit a RequestCancelExternalWorkflowExecution targeting an arbitrary
+    # workflow (spec section 20) and register the pending cancel Future so a
+    # later ResolveRequestCancelExternalWorkflow settles it. Draws from the
+    # SEPARATE external-cancel seq space. A cancel request has no counter-cancel
+    # ("there is no cancelling a cancel request" — spec section 20.2), so no
+    # on_cancel hook is installed. Returns the Future the $handle->cancel caller
+    # awaits.
+    method _request_cancel_external_workflow ($workflow_id, $run_id, %opts) {
+        my $seq = ++$external_cancel_seq_counter;
+
+        my %fields = (
+            seq                => $seq,
+            workflow_execution => {
+                namespace   => $namespace,
+                workflow_id => $workflow_id,
+                run_id      => ($run_id // ''),
+            },
+        );
+
+        push @commands,
+            Temporalio::Workflow::Commands::request_cancel_external_workflow_execution(
+                \%fields);
+
+        my $future = Temporalio::Workflow::Future->new;
+        $pending_external_cancels{$seq} = $future;
         return $future;
     }
 
@@ -786,6 +910,7 @@ class Temporalio::Workflow::Runner {
     method evict () {
         for my $future (values %pending_activities, values %pending_timers,
             values %in_progress_handlers, values %pending_external_signals,
+            values %pending_external_cancels,
             map { $_->{future} } @conditions)
         {
             $future->cancel unless $future->is_ready;
@@ -801,6 +926,7 @@ class Temporalio::Workflow::Runner {
         %in_progress_handlers     = ();
         %pending_child_workflows  = ();
         %pending_external_signals = ();
+        %pending_external_cancels = ();
         @conditions               = ();
         if (defined $main_run_future && !$main_run_future->is_ready) {
             $main_run_future->cancel;
@@ -830,6 +956,10 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'resolve_signal_external_workflow') {
             return $self->_apply_resolve_signal_external_workflow(
                 $job->resolve_signal_external_workflow);
+        }
+        if ($variant eq 'resolve_request_cancel_external_workflow') {
+            return $self->_apply_resolve_request_cancel_external_workflow(
+                $job->resolve_request_cancel_external_workflow);
         }
         if ($variant eq 'cancel_workflow') {
             return $self->_apply_cancel_workflow($job->cancel_workflow);
@@ -1096,13 +1226,40 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
-    # ResolveSignalExternalWorkflow { seq, failure? } — settle a pending child
-    # (or external, P6.3) signal Future (spec section 18). No failure -> ->done;
-    # a failure -> ->fail with the mapped exception. An unknown seq is tolerated
-    # (the signal Future may have already been resolved/cancelled).
+    # ResolveSignalExternalWorkflow { seq, failure? } — settle a pending
+    # child-targeted (spec section 18) or external-handle (spec section 20)
+    # signal Future. No failure -> ->done; a populated failure -> ->fail with the
+    # mapped exception (failure_converter->from_failure, surfacing a not-found as
+    # Exception::Application — spec section 20.3). An unknown seq is tolerated
+    # (the signal Future may have already been resolved); a seq whose Future was
+    # cancelled in-flight (CancelSignalWorkflow emitted) is already ready, so the
+    # is_ready guard drops the late resolve cleanly (spec section 20.2).
     method _apply_resolve_signal_external_workflow ($job) {
         my $seq    = $job->seq;
         my $future = delete $pending_external_signals{$seq};
+        return unless defined $future;
+        return if $future->is_ready;
+
+        my $failure = $job->can('failure') ? $job->failure : undef;
+        if (defined $failure) {
+            $future->fail(
+                $failure_converter->from_failure($failure, $payload_converter));
+        }
+        else {
+            $future->done;
+        }
+        return;
+    }
+
+    # ResolveRequestCancelExternalWorkflow { seq, failure? } — settle a pending
+    # external-handle cancel Future (spec section 20). No failure -> ->done; a
+    # populated failure -> ->fail via failure_converter->from_failure (a
+    # not-found surfaces as Exception::Application — spec section 20.3). An
+    # unknown seq is tolerated. Cancel requests have no counter-cancel, so the
+    # Future is never cancelled in-flight.
+    method _apply_resolve_request_cancel_external_workflow ($job) {
+        my $seq    = $job->seq;
+        my $future = delete $pending_external_cancels{$seq};
         return unless defined $future;
         return if $future->is_ready;
 
@@ -2224,9 +2381,16 @@ Returns the timestamp of the activation currently being applied.
 
 Evicts the run from cache, cancelling any in-flight handler/awaitable Futures.
 
+=head2 get_external_workflow_handle
+
+Constructs a L<Temporalio::Workflow::ExternalWorkflowHandle> for an arbitrary
+running workflow by id (spec section 20). A synchronous, non-command
+constructor; the handle's C<signal>/C<cancel> emit the external-workflow
+commands.
+
 =head2 info
 
-Returns the workflow info hash (run id, workflow type, etc.) for the run.
+Returns the workflow info hash (run id, workflow type, namespace, etc.) for the run.
 
 =head2 is_replaying
 

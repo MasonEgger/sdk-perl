@@ -153,6 +153,21 @@ async sub execute_child_workflow ($workflow, %opts) {
     return await $handle->result;
 }
 
+# --- external workflow handles (spec section 20) ----------------------------
+
+# get_external_workflow_handle($workflow_id, %opts) -> a
+# Temporalio::Workflow::ExternalWorkflowHandle for an arbitrary already-running
+# workflow in the current namespace. A SYNCHRONOUS, non-command constructor: it
+# captures the id/run_id plus the runner reference and emits nothing (mirrors
+# the reference SDKs' plain constructors). The handle's ->signal / ->cancel emit
+# SignalExternalWorkflowExecution / RequestCancelExternalWorkflowExecution
+# through the command stream (never client RPCs). %opts: run_id (undef targets
+# the most recent run). Raises Temporalio::Exception::Workflow::NoRunner outside
+# a workflow body.
+sub get_external_workflow_handle ($workflow_id, %opts) {
+    return _runner()->get_external_workflow_handle($workflow_id, %opts);
+}
+
 # --- timers (spec section 10.2) ---------------------------------------------
 
 # start_timer($seconds) -> a Workflow::Future that resolves when the timer
@@ -309,6 +324,14 @@ Async. Starts a child workflow and awaits its result, returning an awaitable res
 =head2 start_child_workflow
 
 Async. Starts a child workflow and awaits its start, returning an awaitable resolving to the L<Temporalio::Workflow::ChildWorkflowHandle> once the child has started.
+
+=head2 get_external_workflow_handle
+
+Returns a L<Temporalio::Workflow::ExternalWorkflowHandle> for an arbitrary
+running workflow by id in the current namespace (spec section 20). A
+synchronous, non-command constructor; the handle's C<signal>/C<cancel> emit
+commands through the stream. Raises
+L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
 
 =head2 info
 

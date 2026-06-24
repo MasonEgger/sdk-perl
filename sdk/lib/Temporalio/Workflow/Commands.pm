@@ -158,13 +158,38 @@ sub cancel_child_workflow_execution ($seq, $reason = undef) {
 
 # signal_external_workflow_execution { seq, child_workflow_id|workflow_execution,
 # signal_name, args, headers } — emitted when a ChildWorkflowHandle's ->signal
-# is called (spec section 18; the child arm of the SignalExternalWorkflowExecution
-# proto). $fields is the assembled field hashref. A child-targeted signal sets
-# the `child_workflow_id` oneof arm (NOT `workflow_execution`); the runner owns
-# seq allocation and payload conversion.
+# (spec section 18) or an ExternalWorkflowHandle's ->signal (spec section 20) is
+# called. $fields is the assembled field hashref. A child-targeted signal sets
+# the `child_workflow_id` oneof arm; an external-handle signal sets the
+# `workflow_execution` arm (a NamespacedWorkflowExecution). The runner owns seq
+# allocation, namespace injection, and payload conversion.
 sub signal_external_workflow_execution ($fields) {
     return _command_class()->new({
         signal_external_workflow_execution => $fields,
+    });
+}
+
+# request_cancel_external_workflow_execution { seq, workflow_execution, reason }
+# — emitted when an ExternalWorkflowHandle's ->cancel is called (spec section
+# 20). $fields is the assembled field hashref (seq, workflow_execution =
+# NamespacedWorkflowExecution{namespace, workflow_id, run_id}; reason is unset).
+# The runner owns external-cancel seq allocation and namespace injection.
+sub request_cancel_external_workflow_execution ($fields) {
+    return _command_class()->new({
+        request_cancel_external_workflow_execution => $fields,
+    });
+}
+
+# cancel_signal_workflow { seq } — emitted when an in-flight
+# SignalExternalWorkflowExecution's awaiting frame is cancelled before its
+# ResolveSignalExternalWorkflow arrives (spec section 20.2; MUST-match
+# sdk-python cancel_signal_workflow). $seq is the seq of the
+# SignalExternalWorkflowExecution being cancelled. Telling core to drop the
+# in-flight signal send; the original Future still settles on the eventual
+# Resolve* job (there is no pre-emptive raise).
+sub cancel_signal_workflow ($seq) {
+    return _command_class()->new({
+        cancel_signal_workflow => { seq => $seq },
     });
 }
 
@@ -321,8 +346,26 @@ never emits this command.
 =item C<signal_external_workflow_execution($fields)>
 
 C<SignalExternalWorkflowExecution { ... }> — emitted when a
-C<ChildWorkflowHandle>'s C<< ->signal >> is called (spec section 18). C<$fields>
-sets the C<child_workflow_id> oneof arm for a child-targeted signal.
+C<ChildWorkflowHandle>'s C<< ->signal >> (spec section 18) or an
+C<ExternalWorkflowHandle>'s C<< ->signal >> (spec section 20) is called.
+C<$fields> sets the C<child_workflow_id> oneof arm for a child-targeted signal,
+or the C<workflow_execution> arm (a C<NamespacedWorkflowExecution>) for an
+external-handle signal.
+
+=item C<request_cancel_external_workflow_execution($fields)>
+
+C<RequestCancelExternalWorkflowExecution { seq, workflow_execution, reason }> —
+emitted when an C<ExternalWorkflowHandle>'s C<< ->cancel >> is called (spec
+section 20). C<$fields> sets the C<workflow_execution> arm (a
+C<NamespacedWorkflowExecution>); the runner owns external-cancel seq allocation
+and namespace injection.
+
+=item C<cancel_signal_workflow($seq)>
+
+C<CancelSignalWorkflow { seq }> — emitted when an in-flight
+C<SignalExternalWorkflowExecution>'s awaiting frame is cancelled before its
+C<ResolveSignalExternalWorkflow> arrives (spec section 20.2). C<$seq> is the seq
+of the signal being cancelled.
 
 =item C<respond_to_query($query_id, %parts)>
 

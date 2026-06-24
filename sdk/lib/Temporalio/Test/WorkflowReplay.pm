@@ -23,6 +23,13 @@ class Temporalio::Test::WorkflowReplay {
     field $workflow_failure_exception_types :param = [];
     field $nondeterminism_as_workflow_fail   :param = 0;
 
+    # The workflow namespace (spec section 20): surfaced through
+    # Temporalio::Workflow::info and used to populate the
+    # NamespacedWorkflowExecution arm of external-workflow signal/cancel
+    # commands. The real worker injects the client's namespace; the harness
+    # defaults to a fixed value so external-handle replay tests can assert it.
+    field $namespace :param = 'default';
+
     # The per-run Runner. Created lazily on the first push_activation so the
     # run_id from the activation seeds it (one harness drives one run, like
     # Python's WorkflowReplayer over a single run).
@@ -61,6 +68,7 @@ class Temporalio::Test::WorkflowReplay {
             payload_converter                => $payload_converter,
             workflow_failure_exception_types => $workflow_failure_exception_types,
             nondeterminism_as_workflow_fail  => $nondeterminism_as_workflow_fail,
+            namespace                        => $namespace,
         );
 
         my $completion = $runner->process_activation($activation);

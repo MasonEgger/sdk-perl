@@ -19,12 +19,31 @@ draft has been removed; spec.md is the sole contract.)
   `Alien::Temporalio::Core->version` reports the pinned upstream sdk-core
   release (`0.4.0`), tracked independently of the Perl dist version. Tagging
   and release to `main` are performed manually by the maintainer.
-- **v0.2 (feature parity) IN PROGRESS.** Phase 6 (workflow parity) is
-  planned: P6.1 child workflows, P6.2 workflow updates, P6.3 external
-  workflow handles, from spec contracts §18–§20. The Part II steps are
-  appended below; Phases 7–10 (activity parity, scheduling, Nexus,
-  runtime/worker hardening) are scoped in spec §11 and authored into
-  spec.md before their steps are added here.
+- **v0.2 (feature parity) IN PROGRESS. Phase 6 (workflow parity) COMPLETE
+  (P6.1–P6.3).** P6.1 child workflows and P6.2 workflow updates landed
+  earlier; P6.3 external workflow handles (spec §20) is now done:
+  `Temporalio::Workflow::get_external_workflow_handle` (synchronous,
+  non-command constructor; NoRunner outside a body) returns a new
+  `Temporalio::Workflow::ExternalWorkflowHandle` whose `signal`/`cancel`
+  emit `SignalExternalWorkflowExecution` /
+  `RequestCancelExternalWorkflowExecution` on the `workflow_execution`
+  oneof arm (NamespacedWorkflowExecution{namespace, workflow_id, run_id})
+  through the COMMAND stream, resolved on the matching Resolve* job. The
+  Runner now owns TWO independent seq spaces (external-signal, shared with
+  child-targeted signals; external-cancel) and injects the namespace from
+  `Temporalio::Workflow::info` (threaded worker → WorkflowDispatcher →
+  Runner from `$client->namespace`; the replay harness takes a `namespace`
+  param). New Commands builders:
+  `request_cancel_external_workflow_execution`, `cancel_signal_workflow`
+  (an in-flight signal cancel emits CancelSignalWorkflow{seq} without
+  pre-emptively raising; a cancel has no counter-cancel). Resolve failures
+  go through `failure_converter->from_failure` verbatim (a not-found is an
+  Exception::Application — no bespoke exception). T-ext-1..9
+  (`sdk/t/replay/external_workflow.t`) + T-ext-10
+  (`sdk/t/integration/external_workflow.t`, live against the dev server).
+  **Phase 6 acceptance (workflow parity) green.** Phases 7–10 (activity
+  parity, scheduling, Nexus, runtime/worker hardening) are scoped in spec
+  §11 and authored into spec.md before their steps are added here.
 - The historical phase-by-phase detail below is retained as the build record.
 
 - **Phase 0: COMPLETE (P0.1–P0.11, 2026-06-12).** Acceptance per spec §11

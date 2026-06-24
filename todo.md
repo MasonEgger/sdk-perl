@@ -295,11 +295,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P6.2.5 Verify: prove -lj4 t
 
 ### P6.3 External workflow handles (spec §20)
-- [ ] P6.3.1 RED: sdk/t/replay/external_workflow.t (T-ext-1..9) + WfDef fixtures
-- [ ] P6.3.2 GREEN: get_external_workflow_handle + ExternalWorkflowHandle + Commands builders + Runner two-counter resolve + namespace injection
-- [ ] P6.3.3 RED: sdk/t/integration/external_workflow.t (T-ext-10)
-- [ ] P6.3.4 GREEN: wire until green
-- [ ] P6.3.5 Verify: prove -lj4 t — **Phase 6 acceptance: workflow parity green**
+- [x] P6.3.1 RED: sdk/t/replay/external_workflow.t (T-ext-1..9) + WfDef fixtures
+- [x] P6.3.2 GREEN: get_external_workflow_handle + ExternalWorkflowHandle + Commands builders + Runner two-counter resolve + namespace injection
+- [x] P6.3.3 RED: sdk/t/integration/external_workflow.t (T-ext-10)
+- [x] P6.3.4 GREEN: wire until green
+- [x] P6.3.5 Verify: prove -lj4 t — **Phase 6 acceptance: workflow parity green**
 
 ## Phase 7 — Activity feature parity
 
