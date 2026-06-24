@@ -304,10 +304,10 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 7 — Activity feature parity
 
 ### P7.1 Local activities (spec §21)
-- [ ] P7.1.1 RED: sdk/t/replay/local_activities.t (T-local-1..15) + WfDef fixtures
-- [ ] P7.1.2 GREEN: execute/start_local_activity + ScheduleLocalActivity/RequestCancelLocalActivity + backoff→timer loop (runner-owned)
-- [ ] P7.1.3 REFACTOR: share resolve/cancel paths with regular activities
-- [ ] P7.1.4 Verify: prove -lj4 t
+- [x] P7.1.1 RED: sdk/t/replay/local_activities.t (T-local-1..15) + WfDef fixtures
+- [x] P7.1.2 GREEN: execute/start_local_activity + ScheduleLocalActivity/RequestCancelLocalActivity + backoff→timer loop (runner-owned)
+- [x] P7.1.3 REFACTOR: share resolve/cancel paths with regular activities
+- [x] P7.1.4 Verify: prove -lj4 t
 
 ### P7.2 Async activity completion (spec §22)
 - [ ] P7.2.1 RED: sdk/t/unit/async_activity.t + sdk/t/integration/async_activity.t (T-asyncact-1..9)

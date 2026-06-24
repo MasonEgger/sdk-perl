@@ -98,6 +98,37 @@ sub request_cancel_activity ($seq) {
     return _command_class()->new({ request_cancel_activity => { seq => $seq } });
 }
 
+# schedule_local_activity { ... } — emitted when the workflow body calls
+# Temporalio::Workflow::execute_local_activity / start_local_activity (spec
+# section 21). $fields is the already-assembled ScheduleLocalActivity field
+# hashref (seq, activity_id, activity_type, headers, arguments, the three
+# timeout Durations, retry_policy, local_retry_threshold Duration,
+# cancellation_type, and — only on a backoff re-schedule — attempt and
+# original_schedule_time). The runner owns seq allocation, timeout/threshold
+# conversion, the default activity_id, and the enum string -> number mapping.
+# An optional $summary_payload (a temporal.api.common.v1.Payload) is placed on
+# the command's user_metadata.summary (spec section 21.2). The LA command has NO
+# task_queue / heartbeat_timeout / priority (core runs it in-process).
+sub schedule_local_activity ($fields, $summary_payload = undef) {
+    return _command_class()->new({
+        schedule_local_activity => $fields,
+        (defined $summary_payload
+            ? (user_metadata => { summary => $summary_payload }) : ()),
+    });
+}
+
+# request_cancel_local_activity { seq } — emitted when a scheduled local
+# activity's Workflow::Future is cancelled under try_cancel /
+# wait_cancellation_completed (spec section 21.2; MUST-match the
+# RequestCancelLocalActivity proto, keyed on the ScheduleLocalActivity seq).
+# ABANDON-typed LAs never emit this (the workflow stops waiting without asking
+# core to cancel — see Temporalio::Workflow::Runner's LA cancel hook).
+sub request_cancel_local_activity ($seq) {
+    return _command_class()->new({
+        request_cancel_local_activity => { seq => $seq },
+    });
+}
+
 # respond_to_query { query_id, succeeded|failed } — answers a QueryWorkflow job
 # (spec section 10.3; MUST-match sdk-python _apply_query_workflow which sets
 # command.respond_to_query.query_id and either .succeeded.response (one result
@@ -327,6 +358,27 @@ C<ScheduleActivity> being cancelled. Core forwards the request to the running
 activity according to the activity's C<ActivityCancellationType>; an
 C<abandon>-typed activity never emits this command (the workflow stops waiting
 without asking core to cancel the activity).
+
+=item C<schedule_local_activity($fields, $summary_payload)>
+
+C<ScheduleLocalActivity { ... }> — emitted when the workflow body calls
+C<Temporalio::Workflow::execute_local_activity> / C<start_local_activity> (spec
+section 21). C<$fields> is the assembled C<ScheduleLocalActivity> field hashref
+(C<seq>, C<activity_id>, C<activity_type>, C<headers>, C<arguments>, the three
+timeout Durations, C<retry_policy>, C<local_retry_threshold> Duration,
+C<cancellation_type>, and on a backoff re-schedule C<attempt> /
+C<original_schedule_time>). The optional C<$summary_payload> (a
+C<temporal.api.common.v1.Payload>) is placed on the command's
+C<user_metadata.summary>. The LA command has no C<task_queue> /
+C<heartbeat_timeout> / C<priority> (core runs it in-process).
+
+=item C<request_cancel_local_activity($seq)>
+
+C<RequestCancelLocalActivity { seq }> — emitted when a scheduled local
+activity's L<Temporalio::Workflow::Future> is cancelled under C<try_cancel> /
+C<wait_cancellation_completed>. C<$seq> is the seq of the
+C<ScheduleLocalActivity> being cancelled; an C<abandon>-typed LA never emits
+this command.
 
 =item C<start_child_workflow_execution($fields)>
 

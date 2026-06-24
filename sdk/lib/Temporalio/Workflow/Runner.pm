@@ -150,6 +150,26 @@ class Temporalio::Workflow::Runner {
     # tolerates a stale FireTimer for a cancelled timer). Run-scoped.
     field %cancelled_activity_seqs;
 
+    # Local-activity bookkeeping (spec section 21). LAs share the activity seq
+    # space and %pending_activities with regular activities (a single map by
+    # seq), but the backoff -> server-timer -> re-schedule loop is runner-owned
+    # and needs per-LA state the runner re-uses when re-scheduling:
+    #   %local_activity_state{$seq} = {
+    #       future  => the SINGLE stable outer Workflow::Future the body awaits,
+    #       fields  => the ScheduleLocalActivity field hashref (sans seq), so a
+    #                  backoff re-schedule re-emits the same type/args/timeouts,
+    #       summary => the optional summary Payload (re-applied on re-schedule),
+    #   }
+    # On a `backoff` resolution the runner starts a real timer; when that timer
+    # fires it re-schedules under a NEW seq, moving the state entry to the new
+    # seq (the outer future is preserved, so the body sees one result).
+    field %local_activity_state;
+
+    # Backoff timers in flight: { timer_seq => $la_seq } so a fired timer knows
+    # which LA to re-schedule, and a whole-workflow cancel of a backing-off LA
+    # (T-local-13) can find and cancel the pending backoff timer.
+    field %local_activity_backoff_timers;
+
     # Pending timer Futures keyed by their StartTimer seq: { seq => $future }.
     # Resolved imperatively when the matching FireTimer job arrives (P3.5), or
     # removed and failed-as-cancelled when the timer Future is cancelled.
@@ -420,6 +440,198 @@ class Temporalio::Workflow::Runner {
         );
         $pending_activities{$seq} = $future;
         return $future;
+    }
+
+    # --- local activities (spec section 21) ----------------------------------
+
+    # schedule_local_activity(%opts) -> a Temporalio::Workflow::Future resolved
+    # on the LA's terminal ResolveActivity (completed/failed/cancelled). The
+    # local-activity analog of schedule_activity: it allocates from the SAME
+    # activity seq space (++$activity_seq_counter) and registers in the SAME
+    # %pending_activities map, so LA and regular handles never collide (mirrors
+    # sdk-python). It emits a ScheduleLocalActivity command (no task_queue /
+    # heartbeat_timeout / priority — core runs the LA in-process). %opts mirrors
+    # the spec section 21.1 kwargs: activity_type (required), args (arrayref),
+    # schedule_to_close_timeout, schedule_to_start_timeout, start_to_close_timeout
+    # (seconds), retry_policy, local_retry_threshold (seconds, default 60),
+    # cancellation_type (default try_cancel), activity_id, summary, headers.
+    #
+    # The backoff -> server-timer -> re-schedule loop is RUNNER-OWNED (spec
+    # decision D1): the returned Future is a single stable OUTER future, resolved
+    # only on a terminal outcome. A `backoff` resolution does NOT touch it — the
+    # runner starts a timer and re-schedules under a new seq when it fires. The
+    # per-LA state needed to re-schedule lives in %local_activity_state.
+    method schedule_local_activity (%opts) {
+        $self->_assert_writable('execute_local_activity/start_local_activity');
+        my $activity_type = $opts{activity_type}
+            // die "Temporalio::Workflow::Runner: schedule_local_activity needs "
+                 . "an activity_type";
+
+        # Convert arguments up front so a converter error surfaces at the call
+        # site (parity with schedule_activity), and convert headers / summary.
+        my @args = map { $payload_converter->to_payload($_) }
+            (($opts{args} // [])->@*);
+
+        # local_retry_threshold defaults to 60s (spec section 21.1; proto comment
+        # "Defaults to 1 minute").
+        my $threshold = defined $opts{local_retry_threshold}
+            ? $opts{local_retry_threshold} : 60;
+
+        # The reusable field set (everything EXCEPT seq and the backoff-only
+        # attempt/original_schedule_time). A backoff re-schedule reuses this.
+        my %base = (
+            activity_type     => $activity_type,
+            (@args ? (arguments => [@args]) : ()),
+            cancellation_type =>
+                _cancellation_type_number($opts{cancellation_type}),
+            local_retry_threshold => _duration($threshold),
+        );
+
+        # The three LA timeouts (NO heartbeat_timeout — LAs do not heartbeat at
+        # the lang level): seconds -> Duration, only when set.
+        for my $t (qw(schedule_to_close_timeout schedule_to_start_timeout
+            start_to_close_timeout))
+        {
+            next unless defined $opts{$t};
+            $base{$t} = _duration($opts{$t});
+        }
+
+        if (defined(my $rp = $opts{retry_policy})) {
+            $base{retry_policy} = $rp->to_proto;
+        }
+
+        if (my $headers = $opts{headers}) {
+            if (%$headers) {
+                $base{headers} = {
+                    map { $_ => $payload_converter->to_payload($headers->{$_}) }
+                        keys %$headers
+                };
+            }
+        }
+
+        my $summary = defined $opts{summary}
+            ? $payload_converter->to_payload($opts{summary}) : undef;
+
+        my $seq = ++$activity_seq_counter;   # SHARED activity seq space.
+
+        my $is_abandon = $base{cancellation_type} == 2 ? 1 : 0;
+
+        # The single stable outer Future the body awaits. Its cancel hook honours
+        # the cancellation_type (spec section 21.2): try_cancel/abandon resolve
+        # Cancelled now (try_cancel also emits RequestCancelLocalActivity);
+        # wait_cancellation_completed emits the cancel but PARKS (the future is
+        # resolved only by the later ResolveActivity{cancelled}). A backing-off
+        # LA cancels its pending backoff timer instead (CancelTimer).
+        my $future =
+            Temporalio::Workflow::Runner::_LocalActivityFuture->_new_local(
+                seq        => $seq,
+                runner     => $self,
+                is_abandon => $is_abandon,
+                wait       => ($base{cancellation_type} == 1 ? 1 : 0),
+            );
+
+        $local_activity_state{$seq} = {
+            future            => $future,
+            base              => \%base,
+            summary           => $summary,
+            activity_id       => $opts{activity_id},
+        };
+        $pending_activities{$seq} = $future;
+
+        $self->_emit_schedule_local_activity($seq);
+        return $future;
+    }
+
+    # _emit_schedule_local_activity($seq, %extra) — build and buffer the
+    # ScheduleLocalActivity command for the LA tracked under $seq. %extra carries
+    # the backoff-only fields on a re-schedule (attempt, original_schedule_time);
+    # a fresh schedule passes none. activity_id defaults to the CURRENT seq as a
+    # string (so a backoff re-schedule gets the new seq's id) unless the caller
+    # set an explicit activity_id.
+    method _emit_schedule_local_activity ($seq, %extra) {
+        my $state = $local_activity_state{$seq}
+            // die "Temporalio::Workflow::Runner: no LA state for seq $seq";
+        my %fields = (
+            seq         => $seq,
+            activity_id => (defined $state->{activity_id}
+                ? $state->{activity_id} : "$seq"),
+            $state->{base}->%*,
+            %extra,
+        );
+        push @commands, Temporalio::Workflow::Commands::schedule_local_activity(
+            \%fields, $state->{summary});
+        return;
+    }
+
+    # _on_local_activity_cancel($future, $seq, $is_abandon, $wait) — the runner
+    # side of a local activity's Future ->cancel (spec section 21.2). Returns
+    # true when the caller (the _LocalActivityFuture) should resolve Cancelled
+    # IMMEDIATELY, or false when it should PARK (wait_cancellation_completed: the
+    # cancel command is emitted now, but the outer future stays pending until the
+    # eventual ResolveActivity{cancelled}). $future is the outer future itself,
+    # used to detect a backing-off LA by identity (its state is stashed on the
+    # backoff timer entry, not in %local_activity_state, while backing off).
+    #
+    # Three cases by current LA position:
+    #   * Backing off (pending backoff timer holds this future's state): cancel
+    #     the timer (CancelTimer), drop the re-schedule, resolve Cancelled now,
+    #     regardless of cancellation_type — no running activity to wait for
+    #     (T-local-13).
+    #   * In-flight, abandon: emit NO command; resolve Cancelled now (T-local-12).
+    #   * In-flight, try_cancel/wait: emit RequestCancelLocalActivity; try_cancel
+    #     resolves now (T-local-10), wait parks (T-local-11).
+    method _on_local_activity_cancel ($future, $seq, $is_abandon, $wait) {
+        # Backing off? A backoff-timer entry whose stashed state's future is THIS
+        # future means the LA is parked on its server timer.
+        for my $tseq (keys %local_activity_backoff_timers) {
+            my $info = $local_activity_backoff_timers{$tseq};
+            next unless ($info->{state}{future} // 0) == $future;
+            delete $local_activity_backoff_timers{$tseq};   # drop re-schedule.
+            my $timer = $pending_timers{$tseq};
+            $timer->cancel if defined $timer && !$timer->is_ready; # CancelTimer.
+            return 1;   # resolve Cancelled now.
+        }
+
+        # In-flight. wait_cancellation_completed PARKS: emit the cancel command,
+        # leave the LA registered (so the later ResolveActivity{cancelled} is
+        # matched, not flagged unknown), and tell the future to stay pending.
+        if ($wait && !$is_abandon) {
+            push @commands,
+                Temporalio::Workflow::Commands::request_cancel_local_activity(
+                    $seq);
+            return 0;
+        }
+
+        # try_cancel / abandon: de-register and resolve Cancelled now. try_cancel
+        # emits RequestCancelLocalActivity and records the cancelled seq so a
+        # later stale ResolveActivity{cancelled} from core is tolerated; abandon
+        # emits no command.
+        delete $local_activity_state{$seq};
+        delete $pending_activities{$seq};
+        unless ($is_abandon) {
+            $cancelled_activity_seqs{$seq} = 1;
+            push @commands,
+                Temporalio::Workflow::Commands::request_cancel_local_activity(
+                    $seq);
+        }
+        return 1;
+    }
+
+    # _force_local_activity_cancel($seq, $is_abandon) — the runner side of the
+    # whole-workflow cancel chain for an IN-FLIGHT LA (spec section 10.3): emit
+    # RequestCancelLocalActivity (unless abandon), record the cancelled seq, and
+    # de-register. The future itself is failed Cancelled by the caller. (Backing-
+    # off LAs are handled separately in _apply_cancel_workflow.)
+    method _force_local_activity_cancel ($seq, $is_abandon) {
+        delete $local_activity_state{$seq};
+        delete $pending_activities{$seq};
+        unless ($is_abandon) {
+            $cancelled_activity_seqs{$seq} = 1;
+            push @commands,
+                Temporalio::Workflow::Commands::request_cancel_local_activity(
+                    $seq);
+        }
+        return;
     }
 
     # --- child workflows (spec section 18) -----------------------------------
@@ -921,13 +1133,15 @@ class Temporalio::Workflow::Runner {
                 $f->cancel unless $f->is_ready;
             }
         }
-        %pending_activities       = ();
-        %pending_timers           = ();
-        %in_progress_handlers     = ();
-        %pending_child_workflows  = ();
-        %pending_external_signals = ();
-        %pending_external_cancels = ();
-        @conditions               = ();
+        %pending_activities             = ();
+        %pending_timers                 = ();
+        %local_activity_state           = ();
+        %local_activity_backoff_timers  = ();
+        %in_progress_handlers           = ();
+        %pending_child_workflows        = ();
+        %pending_external_signals       = ();
+        %pending_external_cancels       = ();
+        @conditions                     = ();
         if (defined $main_run_future && !$main_run_future->is_ready) {
             $main_run_future->cancel;
         }
@@ -1069,6 +1283,69 @@ class Temporalio::Workflow::Runner {
         my $resolution = $job->result;
         my $status     = defined $resolution ? $resolution->which_status : undef;
         $status //= '';
+
+        # Local-activity backoff (spec section 21.2 — the one new mechanism).
+        # Core resolves with `backoff` (DoBackoff) instead of retrying when the
+        # next-attempt backoff exceeds local_retry_threshold. The outer future is
+        # NOT resolved: the runner starts a real server timer for backoff_duration
+        # and, when it fires, re-schedules the LA under a NEW seq with the
+        # DoBackoff attempt and preserved original_schedule_time. Re-register the
+        # state under the new seq (preserving the single outer future) so the body
+        # stays unaware of the backoff. Only LAs ever carry `backoff`.
+        if ($status eq 'backoff') {
+            my $state = delete $local_activity_state{$seq};
+            unless (defined $state) {
+                # A backoff for a seq with no LA state: tolerate if it was a
+                # cancelled LA (stale), else it is non-determinism. (We already
+                # popped %pending_activities above; re-record nothing for a
+                # known-cancelled seq.)
+                return if delete $cancelled_activity_seqs{$seq};
+                $self->_record_nondeterminism(
+                    "ResolveActivity{backoff} for unknown seq $seq (no pending "
+                    . "local activity) — non-determinism");
+                return;
+            }
+
+            my $backoff   = $resolution->backoff;
+            my $attempt   = $backoff->attempt;
+            my $orig_time = $backoff->original_schedule_time;
+            my $duration  = $backoff->backoff_duration;
+            # Seconds for start_timer: Duration -> float.
+            my $secs = ($duration ? $duration->seconds : 0)
+                + ($duration && $duration->nanos ? $duration->nanos / 1e9 : 0);
+
+            # Start a real (cancellable) server timer. On fire we re-schedule the
+            # LA under a fresh seq. The outer future ($state->{future}) is carried
+            # to the new seq untouched.
+            my $timer = $self->start_timer($secs);
+            my $timer_seq = $timer_seq_counter;   # the seq just allocated.
+            $local_activity_backoff_timers{$timer_seq} = {
+                state     => $state,
+                attempt   => $attempt,
+                orig_time => $orig_time,
+            };
+
+            $timer->on_done(sub {
+                my $info = delete $local_activity_backoff_timers{$timer_seq}
+                    or return;   # cancelled: do not re-schedule.
+                my $st     = $info->{state};
+                my $newseq = ++$activity_seq_counter;   # NEW seq, shared space.
+                # Re-point the outer future's cancel hook at the new seq.
+                $st->{future}->_rebind_seq($newseq);
+                $local_activity_state{$newseq} = $st;
+                $pending_activities{$newseq}   = $st->{future};
+                $self->_emit_schedule_local_activity(
+                    $newseq,
+                    attempt                => $info->{attempt},
+                    (defined $info->{orig_time}
+                        ? (original_schedule_time => $info->{orig_time}) : ()),
+                );
+            });
+            return;
+        }
+
+        # Terminal LA resolution (completed/failed/cancelled) drops the LA state.
+        delete $local_activity_state{$seq};
 
         if ($status eq 'completed') {
             my $success = $resolution->completed;
@@ -1300,10 +1577,34 @@ class Temporalio::Workflow::Runner {
         # carry the analogous override (emit CancelTimer + fail Cancelled).
         # Continuations run synchronously at resolve time, so the body observes
         # the cancellation before _pump/_build_completion.
+        # Backing-off local activities (spec section 21.2 / T-local-13) are NOT
+        # in %pending_activities — their state is stashed on a backoff timer
+        # while parked. Cancel each pending backoff timer (CancelTimer, dropping
+        # its re-schedule) and fail the LA's outer future Cancelled. Do this
+        # before the generic timer loop so the re-schedule on_done never fires.
+        for my $tseq (keys %local_activity_backoff_timers) {
+            my $info  = delete $local_activity_backoff_timers{$tseq};
+            my $timer = $pending_timers{$tseq};
+            $timer->cancel if defined $timer && !$timer->is_ready;
+            my $la_future = $info->{state}{future};
+            if (defined $la_future && !$la_future->is_ready) {
+                $la_future->fail(Temporalio::Exception::Cancelled->new(
+                    message => 'Local activity cancelled (workflow cancelled)',
+                ));
+            }
+        }
         for my $seq (keys %pending_activities) {
             my $future = $pending_activities{$seq};
             next if !defined $future || $future->is_ready;
-            $future->cancel;
+            # A local-activity future's whole-workflow cancel always raises (the
+            # primary-task cancel does not honour wait_cancellation_completed),
+            # so use _force_cancel rather than the wait-honouring ->cancel.
+            if ($future->isa('Temporalio::Workflow::Runner::_LocalActivityFuture')) {
+                $future->_force_cancel;
+            }
+            else {
+                $future->cancel;
+            }
         }
         for my $seq (keys %pending_timers) {
             my $future = $pending_timers{$seq};
@@ -2203,6 +2504,73 @@ package Temporalio::Workflow::Runner::_ActivityFuture {
     }
 }
 
+# A Workflow::Future for LOCAL activities (spec section 21). Like _ActivityFuture
+# it raises a Temporalio::Exception::Cancelled on ->cancel rather than entering
+# Future's native cancelled state, but the cancel BEHAVIOUR is delegated to the
+# runner (Runner::_on_local_activity_cancel) so it can honour the cancellation
+# type: try_cancel/abandon resolve now, wait_cancellation_completed parks until
+# the cancelled resolve, and a backing-off LA cancels its server timer. The
+# future carries its CURRENT seq (re-bound on a backoff re-schedule) and the
+# is_abandon/wait flags captured at schedule time.
+package Temporalio::Workflow::Runner::_LocalActivityFuture {
+    use v5.38;
+    use warnings;
+
+    use parent -norequire, 'Temporalio::Workflow::Future';
+    use Scalar::Util ();
+    use Temporalio::Exception::Cancelled ();
+
+    # _new_local(seq, runner, is_abandon, wait) -> a pending LA future.
+    sub _new_local ($class, %args) {
+        my $self = $class->new;
+        $self->{_la_seq}        = $args{seq};
+        $self->{_la_runner}     = $args{runner};
+        Scalar::Util::weaken($self->{_la_runner});
+        $self->{_la_is_abandon} = $args{is_abandon} ? 1 : 0;
+        $self->{_la_wait}       = $args{wait} ? 1 : 0;
+        return $self;
+    }
+
+    # _rebind_seq($newseq) — a backoff re-schedule moved this LA to a new seq;
+    # update the seq the cancel hook will target.
+    sub _rebind_seq ($self, $newseq) {
+        $self->{_la_seq} = $newseq;
+        return $self;
+    }
+
+    # cancel: explicit handle cancellation (spec section 21.2). Delegate to the
+    # runner, which emits the appropriate command and returns whether to resolve
+    # Cancelled now (try_cancel/abandon/backing-off) or PARK (wait). A no-op once
+    # the future is ready.
+    sub cancel ($self) {
+        return $self if $self->is_ready;
+        my $runner = $self->{_la_runner} or return $self;
+        my $resolve_now = $runner->_on_local_activity_cancel(
+            $self, $self->{_la_seq}, $self->{_la_is_abandon}, $self->{_la_wait});
+        if ($resolve_now) {
+            $self->fail(Temporalio::Exception::Cancelled->new(
+                message => 'Local activity cancelled',
+            ));
+        }
+        return $self;
+    }
+
+    # _force_cancel: whole-workflow cancel (the primary-task cancel always raises,
+    # spec section 10.3 cancel chain — unlike an explicit ->cancel it does not
+    # honour wait_cancellation_completed). Emits the cancel command (unless
+    # abandon) and fails the future Cancelled now.
+    sub _force_cancel ($self) {
+        return $self if $self->is_ready;
+        my $runner = $self->{_la_runner};
+        $runner->_force_local_activity_cancel(
+            $self->{_la_seq}, $self->{_la_is_abandon}) if $runner;
+        $self->fail(Temporalio::Exception::Cancelled->new(
+            message => 'Local activity cancelled',
+        ));
+        return $self;
+    }
+}
+
 1;
 
 __END__
@@ -2419,6 +2787,10 @@ Returns the run id of the workflow execution.
 =head2 schedule_activity
 
 Emits a ScheduleActivity command and returns the cancellable awaitable that resolves when the activity is resolved.
+
+=head2 schedule_local_activity
+
+Emits a ScheduleLocalActivity command (sharing the activity seq space and pending-activity map) and returns the single stable cancellable awaitable that resolves on the local activity's terminal outcome (spec section 21). The backoff-to-server-timer retry loop is owned here: a C<backoff> resolution starts a timer and re-schedules under a new seq when it fires, leaving the returned future untouched.
 
 =head2 start_child_workflow
 

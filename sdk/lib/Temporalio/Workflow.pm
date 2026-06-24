@@ -125,6 +125,37 @@ sub start_activity ($activity, %opts) {
     );
 }
 
+# --- local activities (spec section 21) -------------------------------------
+
+# execute_local_activity($activity, %opts) -> Future of the activity result. The
+# local-activity analog of execute_activity: emits a ScheduleLocalActivity
+# command (core runs the activity in-process during the workflow task, with no
+# server round-trip) and returns the Workflow::Future the runner resolves from
+# the matching ResolveActivity job. `await` it for the result (or to have the
+# terminal activity failure raised). %opts are the spec section 21.1 kwargs:
+# args, schedule_to_close_timeout, schedule_to_start_timeout,
+# start_to_close_timeout (seconds), retry_policy, local_retry_threshold
+# (seconds, default 60), cancellation_type (default try_cancel), activity_id,
+# summary, headers. At least one of start_to_close / schedule_to_close MUST be
+# set. The backoff -> server-timer retry loop is runner-owned: the returned
+# Future is a single stable outer future, resolved only on a terminal outcome.
+sub execute_local_activity ($activity, %opts) {
+    return _runner()->schedule_local_activity(
+        activity_type => _activity_type_name($activity),
+        %opts,
+    );
+}
+
+# start_local_activity($activity, %opts) -> the activity handle (a
+# Workflow::Future). Same scheduling as execute_local_activity; returned without
+# awaiting so the caller may start several LAs concurrently before awaiting them.
+sub start_local_activity ($activity, %opts) {
+    return _runner()->schedule_local_activity(
+        activity_type => _activity_type_name($activity),
+        %opts,
+    );
+}
+
 # --- child workflows (spec section 18) --------------------------------------
 
 # start_child_workflow($workflow, %opts) -> (async) the ChildWorkflowHandle,
@@ -320,6 +351,14 @@ Async. Schedules an activity and awaits its result, returning an awaitable resol
 =head2 execute_child_workflow
 
 Async. Starts a child workflow and awaits its result, returning an awaitable resolving to the child's return value (or raising L<Temporalio::Exception::ChildWorkflow> on failure).
+
+=head2 execute_local_activity
+
+Schedules a local activity (run in-process by core during the workflow task, with no server round-trip) and returns its awaitable handle (spec section 21). Await it for the activity's return value, or to have the terminal failure raised. The backoff-to-server-timer retry loop is runner-owned, so the returned handle is a single stable future resolved only on a terminal outcome.
+
+=head2 start_local_activity
+
+Schedules a local activity and returns its awaitable handle without awaiting it, so several local activities can run concurrently before being awaited (spec section 21).
 
 =head2 start_child_workflow
 
