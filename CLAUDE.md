@@ -5,8 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Temporal SDK for Perl, driving the Rust `sdk-core` through its C ABI
-(`temporalio-sdk-core-c-bridge`) via `FFI::Platypus`. **Pre-implementation
-phase**: the contract and roadmap exist; Phase 0 code does not yet.
+(`temporalio-sdk-core-c-bridge`) via `FFI::Platypus`. **Status: v0.1.0
+complete** (Phases 0–5: client, worker, sync/async activities, workflows,
+signals, queries, wait_condition, cancellation, continue-as-new, data
+conversion). **v0.2 (feature parity with the mature SDKs, Phases 6–10) is in
+progress** per spec §18–§31 and plan P6.1–P10.10.
 
 ## Document hierarchy (read in this order)
 
@@ -14,27 +17,65 @@ phase**: the contract and roadmap exist; Phase 0 code does not yet.
    API, behavioral contract, failure modes, and test IDs (`T-*`). The
    prime directive (spec §0): Temporal-spec semantics first, Perl idioms
    second. When anything conflicts with spec.md, spec.md wins.
-2. `plan.md` — 34 TDD steps (P0.1–P5.5) generated from the spec for
-   `/bpe:execute-plan`. Each step is a prompt with RED/GREEN/REFACTOR
-   sub-steps.
+2. `plan.md` — TDD steps generated from the spec for `/bpe:execute-plan`
+   (Phases 0–5 = v0.1, done; Phases 6–10 = v0.2, steps P6.1–P10.10). Each
+   step is a prompt with RED/GREEN/REFACTOR sub-steps.
 3. `todo.md` — per-sub-step checkbox tracker; check items off as completed.
 4. `.ai-sessions/` — session summaries and `lessons.md`. Read the most
-   recent summary before starting work.
+   recent summary before starting work; `lessons.md` holds hard-won
+   toolchain gotchas (proto sub-message blessing, one-`class :isa`-per-file
+   under Future::AsyncAwait on 5.38.2, `Future->call`-vs-`->wrap`, etc.).
+5. `.v0.2-drafts/` (gitignored, scratch) — the fuller per-feature rationale,
+   flagged-decision write-ups, and file:line reference anchors that were
+   condensed into spec §18–§31. Consult the matching draft when a v0.2 spec
+   section is terse.
 
 ## Commands
 
+Deps (Test2::Suite, FFI::Platypus, IO::Async, Future::AsyncAwait,
+Syntax::Keyword::Dynamically, the `Protobuf` dist, both Alien dists) live in
+the `~/perl5` local::lib; `temporal` CLI is at `~/.local/bin`, `cargo` at
+`~/.cargo/bin`, `dzil` at `~/perl5/bin`. The canonical invocations therefore
+need those on `PERL5LIB`/`PATH`:
+
 ```bash
-cd sdk && prove -lj4 t          # full Perl test suite (unit/replay/integration)
-cd sdk && prove -lv t/unit/foo.t  # one test file
-cd sdk && prove -lj4 xt         # author tests (POD coverage etc.)
-cd ext/temporalio-perl-bridge && cargo test   # Rust shim tests
+# full Perl test suite (unit/replay/integration)
+( cd sdk && PERL5LIB=$HOME/perl5/lib/perl5 PATH=$HOME/.local/bin:$PATH prove -lj4 t )
+( cd sdk && PERL5LIB=$HOME/perl5/lib/perl5 prove -lv t/unit/foo.t )   # one file
+( cd sdk && PERL5LIB=$HOME/perl5/lib/perl5 prove -lj4 xt )            # author tests (POD)
+( cd ext/temporalio-perl-bridge && cargo test )   # Rust shim tests
 dzil test                       # per-distribution check (alien-core/, alien-perl-bridge/, sdk/)
 ```
 
-- `ALIEN_TEMPORALIO_CORE_SDK_RUST_PATH=<sdk-rust checkout>` makes
-  `Alien::Temporalio::Core` build from a local tree instead of fetching.
-- Integration tests `skip_all` when the dev server or the env override is
-  unavailable — a green suite offline is expected.
+- `ALIEN_TEMPORALIO_CORE_SDK_RUST_PATH=$HOME/Code/Temporal/sdk-rust` makes
+  `Alien::Temporalio::Core` build from the local tree instead of fetching.
+- Integration tests `skip_all` when the `temporal` dev server (or the env
+  override) is unavailable — a green suite offline is expected.
+
+### Build & memory guard (MANDATORY for any cargo / Alien / dzil build)
+
+This host has **7.8 GiB RAM and no swap**; the kernel OOM killer has killed
+`rustc` (and stray long-lived `claude` sessions) during release builds. For
+EVERY cargo invocation — direct `cargo`, or indirect via `dzil test` / an
+Alien rebuild:
+
+- Set `CARGO_BUILD_JOBS=2` to cap peak memory. On a signal/OOM death, retry
+  once with `CARGO_BUILD_JOBS=1` before declaring failure.
+- Run builds in the **FOREGROUND** with a generous timeout (up to ~10 min).
+  NEVER background a build — a backgrounded build is orphaned and dies when
+  the process exits (this silently lost a build during the v0.1 run). If a
+  foreground command times out, re-run it; cargo resumes incrementally.
+- A full c-bridge / shim release build takes several minutes; that is normal.
+  `sdk-rust/target/` is usually warm, so rebuilds are incremental.
+
+### Shim-touching v0.2 steps (P9.2, P10.3, P10.4, P10.6)
+
+A step that changes the Rust shim (`ext/temporalio-perl-bridge/src/lib.rs`) —
+the log-forwarding 7th trampoline (P10.3), custom metric meters (P10.4),
+custom slot suppliers (P10.6), the Nexus dispatcher (P9.2) — must, after the
+edit: run `cargo test`, regenerate the cbindgen header, and **rebuild the
+installed `Alien::Temporalio::PerlBridge`** so the SDK loads the new symbols
+(the P0.10 precedent). All under the memory guard above.
 
 ## Architecture (big picture)
 
