@@ -68,6 +68,13 @@ class Temporalio::Workflow::Runner {
     # workflow execution's task queue). The replay harness leaves it undef.
     field $task_queue :param = undef;
 
+    # Eager activity dispatch (spec section 23.2): the worker-level workflow-side
+    # flag. When true, every ScheduleActivity command sets do_not_eagerly_execute
+    # so core does not try to run the activity eagerly on the local worker
+    # (MUST-match sdk-python _workflow_instance.py do_not_eagerly_execute). The
+    # worker injects it; the replay harness exposes it as a constructor kwarg.
+    field $disable_eager_activity_execution :param = 0;
+
     # Worker-level workflow_failure_exception_types (spec section 10.3 step 6 /
     # T-wf-15c): an arrayref of class names. A NON-Temporal exception escaping
     # :Run fails the WORKFLOW (FailWorkflowExecution) only when its class is one
@@ -384,6 +391,11 @@ class Temporalio::Workflow::Runner {
             # try_cancel = 0).
             cancellation_type =>
                 _cancellation_type_number($opts{cancellation_type}),
+            # Eager activity dispatch (spec section 23.2): suppress eager
+            # execution on this activity when the worker disabled it. Defaults to
+            # false (eager allowed); MUST-match sdk-python do_not_eagerly_execute.
+            ($disable_eager_activity_execution
+                ? (do_not_eagerly_execute => 1) : ()),
         );
 
         # The four timeouts: seconds -> google.protobuf.Duration, only when set.

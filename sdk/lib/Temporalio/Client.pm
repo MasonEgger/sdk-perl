@@ -161,6 +161,10 @@ class Temporalio::Client {
             workflow_id            => $workflow_id,
             run_id                 => $response->run_id,
             first_execution_run_id => $response->run_id,
+            # Eager start (spec section 23.1, detect-only): the response carries
+            # an eager_workflow_task message when the server returned the first
+            # workflow task for the shared core client to execute eagerly.
+            eagerly_started        => (defined $response->eager_workflow_task ? 1 : 0),
         );
     }
 

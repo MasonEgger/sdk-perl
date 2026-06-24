@@ -30,6 +30,12 @@ class Temporalio::Test::WorkflowReplay {
     # defaults to a fixed value so external-handle replay tests can assert it.
     field $namespace :param = 'default';
 
+    # Eager activity dispatch (spec section 23.2): the worker-side flag, threaded
+    # to the Runner so a replay test can assert do_not_eagerly_execute on the
+    # emitted ScheduleActivity command (T-eager-6). Defaults to a worker with
+    # eager activity execution enabled.
+    field $disable_eager_activity_execution :param = 0;
+
     # The per-run Runner. Created lazily on the first push_activation so the
     # run_id from the activation seeds it (one harness drives one run, like
     # Python's WorkflowReplayer over a single run).
@@ -69,6 +75,7 @@ class Temporalio::Test::WorkflowReplay {
             workflow_failure_exception_types => $workflow_failure_exception_types,
             nondeterminism_as_workflow_fail  => $nondeterminism_as_workflow_fail,
             namespace                        => $namespace,
+            disable_eager_activity_execution => $disable_eager_activity_execution,
         );
 
         my $completion = $runner->process_activation($activation);

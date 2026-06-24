@@ -33,6 +33,10 @@ class Temporalio::Worker::WorkflowDispatcher {
     # carry the correct NamespacedWorkflowExecution namespace (spec section 20).
     field $namespace :param = 'default';
 
+    # Eager activity dispatch (spec section 23.2): the workflow-side flag,
+    # handed to each Runner so scheduled activities set do_not_eagerly_execute.
+    field $disable_eager_activity_execution :param = 0;
+
     # A coderef ($completion_bytes) -> Future: sends the serialized
     # WorkflowActivationCompletion to core (worker_complete_workflow_activation
     # over the callback bridge). Injectable so unit tests capture completions
@@ -153,6 +157,7 @@ class Temporalio::Worker::WorkflowDispatcher {
             failure_converter => $data_converter->failure_converter,
             task_queue        => $task_queue,
             namespace         => $namespace,
+            disable_eager_activity_execution => $disable_eager_activity_execution,
         );
         $runners{$run_id} = $runner;
         return $runner;

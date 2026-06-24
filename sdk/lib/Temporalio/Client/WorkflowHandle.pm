@@ -30,12 +30,21 @@ class Temporalio::Client::WorkflowHandle {
     field $first_execution_run_id :param = undef;
     field $result_run_id          :param = undef;
 
+    # Eager start (spec section 23.1, detect-only): true when the
+    # StartWorkflowExecutionResponse carried an eager_workflow_task (the server
+    # returned the first workflow task for the shared core client to execute
+    # in-process). Read-only — the lang layer never routes the embedded task;
+    # the Rust core owns that dispatch. False when eager start was not requested
+    # or the server has it disabled.
+    field $eagerly_started        :param = 0;
+
     # Explicit readers (field :reader needs perl 5.40+; floor is 5.38).
     method client                 { $client }
     method workflow_id            { $workflow_id }
     method run_id                 { $run_id }
     method first_execution_run_id { $first_execution_run_id }
     method result_run_id          { $result_run_id }
+    method eagerly_started        { $eagerly_started }
 
     # result(follow_runs => 1, ...) — async (spec section 7.6, MUST match the
     # reference SDK terminal-event decision table — verified against sdk-python
@@ -508,6 +517,14 @@ any RPC. C<%opts> also accepts an explicit C<update_id> (default: a fresh UUID).
 =head2 client
 
 Accessor returning the C<client> value.
+
+=head2 eagerly_started
+
+Boolean accessor (spec section 23.1, eager start, detect-only): true when the
+C<StartWorkflowExecutionResponse> carried an C<eager_workflow_task> (the server
+returned the first workflow task for the shared core client to execute
+in-process). Read-only; the language layer never routes the embedded task. False
+when eager start was not requested or the server has it disabled.
 
 =head2 first_execution_run_id
 

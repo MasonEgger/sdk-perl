@@ -54,6 +54,18 @@ class Temporalio::Worker {
     field $workflow_failure_exception_types    :param = [];
     field $nondeterminism_as_workflow_fail     :param = 0;
 
+    # Eager activity dispatch (spec section 23.2). Two distinct knobs:
+    #   no_remote_activities (default 0): a BRIDGE WorkerOptions field — the
+    #     bridge enable_remote_activities is !no_remote_activities. When true,
+    #     an eager activity declined for lack of remote slots cannot fall back to
+    #     remote scheduling and the activity times out schedule-to-start.
+    #   disable_eager_activity_execution (default 0): a WORKFLOW-side flag that
+    #     suppresses the eager-execution request on the schedule_activity command
+    #     (do_not_eagerly_execute). It threads worker -> WorkflowDispatcher ->
+    #     Runner -> ScheduleActivity, NOT the bridge WorkerOptions.
+    field $no_remote_activities                :param = 0;
+    field $disable_eager_activity_execution    :param = 0;
+
     # IO::Async::Function fork-pool size for sync activities (spec section 8.1
     # / 9.4). Only the count matters Perl-side; sync activities run in a child.
     field $sync_activity_workers               :param = 4;
@@ -114,9 +126,11 @@ class Temporalio::Worker {
             nexus_task_slots     => 100,
 
             # task_types: workflows + remote activities only (spec 8.1).
+            # no_remote_activities (spec 23.2) flips enable_remote_activities;
+            # otherwise remote activities are enabled.
             enable_workflows         => 1,
             enable_local_activities  => 0,
-            enable_remote_activities => 1,
+            enable_remote_activities => $no_remote_activities ? 0 : 1,
             enable_nexus             => 0,
 
             sticky_queue_schedule_to_start_timeout_millis =>
@@ -312,6 +326,9 @@ class Temporalio::Worker {
             data_converter => $client->data_converter,
             task_queue     => $task_queue,
             namespace      => $client->namespace,
+            # Eager activity dispatch (spec section 23.2): the workflow-side flag
+            # that suppresses do_not_eagerly_execute on scheduled activities.
+            disable_eager_activity_execution => $disable_eager_activity_execution,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_workflow_activation($completion_bytes);
             },
@@ -530,6 +547,15 @@ Time-valued kwargs are seconds Perl-side and packed as milliseconds.
 Defaults match the reference SDKs (sdk-ruby C<worker.rb>): cache 1000, slots
 100, sticky 10s, heartbeat throttle 60s/30s, graceful shutdown 0s, pollers 5,
 nonsticky-to-sticky ratio 0.2.
+
+Eager activity dispatch (spec section 23.2) has two distinct knobs.
+C<no_remote_activities> (default 0) is a bridge WorkerOptions field: the bridge
+C<enable_remote_activities> is its negation, so a true value gives the worker no
+remote activity poller (an eager activity declined for slots then times out
+schedule-to-start). C<disable_eager_activity_execution> (default 0) is a
+workflow-side flag threaded through the workflow dispatcher into each
+L<Temporalio::Workflow::Runner>, where it sets C<do_not_eagerly_execute> on every
+emitted C<ScheduleActivity> command.
 
 C<validate> (spec 8.2 step 2) lazily creates the core worker via
 C<temporal_core_worker_new> (raising L<Temporalio::Exception::Bridge> on

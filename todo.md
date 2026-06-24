@@ -315,9 +315,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P7.2.3 Verify: prove -lj4 t
 
 ### P7.3 Eager start (spec §23)
-- [ ] P7.3.1 RED: sdk/t/unit/eager.t + sdk/t/integration/eager.t (T-eager-1..6)
-- [ ] P7.3.2 GREEN: WorkflowHandle->eagerly_started; Worker disable_eager_activity_execution + no_remote_activities; thread eager flag through schedule_activity
-- [ ] P7.3.3 Verify: prove -lj4 t
+- [x] P7.3.1 RED: sdk/t/unit/eager.t + sdk/t/integration/eager.t (T-eager-1..6)
+- [x] P7.3.2 GREEN: WorkflowHandle->eagerly_started; Worker disable_eager_activity_execution + no_remote_activities; thread eager flag through schedule_activity
+- [x] P7.3.3 Verify: prove -lj4 t
 
 ### P7.4 In-workflow upsert search-attributes & memo (spec §24)
 - [ ] P7.4.1 RED: sdk/t/replay/upsert.t (T-upsert-1..9) + WfDef fixtures
