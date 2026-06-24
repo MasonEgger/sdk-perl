@@ -288,11 +288,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P6.1.6 Verify: prove -lj4 t
 
 ### P6.2 Workflow updates (spec §19)
-- [ ] P6.2.1 RED: sdk/t/replay/updates.t (T-upd-1..11) + WfDef fixtures
-- [ ] P6.2.2 GREEN: do_update dispatch + validator guard + tracked handler + UpdateResponse builder + buffer-then-drain; relax the v0.1 hard completion-gate to warn-and-complete + expose all_handlers_finished (M1) + update the affected v0.1 signal test
-- [ ] P6.2.3 RED: sdk/t/integration/updates.t (T-cli-update-1..7)
-- [ ] P6.2.4 GREEN: WorkflowHandle->execute_update/start_update + WorkflowUpdateHandle + Exception::WorkflowUpdateFailed
-- [ ] P6.2.5 Verify: prove -lj4 t
+- [x] P6.2.1 RED: sdk/t/replay/updates.t (T-upd-1..11) + WfDef fixtures
+- [x] P6.2.2 GREEN: do_update dispatch + validator guard + tracked handler + UpdateResponse builder + buffer-then-drain; relax the v0.1 hard completion-gate to warn-and-complete + expose all_handlers_finished (M1) + update the affected v0.1 signal test
+- [x] P6.2.3 RED: sdk/t/integration/updates.t (T-cli-update-1..7)
+- [x] P6.2.4 GREEN: WorkflowHandle->execute_update/start_update + WorkflowUpdateHandle + Exception::WorkflowUpdateFailed
+- [x] P6.2.5 Verify: prove -lj4 t
 
 ### P6.3 External workflow handles (spec §20)
 - [ ] P6.3.1 RED: sdk/t/replay/external_workflow.t (T-ext-1..9) + WfDef fixtures

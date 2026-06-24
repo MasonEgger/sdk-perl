@@ -168,6 +168,36 @@ sub signal_external_workflow_execution ($fields) {
     });
 }
 
+# update_response { protocol_instance_id, accepted|rejected|completed } —
+# answers a DoUpdate job (spec section 19.2; MUST-match the UpdateResponse proto,
+# workflow_commands.proto:341-355). An accepted update emits two of these (one
+# `accepted` then one `completed`/`rejected`, possibly across activations); a
+# pre-acceptance rejection emits a single `rejected`. Exactly one of the three
+# response arms is set: `accepted` is a google.protobuf.Empty, `rejected`
+# carries an already-converted temporal.api.failure.v1.Failure, `completed`
+# carries the result temporal.api.common.v1.Payload (or undef for a void return).
+sub update_response ($protocol_instance_id, %parts) {
+    my %variant;
+    if (exists $parts{accepted}) {
+        $variant{accepted} = {};   # google.protobuf.Empty
+    }
+    elsif (exists $parts{rejected}) {
+        $variant{rejected} = $parts{rejected};
+    }
+    else {
+        # completed: the handler's result payload. The runner always passes a
+        # converted Payload here (the payload converter yields one even for a
+        # void/undef handler return), so the `completed` oneof arm is selected.
+        $variant{completed} = $parts{completed};
+    }
+    return _command_class()->new({
+        update_response => {
+            protocol_instance_id => $protocol_instance_id,
+            %variant,
+        },
+    });
+}
+
 # set_patch_marker { patch_id, deprecated } — emitted the first time the
 # workflow body calls Temporalio::Workflow::patched($id) (or deprecate_patch)
 # and the patch is in use (spec section 10.3 step / versioning; MUST-match
@@ -302,6 +332,17 @@ handler's return value converted to a C<temporal.api.common.v1.Payload>, or
 omitted for a void return) or C<< failure => $failure >> for a dying handler
 (an already-converted C<temporal.api.failure.v1.Failure>). A query failure is
 delivered as this command, never as a workflow or task failure.
+
+=item C<update_response($protocol_instance_id, %parts)>
+
+C<UpdateResponse { protocol_instance_id, accepted|rejected|completed }> —
+answers a C<DoUpdate> activation job (spec section 19). Pass C<< accepted => 1 >>
+for the acceptance phase, C<< rejected => $failure >> for a validator/handler
+rejection (an already-converted C<temporal.api.failure.v1.Failure>), or
+C<< completed => $payload >> for a successful handler result (a
+C<temporal.api.common.v1.Payload>). An accepted update emits two of these (one
+C<accepted>, then one C<completed>/C<rejected>); a pre-acceptance rejection emits
+a single C<rejected>.
 
 =back
 

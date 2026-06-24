@@ -177,6 +177,27 @@ class Temporalio::Workflow::Runner {
     # routes it (task-fail by default, workflow-fail when configured — T-wf-13).
     field $nondeterminism_error;
 
+    # A workflow TASK failure detected while applying a job (spec section 19.2):
+    # a read-only-context violation by a validator (a validator that issued a
+    # command or otherwise tried to mutate state). Unlike a non-determinism
+    # error this is recorded synchronously inside _apply_do_update and routed by
+    # the outcome decision table as a task failure. Only the first is kept.
+    field $current_activation_error;
+
+    # Read-only guard depth (spec section 19.2 / sdk-python _as_read_only):
+    # while > 0 the runner is executing a synchronous read-only block (an update
+    # validator), so any command-emitting call (_emit_command) MUST throw rather
+    # than buffer a command. A counter (not a bool) so nesting is safe.
+    field $read_only_depth = 0;
+
+    # DoUpdate jobs delivered before the instance exists (spec section 19.2):
+    # an update arriving in the init activation (ordered before
+    # InitializeWorkflow) has no instance to dispatch against yet, so it is
+    # buffered here in arrival order and re-applied right after _apply_initialize
+    # creates the instance (mirrors %buffered_signals, but updates are NEVER
+    # buffered for a missing handler — only for a missing instance).
+    field @buffered_updates;
+
     # Signals delivered before a matching handler exists (spec section 10.3
     # T-wf-3 QUEUEING; MUST-match sdk-python self._buffered_signals): a hash
     # keyed by signal name -> arrayref of SignalWorkflow jobs awaiting a handler.
@@ -294,6 +315,7 @@ class Temporalio::Workflow::Runner {
     #   start_to_close_timeout, heartbeat_timeout (all seconds), retry_policy
     #   (Temporalio::Common::RetryPolicy), cancellation_type (string), headers.
     method schedule_activity (%opts) {
+        $self->_assert_writable('execute_activity/start_activity');
         my $activity_type = $opts{activity_type}
             // die "Temporalio::Workflow::Runner: schedule_activity needs an "
                  . "activity_type";
@@ -394,6 +416,7 @@ class Temporalio::Workflow::Runner {
     #   retry_policy (Temporalio::Common::RetryPolicy), cron_schedule, memo,
     #   search_attributes, headers.
     method start_child_workflow (%opts) {
+        $self->_assert_writable('start_child_workflow/execute_child_workflow');
         my $workflow_type = $opts{workflow_type}
             // die "Temporalio::Workflow::Runner: start_child_workflow needs a "
                  . "workflow_type";
@@ -583,6 +606,7 @@ class Temporalio::Workflow::Runner {
     # command (same seq) and resolves the Future as Temporalio::Exception::
     # Cancelled (MUST-match sdk-ruby _apply_cancel_command / CanceledError).
     method start_timer ($seconds) {
+        $self->_assert_writable('start_timer/sleep');
         my $seq = ++$timer_seq_counter;   # timer seq space, from 1.
 
         push @commands, Temporalio::Workflow::Commands::start_timer({
@@ -822,6 +846,9 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'query_workflow') {
             return $self->_apply_query_workflow($job->query_workflow);
         }
+        if ($variant eq 'do_update') {
+            return $self->_apply_do_update($job->do_update);
+        }
         # RemoveFromCache (handled by the dispatcher fast path) and friends land
         # in later phases.
         warn "Temporalio::Workflow::Runner: ignoring unhandled activation job"
@@ -834,7 +861,8 @@ class Temporalio::Workflow::Runner {
     # returned arrayref is applied as a unit with a pump between sets. Within a
     # set, activation order is preserved.
     #   set 0: NotifyHasPatch
-    #   set 1: SignalWorkflow (+ updates in a later phase)
+    #   set 1: SignalWorkflow + DoUpdate (spec section 19.2 — updates sort with
+    #          signals, applied before InitializeWorkflow, in arrival order)
     #   set 2: every other non-query job (incl. InitializeWorkflow)
     #   set 3: QueryWorkflow (last; P4.2)
     method _ordered_job_sets ($activation) {
@@ -843,6 +871,7 @@ class Temporalio::Workflow::Runner {
             my $variant = $job->which_variant // '';
             if    ($variant eq 'notify_has_patch') { push $sets[0]->@*, $job }
             elsif ($variant eq 'signal_workflow')  { push $sets[1]->@*, $job }
+            elsif ($variant eq 'do_update')        { push $sets[1]->@*, $job }
             elsif ($variant eq 'query_workflow')   { push $sets[3]->@*, $job }
             else                                   { push $sets[2]->@*, $job }
         }
@@ -871,6 +900,10 @@ class Temporalio::Workflow::Runner {
         # so a drained signal handler's state mutation is visible to the run
         # continuation when it next makes progress.
         $self->_drain_buffered_signals;
+        # Drain any updates buffered before the instance existed (spec section
+        # 19.2): a DoUpdate ordered before InitializeWorkflow in the init
+        # activation is dispatched here, after the buffered signals.
+        $self->_drain_buffered_updates;
         return;
     }
 
@@ -1267,6 +1300,198 @@ class Temporalio::Workflow::Runner {
     # introspection helper — sorted for a stable view.
     method _buffered_signal_names { return [ sort keys %buffered_signals ] }
 
+    # DoUpdate { id, protocol_instance_id, name, input, run_validator } — run an
+    # update handler (spec section 19.2; MUST-match sdk-python _apply_do_update).
+    # An update is a TWO-PHASE job: a synchronous read-only validation phase then
+    # an asynchronous tracked execution phase.
+    #
+    #   1. No instance yet (the handler is a METHOD): buffer for the post-init
+    #      drain (mirrors a pre-instance signal, but updates never buffer for a
+    #      missing handler — only for a missing instance).
+    #   2. Lookup defs->{updates}{name} then defs->{dynamic}{update}. No handler
+    #      on a live instance -> immediate UpdateResponse.rejected (no buffering).
+    #   3. Validation (sync, read-only): only when run_validator AND a validator
+    #      is registered. Run it under the read-only guard. A throw -> a single
+    #      UpdateResponse.rejected (converted failure), no acceptance. A read-only
+    #      violation (the validator issued a command) -> a workflow TASK failure.
+    #   4. Acceptance: emit UpdateResponse.accepted, then invoke the handler via
+    #      Future->call (sync or async). A returned value -> UpdateResponse.completed
+    #      with the encoded result. A Temporal-failure-type throw -> a post-accept
+    #      UpdateResponse.rejected. Any other die -> a workflow TASK failure.
+    #      An async handler's Future is tracked in %in_progress_handlers.
+    method _apply_do_update ($job) {
+        my $name                 = $job->name // '';
+        my $protocol_instance_id = $job->protocol_instance_id // '';
+
+        # No instance yet: buffer for the post-init drain.
+        if (!defined $instance) {
+            push @buffered_updates, $job;
+            return;
+        }
+
+        my ($handler, $is_dynamic) = $self->_resolve_update_handler($name);
+        if (!defined $handler) {
+            # Unknown name, no dynamic handler -> immediate rejection (NOT
+            # buffered indefinitely, unlike signals — spec section 19.2 step 2).
+            my $known = join ' ',
+                sort keys $workflow_class->_workflow_defs->{updates}->%*;
+            my $err = Temporalio::Exception->new(
+                message => "Update handler for '$name' expected but not found, "
+                         . "and there is no dynamic handler. known updates: "
+                         . "[$known]",
+            );
+            push @commands, Temporalio::Workflow::Commands::update_response(
+                $protocol_instance_id,
+                rejected => $failure_converter->to_failure($err, $payload_converter),
+            );
+            return;
+        }
+
+        my @args = map { $payload_converter->from_payload($_) }
+            (($job->input // [])->@*);
+
+        # --- validation phase (sync, read-only) ------------------------------
+        # A named handler with a registered validator is validated only when the
+        # job asks (run_validator is false on replay). A dynamic handler is never
+        # validated (there is no dynamic validator).
+        if ($job->run_validator && !$is_dynamic) {
+            my $validator = $workflow_class->_workflow_defs->{validators}{$name};
+            if (defined $validator) {
+                my $result = $self->_run_update_validator($validator, \@args);
+                # A read-only-context violation is a workflow TASK failure: the
+                # error is stashed and the outcome table routes it (no
+                # UpdateResponse emitted).
+                return if $result->{task_failure};
+                # A validator throw is an update REJECTION (single rejected,
+                # no acceptance).
+                if (defined $result->{rejected}) {
+                    push @commands,
+                        Temporalio::Workflow::Commands::update_response(
+                            $protocol_instance_id,
+                            rejected => $result->{rejected},
+                        );
+                    return;
+                }
+            }
+        }
+
+        # --- acceptance + execution phase (async, tracked) -------------------
+        push @commands, Temporalio::Workflow::Commands::update_response(
+            $protocol_instance_id, accepted => 1);
+
+        my $future = Future->call(sub {
+            return Future->wrap(
+                $is_dynamic
+                    ? $instance->$handler($name, @args)
+                    : $instance->$handler(@args)
+            );
+        });
+
+        # When the handler Future is ready now (a synchronous handler), settle
+        # the update in this activation. Otherwise track it and settle when it
+        # becomes ready (a later activation re-pumps and the on_ready fires).
+        my $settle = sub {
+            $self->_settle_update($protocol_instance_id, $future);
+        };
+        if ($future->is_ready) {
+            $settle->();
+        }
+        else {
+            my $id = ++$handler_seq;
+            $in_progress_handlers{$id} = $future;
+            $future->on_ready(sub {
+                delete $in_progress_handlers{$id};
+                $settle->();
+            });
+        }
+        return;
+    }
+
+    # Resolve an update handler by name (spec section 19.2): the named :Update
+    # handler if one matches, else the dynamic catch-all if registered. Returns
+    # ($methodref, $is_dynamic) or (undef). MUST-match sdk-python
+    # `self._updates.get(name) or self._updates.get(None)`.
+    method _resolve_update_handler ($name) {
+        my $defs = $workflow_class->_workflow_defs;
+        if (my $named = $defs->{updates}{$name}) {
+            return ($named, 0);
+        }
+        if (my $dynamic = $defs->{dynamic}{update}) {
+            return ($dynamic, 1);
+        }
+        return (undef);
+    }
+
+    # Run a sync update validator under the read-only guard (spec section 19.2
+    # step 3). Returns a hashref:
+    #   { rejected => $failure_proto }  — the validator threw a normal failure
+    #   { task_failure => 1 }           — the validator violated read-only
+    #   {}                              — the validator passed (accept)
+    # A read-only violation (the validator issued a command) is routed as a
+    # workflow TASK failure via $current_activation_error.
+    method _run_update_validator ($validator, $args) {
+        my $future = Future->call(sub {
+            dynamically $read_only_depth = $read_only_depth + 1;
+            return Future->wrap($instance->$validator(@$args));
+        });
+        if (my @failure = $future->failure) {
+            my $err = $failure[0];
+            # A read-only-context violation is a task failure, NOT a rejection.
+            if (Scalar::Util::blessed($err)
+                && $err->isa('Temporalio::Exception')
+                && ($err->message // '') =~ /read-only context/)
+            {
+                $current_activation_error //= $err;
+                return { task_failure => 1 };
+            }
+            return {
+                rejected =>
+                    $failure_converter->to_failure($err, $payload_converter),
+            };
+        }
+        return {};
+    }
+
+    # Settle an accepted update once its handler Future is ready (spec section
+    # 19.2 step 4): a returned value -> UpdateResponse.completed; a Temporal
+    # failure-type throw -> UpdateResponse.rejected (post-accept); any other die
+    # -> a workflow TASK failure.
+    method _settle_update ($protocol_instance_id, $future) {
+        if (my @failure = $future->failure) {
+            my $err = $failure[0];
+            if ($self->_is_workflow_failure_exception($err)) {
+                push @commands, Temporalio::Workflow::Commands::update_response(
+                    $protocol_instance_id,
+                    rejected =>
+                        $failure_converter->to_failure($err, $payload_converter),
+                );
+            }
+            else {
+                # A plain die post-acceptance is a workflow TASK failure.
+                $current_activation_error //= $err;
+            }
+            return;
+        }
+        my $result  = ($future->result)[0];
+        my $payload = $payload_converter->to_payload($result);
+        push @commands, Temporalio::Workflow::Commands::update_response(
+            $protocol_instance_id,
+            completed => $payload,
+        );
+        return;
+    }
+
+    # Drain the buffered-update queue (spec section 19.2): updates buffered
+    # before the instance existed are re-applied in arrival order after
+    # _apply_initialize creates the instance (mirrors _drain_buffered_signals).
+    method _drain_buffered_updates {
+        return unless defined $instance;
+        my @jobs = @buffered_updates;
+        @buffered_updates = ();
+        $self->_apply_do_update($_) for @jobs;
+        return;
+    }
+
     # QueryWorkflow { query_id, query_type, arguments } — run the matching
     # :Query handler and emit a RespondToQuery command (spec section 10.3;
     # MUST-match sdk-python _apply_query_workflow). Queries are SYNCHRONOUS in
@@ -1349,11 +1574,28 @@ class Temporalio::Workflow::Runner {
         return (undef);
     }
 
-    # True when no signal handler is still in-flight (spec section 10.3 ASYNC
-    # HANDLER TRACKING; MUST-match sdk-python workflow_all_handlers_finished).
-    # Gates CompleteWorkflowExecution: the workflow is not considered complete
-    # while a handler Future is pending.
+    # True when no signal/update handler is still in-flight (spec section 10.3 /
+    # 19.2 ASYNC HANDLER TRACKING; MUST-match sdk-python
+    # workflow_all_handlers_finished). Public surface via
+    # Temporalio::Workflow::all_handlers_finished: authors wait_condition on it
+    # to gate completion explicitly. The runner WARNS (it no longer hard-blocks)
+    # when :Run returns with a handler still in-flight (warn-and-complete).
     method _all_handlers_finished { return %in_progress_handlers ? 0 : 1 }
+
+    # Assert the runner is NOT inside a read-only block (spec section 19.2): an
+    # update validator must not issue commands or mutate workflow state. Called
+    # at the head of every command-emitting runner method; inside a validator it
+    # throws a ReadOnlyContext error that _apply_do_update routes to a workflow
+    # TASK failure (NOT an update rejection). MUST-match sdk-python
+    # _as_read_only / ReadOnlyContextError.
+    method _assert_writable ($what) {
+        return if $read_only_depth <= 0;
+        die Temporalio::Exception->new(
+            message => "Temporalio::Workflow::Runner: $what is not allowed in a "
+                     . "read-only context (update validator must not mutate "
+                     . "state or issue commands)",
+        );
+    }
 
     # Stash a non-determinism error (spec section 10.3 / T-wf-13) for the outcome
     # decision table. Built as a Temporalio::Exception::Nondeterminism so the
@@ -1419,20 +1661,29 @@ class Temporalio::Workflow::Runner {
                 : $self->_task_failed_completion($nondeterminism_error);
         }
 
+        # 1b. An activation-level error recorded while applying a job (spec
+        #     section 19.2): a validator that violated the read-only contract, or
+        #     a plain die in an update handler. Routed as a workflow TASK failure
+        #     (the server retries the task), like a non-determinism error.
+        if (defined $current_activation_error) {
+            return $self->_task_failed_completion($current_activation_error);
+        }
+
         if (defined $main_run_future && $main_run_future->is_ready) {
             if (my @failure = $main_run_future->failure) {
                 return $self->_outcome_for_failure($failure[0]);
             }
-            # ASYNC HANDLER TRACKING (spec section 10.3): even when :Run has
-            # returned, the workflow is NOT considered complete while a signal
-            # handler Future is still in-flight. Emit only the buffered commands
-            # this activation; a later activation that resolves the handler
-            # Future re-pumps and then emits CompleteWorkflowExecution. (For
-            # well-behaved workflows the body itself awaits the handler's effect,
-            # so the run Future is not ready first — this gate is the safety net
-            # mirroring sdk-python's all-handlers-finished accounting.)
+            # WARN-AND-COMPLETE (spec section 19.2, corrected v0.2.1): when :Run
+            # returns with a signal/update handler still in-flight, WARN and
+            # complete the workflow anyway, abandoning the handler — parity with
+            # sdk-python (_warn_if_unfinished_handlers) and sdk-ruby. This is NOT
+            # a hard block: authors who want to wait use
+            # wait_condition(\&Temporalio::Workflow::all_handlers_finished).
             unless ($self->_all_handlers_finished) {
-                return $self->_successful_completion;
+                warn "Temporalio::Workflow::Runner: workflow completed with "
+                   . "unfinished in-flight handler(s); their work is abandoned. "
+                   . "Use wait_condition on all_handlers_finished to wait for "
+                   . "them before returning from :Run.\n";
             }
             # Success: the run method returned a value.
             my $result = ($main_run_future->result)[0];

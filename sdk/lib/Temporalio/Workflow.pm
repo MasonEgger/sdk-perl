@@ -190,6 +190,18 @@ sub wait_condition ($predicate, %opts) {
     return _runner()->wait_condition($predicate, %opts);
 }
 
+# --- handler completion gating (spec section 19.2) --------------------------
+
+# all_handlers_finished -> true when no :Signal/:Update handler Future is still
+# in-flight (MUST-match sdk-python workflow.all_handlers_finished). The
+# recommended Temporal pattern is to gate :Run completion explicitly with
+# `await wait_condition(\&Temporalio::Workflow::all_handlers_finished)` before
+# returning, since the runner otherwise warns-and-completes (abandoning any
+# in-flight handler).
+sub all_handlers_finished {
+    return _runner()->_all_handlers_finished;
+}
+
 # --- continue-as-new (spec section 10.2 / 10.3 step 6) ----------------------
 
 # continue_as_new($workflow_or_string, %opts) — request that the current run
@@ -270,6 +282,13 @@ up the active runner and raises L<Temporalio::Exception::Workflow::NoRunner> whe
 called outside a workflow body.
 
 =head1 METHODS
+
+=head2 all_handlers_finished
+
+Returns true when no C<:Signal>/C<:Update> handler is still in-flight. The
+recommended pattern is to gate C<:Run> completion with
+C<< await wait_condition(\&Temporalio::Workflow::all_handlers_finished) >>; the
+runner otherwise warns and completes, abandoning any in-flight handler.
 
 =head2 continue_as_new
 

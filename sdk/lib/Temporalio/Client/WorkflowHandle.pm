@@ -266,6 +266,98 @@ class Temporalio::Client::WorkflowHandle {
         return await $self->_decode_first_payload($response->query_result);
     }
 
+    # temporal.api.enums.v1.UpdateWorkflowExecutionLifecycleStage (spec section
+    # 19.2): ADMITTED == 1, ACCEPTED == 2, COMPLETED == 3. The supported
+    # wait_for_stage strings map to ACCEPTED/COMPLETED; 'admitted' is rejected
+    # with Argument (not a supported wait stage).
+    my %WAIT_STAGE = (
+        accepted  => 2,
+        completed => 3,
+    );
+
+    # execute_update($name, \@args, %opts) — async (spec section 19.1). Sugar
+    # over start_update(wait_for_stage => 'completed') + ->result: starts the
+    # update, waits for it to complete, and returns the decoded result (or
+    # raises Temporalio::Exception::WorkflowUpdateFailed on a failed outcome).
+    async method execute_update ($name, $args = [], %opts) {
+        my $update_handle = await $self->start_update(
+            $name, $args, %opts, wait_for_stage => 'completed');
+        return await $update_handle->result;
+    }
+
+    # start_update($name, \@args, wait_for_stage => 'accepted'|'completed', %opts)
+    # — async (spec section 19.1/19.2). Builds the UpdateWorkflowExecutionRequest
+    # and calls UpdateWorkflowExecution in a retry loop until the response stage
+    # is at least ACCEPTED (durability), then returns a
+    # Temporalio::Client::WorkflowUpdateHandle seeded with the ref and any
+    # returned outcome. 'admitted' is rejected with Argument before any RPC.
+    # %opts: update_id (default a fresh UUID), wait_for_stage.
+    async method start_update ($name, $args = [], %opts) {
+        Temporalio::Exception::Argument->throw(
+            message => 'start_update requires an update name (string)')
+            unless defined $name && !ref $name && length $name;
+
+        my $stage_name = delete $opts{wait_for_stage} // 'accepted';
+        if ($stage_name eq 'admitted') {
+            Temporalio::Exception::Argument->throw(
+                message => "wait_for_stage => 'admitted' is not supported; use "
+                         . "'accepted' or 'completed'");
+        }
+        my $wait_stage = $WAIT_STAGE{$stage_name}
+            // Temporalio::Exception::Argument->throw(
+                message => "unknown wait_for_stage '$stage_name' (expected "
+                         . "'accepted' or 'completed')");
+
+        my $update_id = delete $opts{update_id} // Temporalio::Client::_new_uuid();
+
+        my $WaitPolicy = _resolve('temporal.api.update.v1.WaitPolicy');
+        my $Meta       = _resolve('temporal.api.update.v1.Meta');
+        my $Input      = _resolve('temporal.api.update.v1.Input');
+        my $Request    = _resolve('temporal.api.update.v1.Request');
+
+        my %input_fields = (name => $name);
+        if (@$args) {
+            $input_fields{args} = await $self->_encode_payloads($args);
+        }
+
+        my $request = _resolve(
+            'temporal.api.workflowservice.v1.UpdateWorkflowExecutionRequest')
+            ->new({
+                namespace              => $client->namespace,
+                workflow_execution     => $self->_execution_message,
+                first_execution_run_id => $first_execution_run_id // '',
+                wait_policy => $WaitPolicy->new({ lifecycle_stage => $wait_stage }),
+                request     => $Request->new({
+                    meta  => $Meta->new({
+                        update_id => $update_id,
+                        identity  => $client->identity,
+                    }),
+                    input => $Input->new(\%input_fields),
+                }),
+            });
+
+        # Retry until the update is AT LEAST accepted (spec section 19.2): the
+        # server may return early with UNSPECIFIED (0) before the worker has
+        # accepted; re-issue the same request (idempotent on update_id) until the
+        # reported stage is >= ACCEPTED.
+        my $response;
+        while (1) {
+            $response =
+                await $client->_rpc_call('UpdateWorkflowExecution', $request);
+            my $stage = $response->stage // 0;
+            last if $stage >= $WAIT_STAGE{accepted};
+        }
+
+        require Temporalio::Client::WorkflowUpdateHandle;
+        return Temporalio::Client::WorkflowUpdateHandle->new(
+            client        => $client,
+            workflow_id   => $workflow_id,
+            run_id        => $run_id,
+            update_id     => $update_id,
+            known_outcome => $response->outcome,
+        );
+    }
+
     # fetch_history_events(...) — returns an async iterator over the workflow's
     # history events (spec section 7.6 / sdk-python _workflow.py
     # fetch_history_events 417-456). Defaults to ALL_EVENT, no waiting.
@@ -396,6 +488,20 @@ C<details> through the data converter. C<signal> and C<query> send the named
 signal/query with converter-encoded arguments; a server-rejected query
 raises L<Temporalio::Exception::QueryRejected>. C<fetch_history_events>
 returns an async iterator over the workflow's history events.
+
+=head2 execute_update / start_update
+
+C<< await $handle->execute_update($name, \@args, %opts) >> starts a workflow
+update, waits for it to complete, and returns the decoded result (sugar over
+C<start_update(wait_for_stage =E<gt> 'completed')> followed by C<< ->result >>).
+A failed outcome raises L<Temporalio::Exception::WorkflowUpdateFailed>.
+
+C<< await $handle->start_update($name, \@args, wait_for_stage =E<gt> 'accepted', %opts) >>
+sends C<UpdateWorkflowExecution> (retrying until the update is at least
+accepted) and returns a L<Temporalio::Client::WorkflowUpdateHandle>. The
+C<wait_for_stage> option maps C<'accepted'> and C<'completed'> to the update
+lifecycle stages; C<'admitted'> raises L<Temporalio::Exception::Argument> before
+any RPC. C<%opts> also accepts an explicit C<update_id> (default: a fresh UUID).
 
 =head1 METHODS
 
