@@ -20,10 +20,17 @@ use Temporalio::Client::RetryConfig ();
 use Temporalio::Client::TlsConfig ();
 use Temporalio::Client::WorkflowHandle ();
 use Temporalio::Client::WorkflowExecutionIterator ();
+use Temporalio::Client::ScheduleHandle ();
+use Temporalio::Client::ScheduleListIterator ();
 use Temporalio::Common::TypedSearchAttributes ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::RpcError ();
+use Temporalio::Exception::ScheduleAlreadyRunning ();
+use Temporalio::Exception::WorkflowAlreadyStarted ();
+use Temporalio::Schedule::Schedule ();
+use Temporalio::Schedule::Policy ();
+use Temporalio::Schedule::Action ();
 use Temporalio::Runtime ();
 use Temporalio::SDK ();
 
@@ -226,6 +233,126 @@ class Temporalio::Client {
         };
     }
 
+    # get_schedule_handle($id) — returns a Temporalio::Client::ScheduleHandle
+    # without an RPC (spec section 25.1).
+    method get_schedule_handle ($id) {
+        Temporalio::Exception::Argument->throw(
+            message => 'get_schedule_handle requires a schedule id')
+            unless defined $id && length $id;
+        return Temporalio::Client::ScheduleHandle->new(client => $self, id => $id);
+    }
+
+    # create_schedule($id, $schedule, %opts) — async (spec section 25.2).
+    # Validates the limited/remaining-actions invariant before any RPC, builds
+    # the optional initial_patch (only when trigger_immediately or backfills),
+    # issues CreateSchedule, re-maps an ALREADY_EXISTS to
+    # ScheduleAlreadyRunning, and returns a handle.
+    #   %opts: trigger_immediately => 0, backfills => [], memo => undef,
+    #          search_attributes => undef
+    async method create_schedule ($id, $schedule, %opts) {
+        my $trigger   = delete $opts{trigger_immediately} // 0;
+        my $backfills = delete $opts{backfills} // [];
+        my $memo      = delete $opts{memo};
+        my $sa        = delete $opts{search_attributes};
+
+        if (my @unknown = sort keys %opts) {
+            Temporalio::Exception::Argument->throw(
+                message => 'unknown create_schedule option(s): '
+                         . join(', ', @unknown));
+        }
+        Temporalio::Exception::Argument->throw(
+            message => 'create_schedule requires a schedule id')
+            unless defined $id && length $id;
+        Temporalio::Exception::Argument->throw(
+            message => 'create_schedule requires a Temporalio::Schedule::Schedule')
+            unless Scalar::Util::blessed($schedule)
+                && $schedule->isa('Temporalio::Schedule::Schedule');
+
+        # limited_actions must be true exactly when remaining_actions is
+        # non-zero (sdk-python _impl create_schedule).
+        my $state     = $schedule->state;
+        my $limited   = $state->limited_actions;
+        my $remaining = $state->remaining_actions // 0;
+        if ($limited && !$remaining) {
+            Temporalio::Exception::Argument->throw(
+                message => 'limited_actions requires a non-zero '
+                         . 'remaining_actions');
+        }
+        if (!$limited && $remaining) {
+            Temporalio::Exception::Argument->throw(
+                message => 'remaining_actions requires limited_actions to be '
+                         . 'true');
+        }
+
+        my %fields = (
+            namespace   => $namespace,
+            schedule_id => $id,
+            schedule    => await $schedule->_to_proto($self),
+            identity    => $identity,
+            request_id  => _new_uuid(),
+        );
+
+        # initial_patch only when triggering immediately or backfilling; the
+        # trigger overlap comes from the schedule's OWN policy.
+        if ($trigger || @$backfills) {
+            my $Patch = Temporalio::Core::Proto::resolve(
+                'temporal.api.schedule.v1.SchedulePatch');
+            my %patch;
+            if ($trigger) {
+                my $Trigger = Temporalio::Core::Proto::resolve(
+                    'temporal.api.schedule.v1.TriggerImmediatelyRequest');
+                $patch{trigger_immediately} = $Trigger->new({
+                    overlap_policy => Temporalio::Schedule::Policy::overlap_enum(
+                        $schedule->policy->overlap),
+                });
+            }
+            if (@$backfills) {
+                $patch{backfill_request} =
+                    [ map { $_->_to_proto } @$backfills ];
+            }
+            $fields{initial_patch} = $Patch->new(\%patch);
+        }
+
+        if (defined $memo) {
+            $fields{memo} = await $self->_encode_string_payload_map(
+                'temporal.api.common.v1.Memo', $memo);
+        }
+        if (defined $sa) {
+            $fields{search_attributes} = _coerce_search_attributes($sa);
+        }
+
+        my $Request = Temporalio::Core::Proto::resolve(
+            'temporal.api.workflowservice.v1.CreateScheduleRequest');
+
+        try {
+            await $self->_rpc_call('CreateSchedule', $Request->new(\%fields));
+        }
+        catch ($error) {
+            # ALREADY_EXISTS on CreateSchedule re-maps to ScheduleAlreadyRunning
+            # (spec section 25.3): the re-map happens here, not in the section
+            # 7.5 table.
+            if (_is_already_exists($error)) {
+                Temporalio::Exception::ScheduleAlreadyRunning->throw(
+                    message     => "schedule '$id' already exists",
+                    schedule_id => $id,
+                );
+            }
+            die $error;
+        }
+        return Temporalio::Client::ScheduleHandle->new(client => $self, id => $id);
+    }
+
+    # list_schedules($query, page_size => 1000) — returns a lazy async iterator
+    # over Schedule::ListDescription records (spec section 25.1). No RPC until
+    # the first ->next is awaited.
+    method list_schedules ($query = undef, %opts) {
+        return Temporalio::Client::_ScheduleListIterator->new(
+            client    => $self,
+            query     => $query,
+            page_size => $opts{page_size},
+        );
+    }
+
     # _build_start_workflow_request($workflow_or_string, \@args, %kwargs) —
     # async; maps the spec section 7.4 kwargs onto a
     # StartWorkflowExecutionRequest. Validation (required id/task_queue, policy
@@ -407,6 +534,18 @@ class Temporalio::Client {
         my $whole = int($seconds);
         my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
         return $Duration->new({ seconds => $whole, nanos => $nanos });
+    }
+
+    # True when the error is a server ALREADY_EXISTS (gRPC code 6). On
+    # CreateSchedule the section 7.5 table maps this to a generic RpcError
+    # carrying status_code 6 (the WorkflowAlreadyStarted special-case is keyed
+    # on Start/SignalWithStartWorkflowExecution only).
+    sub _is_already_exists ($error) {
+        return 0 unless Scalar::Util::blessed($error);
+        return 1 if $error->isa('Temporalio::Exception::WorkflowAlreadyStarted');
+        return 0 unless $error->isa('Temporalio::Exception::RpcError');
+        my $code = $error->can('status_code') ? $error->status_code : undef;
+        return defined $code && $code == 6 ? 1 : 0;
     }
 
     sub _coerce_search_attributes ($sa) {
@@ -795,6 +934,18 @@ Accessor returning the C<connection> value.
 =head2 count_workflows
 
 Async. Returns a L<Future> resolving to the count of executions matching the given visibility query.
+
+=head2 create_schedule
+
+Async. Creates a schedule and returns a L<Future> resolving to a L<Temporalio::Client::ScheduleHandle>. Validates the limited/remaining-actions invariant before any RPC, builds an C<initial_patch> only when C<trigger_immediately> or C<backfills> is given, and re-maps a server C<ALREADY_EXISTS> to L<Temporalio::Exception::ScheduleAlreadyRunning>.
+
+=head2 get_schedule_handle
+
+Returns a L<Temporalio::Client::ScheduleHandle> for an existing schedule id without making an RPC.
+
+=head2 list_schedules
+
+Returns a lazy L<Temporalio::Client::_ScheduleListIterator> over schedules matching the given visibility query; no RPC is made until the first C<next> is awaited.
 
 =head2 async_activity_handle
 

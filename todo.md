@@ -327,9 +327,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 8 — Scheduling
 
 ### P8.1 Schedule data classes + Client methods (spec §25)
-- [ ] P8.1.1 RED: sdk/t/unit/schedule_types.t + schedule_request.t (proto remaps, default ranges, invariants, T-sched-unit)
-- [ ] P8.1.2 GREEN: Schedule.pm + Schedule/* data classes + Client create/get/list_schedules + ScheduleListIterator + Exception/ScheduleAlreadyRunning
-- [ ] P8.1.3 Verify: prove -lj4 t/unit
+- [x] P8.1.1 RED: sdk/t/unit/schedule_types.t + schedule_request.t (proto remaps, default ranges, invariants, T-sched-unit)
+- [x] P8.1.2 GREEN: Schedule.pm + Schedule/* data classes + Client create/get/list_schedules + ScheduleListIterator + Exception/ScheduleAlreadyRunning
+- [x] P8.1.3 Verify: prove -lj4 t/unit
 
 ### P8.2 ScheduleHandle ops + integration (spec §25)
 - [ ] P8.2.1 RED: sdk/t/unit/schedule_handle.t + sdk/t/integration/schedule.t (T-sched-1..7)
