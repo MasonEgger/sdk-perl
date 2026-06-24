@@ -5,6 +5,8 @@ package Temporalio::Workflow;
 use v5.38;
 use warnings;
 
+use Future::AsyncAwait;
+
 # A user workflow module says `use Temporalio::Workflow;` and then declares
 # `class My::Workflow :isa(Temporalio::Workflow::Definition)`. Loading the base
 # here means the author does not have to `use` it separately, and the
@@ -121,6 +123,34 @@ sub start_activity ($activity, %opts) {
         activity_type => _activity_type_name($activity),
         %opts,
     );
+}
+
+# --- child workflows (spec section 18) --------------------------------------
+
+# start_child_workflow($workflow, %opts) -> (async) the ChildWorkflowHandle,
+# resolved once the child has STARTED. Unlike start_activity (which returns a
+# Future synchronously), this is `async` and itself awaited: it suspends on the
+# runner's start Future until ResolveChildWorkflowExecutionStart arrives, then
+# resolves to the handle (mirrors sdk-python `await ..._start_fut`). The first
+# positional resolves to a workflow-type name the same way continue_as_new does.
+# %opts are the spec section 18.1 kwargs (args, id, task_queue,
+# cancellation_type, parent_close_policy, id_reuse_policy, the three timeouts,
+# retry_policy, cron_schedule, memo, search_attributes, headers).
+async sub start_child_workflow ($workflow, %opts) {
+    my $handle = await _runner()->start_child_workflow(
+        workflow_type => _workflow_type_name($workflow),
+        %opts,
+    );
+    return $handle;
+}
+
+# execute_child_workflow($workflow, %opts) -> (async) the child's return value.
+# Sugar over start_child_workflow + ->result: awaits the start, then awaits the
+# result. A result failure raises Temporalio::Exception::ChildWorkflow at this
+# await site (spec section 18.3).
+async sub execute_child_workflow ($workflow, %opts) {
+    my $handle = await start_child_workflow($workflow, %opts);
+    return await $handle->result;
 }
 
 # --- timers (spec section 10.2) ---------------------------------------------
@@ -252,6 +282,14 @@ Marks a patch id as deprecated, recording a deprecation marker so the branch can
 =head2 execute_activity
 
 Async. Schedules an activity and awaits its result, returning an awaitable resolving to the activity's return value.
+
+=head2 execute_child_workflow
+
+Async. Starts a child workflow and awaits its result, returning an awaitable resolving to the child's return value (or raising L<Temporalio::Exception::ChildWorkflow> on failure).
+
+=head2 start_child_workflow
+
+Async. Starts a child workflow and awaits its start, returning an awaitable resolving to the L<Temporalio::Workflow::ChildWorkflowHandle> once the child has started.
 
 =head2 info
 

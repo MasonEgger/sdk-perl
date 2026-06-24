@@ -20,6 +20,8 @@ use Temporalio::Converter::Failure ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception ();
 use Temporalio::Exception::Cancelled ();
+use Temporalio::Exception::ChildWorkflow ();
+use Temporalio::Exception::WorkflowAlreadyStarted ();
 use Temporalio::Exception::Timeout ();
 use Temporalio::Exception::Nondeterminism ();
 use Temporalio::Exception::Workflow::NoRunner ();
@@ -86,6 +88,30 @@ class Temporalio::Workflow::Runner {
     # matched on the corresponding ResolveActivity / FireTimer job.
     field $activity_seq_counter = 0;
     field $timer_seq_counter    = 0;
+
+    # Child workflows use a SEPARATE seq space from activities and timers (spec
+    # section 18.2; MUST-match sdk-python _next_seq("child_workflow")): a
+    # workflow's first child, first activity, and first timer are each seq 1 in
+    # their own space. Each is matched on the corresponding
+    # ResolveChildWorkflowExecutionStart / ResolveChildWorkflowExecution job.
+    field $child_workflow_seq_counter = 0;
+
+    # Pending child workflow handles keyed by their StartChildWorkflowExecution
+    # seq: { seq => $handle }. Each Temporalio::Workflow::ChildWorkflowHandle
+    # owns a start Future and a result Future, resolved imperatively in two
+    # stages (spec section 18.2): the seq stays mapped after the start succeeds
+    # (the result job still comes) and is removed only on start-failure/cancel
+    # or on the terminal ResolveChildWorkflowExecution. Child workflows also
+    # allocate signal/cancel commands; the pending signal Futures from a child
+    # handle's ->signal live in %pending_external_signals below.
+    field %pending_child_workflows;
+
+    # Pending child-workflow signal Futures keyed by their
+    # SignalExternalWorkflowExecution seq (a child-targeted signal shares the
+    # external-signal seq space). Resolved on ResolveSignalExternalWorkflow
+    # (full external-handle support is P6.3; here it backs $handle->signal).
+    field %pending_external_signals;
+    field $external_op_seq_counter = 0;   # external signal/cancel seq space.
 
     # Pending activity Futures keyed by their command seq: { seq => $future }.
     # The Workflow::Future for each in-flight activity, resolved imperatively
@@ -352,6 +378,201 @@ class Temporalio::Workflow::Runner {
         return $future;
     }
 
+    # --- child workflows (spec section 18) -----------------------------------
+
+    # start_child_workflow(workflow_type => ..., %opts) -> the start
+    # Temporalio::Workflow::Future (->done with the ChildWorkflowHandle once
+    # ResolveChildWorkflowExecutionStart{succeeded} arrives). Allocates a CHILD
+    # seq (separate space), converts args/memo/headers/timeouts BEFORE building
+    # the command (so converter errors surface at the call site), resolves the
+    # id/task_queue/enums, buffers a StartChildWorkflowExecution command, and
+    # registers a handle wrapping a start Future and a result Future in
+    # %pending_child_workflows{$seq}. %opts mirrors spec section 18.1:
+    #   workflow_type (required), args (arrayref), id, task_queue,
+    #   cancellation_type, parent_close_policy, id_reuse_policy,
+    #   execution_timeout, run_timeout, task_timeout (all seconds),
+    #   retry_policy (Temporalio::Common::RetryPolicy), cron_schedule, memo,
+    #   search_attributes, headers.
+    method start_child_workflow (%opts) {
+        my $workflow_type = $opts{workflow_type}
+            // die "Temporalio::Workflow::Runner: start_child_workflow needs a "
+                 . "workflow_type";
+
+        my $seq = ++$child_workflow_seq_counter;  # child seq space, from 1.
+
+        # id defaults to a DETERMINISTIC RNG-derived value (spec section 18.1):
+        # never rand/OS entropy, so replay reproduces it. _default_child_id
+        # draws from the workflow RNG.
+        my $id = defined $opts{id} ? $opts{id} : $self->_default_child_id;
+
+        # Convert child arguments to payloads up front (parity with
+        # schedule_activity: a converter error must surface at the call site).
+        my @input = map { $payload_converter->to_payload($_) }
+            (($opts{args} // [])->@*);
+
+        my %fields = (
+            seq           => $seq,
+            workflow_id   => $id,
+            workflow_type => $workflow_type,
+            # task_queue defaults to the parent workflow's queue (spec section
+            # 18.1). The replay harness has no queue, so default to empty string.
+            task_queue    => ($opts{task_queue} // $task_queue // ''),
+            (@input ? (input => [@input]) : ()),
+            # The three enums: spec string -> proto enum number, with the
+            # spec section 18.1 defaults (NOT the proto zero values).
+            cancellation_type   =>
+                _child_cancellation_type_number($opts{cancellation_type}),
+            parent_close_policy =>
+                _parent_close_policy_number($opts{parent_close_policy}),
+            workflow_id_reuse_policy =>
+                _id_reuse_policy_number($opts{id_reuse_policy}),
+        );
+
+        # The three timeouts: seconds -> google.protobuf.Duration, only when set.
+        my %timeout_field = (
+            execution_timeout => 'workflow_execution_timeout',
+            run_timeout       => 'workflow_run_timeout',
+            task_timeout      => 'workflow_task_timeout',
+        );
+        for my $opt (keys %timeout_field) {
+            next unless defined $opts{$opt};
+            $fields{ $timeout_field{$opt} } = _duration($opts{$opt});
+        }
+
+        # cron_schedule is a plain string field when given.
+        if (defined $opts{cron_schedule}) {
+            $fields{cron_schedule} = $opts{cron_schedule};
+        }
+
+        # Retry policy -> temporal.api.common.v1.RetryPolicy proto when given.
+        if (defined(my $rp = $opts{retry_policy})) {
+            $fields{retry_policy} = $rp->to_proto;
+        }
+
+        # Headers / memo: { name => Perl value } -> { name => Payload } when set.
+        for my $map (qw(headers memo)) {
+            my $h = $opts{$map};
+            next unless $h && %$h;
+            $fields{$map} = {
+                map { $_ => $payload_converter->to_payload($h->{$_}) } keys %$h
+            };
+        }
+
+        # Search attributes -> proto when given (the value already exposes
+        # to_proto, mirroring the start_workflow request builder).
+        if (defined(my $sa = $opts{search_attributes})) {
+            $fields{search_attributes} = $sa->can('to_proto')
+                ? $sa->to_proto : $sa;
+        }
+
+        push @commands,
+            Temporalio::Workflow::Commands::start_child_workflow_execution(
+                \%fields);
+
+        # The cancellation_type governs cancel behaviour (spec section 18.2,
+        # MUST-match the ChildWorkflowCancellationType proto semantics):
+        #   abandon (0): emit NO cancel command; stop waiting immediately
+        #     (fail the pending awaits with Cancelled now).
+        #   try_cancel (1): emit the cancel command AND immediately report
+        #     cancellation to the parent (fail the pending awaits now).
+        #   wait_cancellation_completed (2) / wait_cancellation_requested (3):
+        #     emit the cancel command but stay parked on `result` — the body
+        #     observes cancellation only when the later cancelled resolve
+        #     arrives (do NOT pre-emptively fail the awaits).
+        my $ct        = $fields{cancellation_type};
+        my $is_abandon = $ct == 0 ? 1 : 0;
+        my $report_now = ($ct == 0 || $ct == 1) ? 1 : 0;
+        my $cancel_emitted = 0;   # emit the cancel command at most once.
+
+        my $start_future  = Temporalio::Workflow::Future->new;
+        my $result_future = Temporalio::Workflow::Future->new;
+
+        require Temporalio::Workflow::ChildWorkflowHandle;
+        my $handle = Temporalio::Workflow::ChildWorkflowHandle->new(
+            id                 => $id,
+            child_workflow_seq => $seq,
+            start_future       => $start_future,
+            result_future      => $result_future,
+            # cancel hook: emit CancelChildWorkflowExecution (unless abandon),
+            # then either fail the pending awaits now (abandon / try_cancel) or
+            # stay parked until the cancelled resolve (wait_* types). Under the
+            # wait_* types the seq STAYS mapped so the later
+            # ResolveChildWorkflowExecution{cancelled} settles it.
+            on_cancel => sub ($h) {
+                return unless exists $pending_child_workflows{$seq};
+                if (!$is_abandon && !$cancel_emitted) {
+                    push @commands,
+                        Temporalio::Workflow::Commands::cancel_child_workflow_execution(
+                            $seq);
+                    $cancel_emitted = 1;
+                }
+                return unless $report_now;
+                delete $pending_child_workflows{$seq};
+                for my $f ($start_future, $result_future) {
+                    next if $f->is_ready;
+                    $f->fail(Temporalio::Exception::Cancelled->new(
+                        message => 'Child workflow cancelled',
+                    ));
+                }
+            },
+            # signal hook: emit a SignalExternalWorkflowExecution on the
+            # child_workflow_id arm and register a pending signal Future.
+            on_signal => sub ($h, $name, %sig_opts) {
+                return $self->_signal_child_workflow($h, $name, %sig_opts);
+            },
+        );
+
+        $pending_child_workflows{$seq} = $handle;
+        return $start_future;
+    }
+
+    # Emit a SignalExternalWorkflowExecution targeting a child (spec section 18;
+    # child_workflow_id oneof arm) and register the pending signal Future so a
+    # later ResolveSignalExternalWorkflow settles it. Returns the Future the
+    # $handle->signal caller awaits.
+    method _signal_child_workflow ($handle, $name, %opts) {
+        my $seq = ++$external_op_seq_counter;
+
+        my @args = map { $payload_converter->to_payload($_) }
+            (($opts{args} // [])->@*);
+
+        my %fields = (
+            seq               => $seq,
+            child_workflow_id => $handle->id,
+            signal_name       => $name,
+            (@args ? (args => [@args]) : ()),
+        );
+        if (my $h = $opts{headers}) {
+            if (%$h) {
+                $fields{headers} = {
+                    map { $_ => $payload_converter->to_payload($h->{$_}) }
+                        keys %$h
+                };
+            }
+        }
+
+        push @commands,
+            Temporalio::Workflow::Commands::signal_external_workflow_execution(
+                \%fields);
+
+        my $future = Temporalio::Workflow::Future->new;
+        $pending_external_signals{$seq} = $future;
+        return $future;
+    }
+
+    # A deterministic default child workflow id (spec section 18.1): a UUIDish
+    # string derived from the workflow RNG (never rand/OS entropy), so replay
+    # reproduces it. Uses the same ISAAC generator that backs
+    # Temporalio::Workflow::random; draws are deterministic per the run's seed.
+    method _default_child_id {
+        my @hex = map { sprintf '%08x', $rng->irand } 1 .. 4;
+        my $h = join '', @hex;   # 32 hex chars.
+        # Format as a UUID-shaped string (8-4-4-4-12) for readability/parity.
+        return join '-',
+            substr($h, 0, 8),  substr($h, 8, 4),  substr($h, 12, 4),
+            substr($h, 16, 4), substr($h, 20, 12);
+    }
+
     # --- timers (spec section 10.2 start_timer/sleep + 10.3 FireTimer) -------
 
     # start_timer($seconds) -> a Temporalio::Workflow::Future resolved when the
@@ -540,14 +761,23 @@ class Temporalio::Workflow::Runner {
     # _running_workflows after cancelling its tasks).
     method evict () {
         for my $future (values %pending_activities, values %pending_timers,
-            values %in_progress_handlers, map { $_->{future} } @conditions)
+            values %in_progress_handlers, values %pending_external_signals,
+            map { $_->{future} } @conditions)
         {
             $future->cancel unless $future->is_ready;
         }
-        %pending_activities  = ();
-        %pending_timers      = ();
-        %in_progress_handlers = ();
-        @conditions          = ();
+        # Child handles own a start AND a result Future; cancel both.
+        for my $handle (values %pending_child_workflows) {
+            for my $f ($handle->start_future, $handle->result_future) {
+                $f->cancel unless $f->is_ready;
+            }
+        }
+        %pending_activities       = ();
+        %pending_timers           = ();
+        %in_progress_handlers     = ();
+        %pending_child_workflows  = ();
+        %pending_external_signals = ();
+        @conditions               = ();
         if (defined $main_run_future && !$main_run_future->is_ready) {
             $main_run_future->cancel;
         }
@@ -564,6 +794,18 @@ class Temporalio::Workflow::Runner {
         }
         if ($variant eq 'fire_timer') {
             return $self->_apply_fire_timer($job->fire_timer);
+        }
+        if ($variant eq 'resolve_child_workflow_execution_start') {
+            return $self->_apply_resolve_child_workflow_start(
+                $job->resolve_child_workflow_execution_start);
+        }
+        if ($variant eq 'resolve_child_workflow_execution') {
+            return $self->_apply_resolve_child_workflow(
+                $job->resolve_child_workflow_execution);
+        }
+        if ($variant eq 'resolve_signal_external_workflow') {
+            return $self->_apply_resolve_signal_external_workflow(
+                $job->resolve_signal_external_workflow);
         }
         if ($variant eq 'cancel_workflow') {
             return $self->_apply_cancel_workflow($job->cancel_workflow);
@@ -704,6 +946,144 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
+    # ResolveChildWorkflowExecutionStart { seq, succeeded|failed|cancelled } —
+    # the first stage of child resolution (spec section 18.2). `succeeded` sets
+    # the run id and ->dones the start Future with the handle (the seq STAYS
+    # mapped: the result job still comes). `failed`/`cancelled` are terminal for
+    # the start AND the result — pop the seq and ->fail the start Future
+    # (WorkflowAlreadyStarted on WORKFLOW_ALREADY_EXISTS, else a generic error;
+    # Cancelled on `cancelled`). MUST-match sdk-python's start resolution.
+    method _apply_resolve_child_workflow_start ($job) {
+        my $seq    = $job->seq;
+        my $handle = $pending_child_workflows{$seq};
+        unless (defined $handle) {
+            $self->_record_nondeterminism(
+                "ResolveChildWorkflowExecutionStart for unknown seq $seq (no "
+                . "pending child workflow) — non-determinism: the workflow never "
+                . "started this child");
+            return;
+        }
+
+        my $status = $job->which_status // '';
+        if ($status eq 'succeeded') {
+            # The child has started: record its run id and resolve the start
+            # Future with the handle. Do NOT pop the seq — the result job for
+            # this seq is still to come.
+            $handle->_resolve_started($job->succeeded->run_id);
+        }
+        elsif ($status eq 'failed') {
+            delete $pending_child_workflows{$seq};
+            my $failed = $job->failed;
+            # cause is the StartChildWorkflowExecutionFailedCause enum:
+            # WORKFLOW_ALREADY_EXISTS = 1 -> WorkflowAlreadyStarted.
+            my $exc = (($failed->cause // 0) == 1)
+                ? Temporalio::Exception::WorkflowAlreadyStarted->new(
+                      message       => 'Child workflow already started',
+                      workflow_id   => $failed->workflow_id,
+                      workflow_type => $failed->workflow_type,
+                  )
+                : Temporalio::Exception->new(
+                      message => 'Child workflow failed to start (cause '
+                          . ($failed->cause // 0) . ')',
+                  );
+            $handle->start_future->fail($exc)
+                unless $handle->start_future->is_ready;
+        }
+        elsif ($status eq 'cancelled') {
+            delete $pending_child_workflows{$seq};
+            # core builds the ChildWorkflowFailure->CancelledFailure; map it.
+            my $failure = $job->cancelled->failure;
+            my $exc = defined $failure
+                ? $failure_converter->from_failure($failure, $payload_converter)
+                : Temporalio::Exception::Cancelled->new(
+                      message => 'Child workflow cancelled before start');
+            $handle->start_future->fail($exc)
+                unless $handle->start_future->is_ready;
+        }
+        else {
+            die "Temporalio::Workflow::Runner: "
+              . "ResolveChildWorkflowExecutionStart seq $seq had no recognized "
+              . "status (got '$status')";
+        }
+        return;
+    }
+
+    # ResolveChildWorkflowExecution { seq, result } — the second (terminal)
+    # stage (spec section 18.2). Look up by seq (unknown -> non-determinism via
+    # _record_nondeterminism), read the ChildWorkflowResult oneof: `completed`
+    # -> ->done with the converted result; `failed`/`cancelled` -> ->fail with
+    # Temporalio::Exception::ChildWorkflow whose cause is the mapped failure.
+    # Pop the seq. MUST-match sdk-python's child result resolution.
+    method _apply_resolve_child_workflow ($job) {
+        my $seq    = $job->seq;
+        my $handle = delete $pending_child_workflows{$seq};
+        unless (defined $handle) {
+            $self->_record_nondeterminism(
+                "ResolveChildWorkflowExecution for unknown seq $seq (no pending "
+                . "child workflow) — non-determinism: the workflow never started "
+                . "this child");
+            return;
+        }
+
+        my $future     = $handle->result_future;
+        return if $future->is_ready;   # already cancelled via the handle.
+
+        my $resolution = $job->result;
+        my $status     = defined $resolution ? $resolution->which_status : '';
+        $status //= '';
+
+        if ($status eq 'completed') {
+            my $success = $resolution->completed;
+            my $payload = defined $success ? $success->result : undef;
+            my $value   = defined $payload
+                ? $payload_converter->from_payload($payload)
+                : undef;
+            $future->done($value);
+        }
+        elsif ($status eq 'failed' || $status eq 'cancelled') {
+            # Wrap the mapped failure in a ChildWorkflow exception (spec section
+            # 18.3): the underlying failure (an application error, a Cancelled,
+            # ...) is the `cause`.
+            my $inner   = $status eq 'failed'
+                ? $resolution->failed->failure
+                : $resolution->cancelled->failure;
+            my $cause = defined $inner
+                ? $failure_converter->from_failure($inner, $payload_converter)
+                : undef;
+            $future->fail(Temporalio::Exception::ChildWorkflow->new(
+                message      => 'Child workflow execution failed',
+                workflow_id  => $handle->id,
+                (defined $cause ? (cause => $cause) : ()),
+            ));
+        }
+        else {
+            die "Temporalio::Workflow::Runner: ResolveChildWorkflowExecution "
+              . "seq $seq had no recognized status (got '$status')";
+        }
+        return;
+    }
+
+    # ResolveSignalExternalWorkflow { seq, failure? } — settle a pending child
+    # (or external, P6.3) signal Future (spec section 18). No failure -> ->done;
+    # a failure -> ->fail with the mapped exception. An unknown seq is tolerated
+    # (the signal Future may have already been resolved/cancelled).
+    method _apply_resolve_signal_external_workflow ($job) {
+        my $seq    = $job->seq;
+        my $future = delete $pending_external_signals{$seq};
+        return unless defined $future;
+        return if $future->is_ready;
+
+        my $failure = $job->can('failure') ? $job->failure : undef;
+        if (defined $failure) {
+            $future->fail(
+                $failure_converter->from_failure($failure, $payload_converter));
+        }
+        else {
+            $future->done;
+        }
+        return;
+    }
+
     # CancelWorkflow (spec section 10.3 / T-wf-12): mark the run cancel-requested
     # and cancel the run's pending Futures. Cancelling a pending activity/timer
     # Future fails it with Temporalio::Exception::Cancelled (the timer Future
@@ -738,6 +1118,26 @@ class Temporalio::Workflow::Runner {
         for my $seq (keys %pending_timers) {
             my $future = $pending_timers{$seq};
             $future->cancel if defined $future && !$future->is_ready;
+        }
+        # Child workflows join the cancel chain (spec section 18.2 / T-child-11):
+        # a whole-workflow CancelWorkflow cancels the primary task, so each
+        # pending child handle is cancelled (emitting CancelChildWorkflowExecution
+        # unless abandon) AND its pending start/result awaits are failed with
+        # Cancelled so the awaiting body observes the cancellation in this
+        # activation (mirrors T-act-9 for activities). Unlike an explicit
+        # $handle->cancel — which honours the wait_* cancellation_type and may
+        # stay parked — the primary-task cancel always raises at the await. The
+        # handle's cancel de-registers the seq, so snapshot the keys first.
+        for my $seq (keys %pending_child_workflows) {
+            my $handle = $pending_child_workflows{$seq} // next;
+            $handle->cancel;   # emit the cancel command (honours abandon).
+            delete $pending_child_workflows{$seq};
+            for my $f ($handle->start_future, $handle->result_future) {
+                next if $f->is_ready;
+                $f->fail(Temporalio::Exception::Cancelled->new(
+                    message => 'Child workflow cancelled (workflow cancelled)',
+                ));
+            }
         }
         if (defined $main_run_future && !$main_run_future->is_ready) {
             $main_run_future->cancel;
@@ -1250,6 +1650,58 @@ class Temporalio::Workflow::Runner {
                  . "'$name'";
     }
 
+    # Child workflow cancellation_type: spec string -> ChildWorkflowCancellationType
+    # enum number (verified against child_workflow.proto): abandon=0, try_cancel=1,
+    # wait_cancellation_completed=2, wait_cancellation_requested=3. DEFAULT is
+    # wait_cancellation_completed (2) per spec section 18.1 — NOT the proto zero
+    # (abandon), NOT activities' try_cancel. A bad string dies at scheduling time.
+    my %CHILD_CANCELLATION_TYPE = (
+        abandon                      => 0,
+        try_cancel                   => 1,
+        wait_cancellation_completed  => 2,
+        wait_cancellation_requested  => 3,
+    );
+    sub _child_cancellation_type_number ($name) {
+        return 2 unless defined $name;   # default: wait_cancellation_completed.
+        return $CHILD_CANCELLATION_TYPE{$name}
+            // die "Temporalio::Workflow::Runner: unknown child workflow "
+                 . "cancellation_type '$name'";
+    }
+
+    # parent_close_policy: spec string -> ParentClosePolicy enum number (verified
+    # against child_workflow.proto): unspecified=0, terminate=1, abandon=2,
+    # request_cancel=3. DEFAULT is terminate (1) per spec section 18.1.
+    my %PARENT_CLOSE_POLICY = (
+        unspecified    => 0,
+        terminate      => 1,
+        abandon        => 2,
+        request_cancel => 3,
+    );
+    sub _parent_close_policy_number ($name) {
+        return 1 unless defined $name;   # default: terminate.
+        return $PARENT_CLOSE_POLICY{$name}
+            // die "Temporalio::Workflow::Runner: unknown parent_close_policy "
+                 . "'$name'";
+    }
+
+    # id_reuse_policy: spec string -> WorkflowIdReusePolicy enum number (verified
+    # against temporal/api/enums/v1/workflow.proto): unspecified=0,
+    # allow_duplicate=1, allow_duplicate_failed_only=2, reject_duplicate=3,
+    # terminate_if_running=4. DEFAULT is allow_duplicate (1) per spec section 18.1.
+    my %ID_REUSE_POLICY = (
+        unspecified                  => 0,
+        allow_duplicate              => 1,
+        allow_duplicate_failed_only  => 2,
+        reject_duplicate             => 3,
+        terminate_if_running         => 4,
+    );
+    sub _id_reuse_policy_number ($name) {
+        return 1 unless defined $name;   # default: allow_duplicate.
+        return $ID_REUSE_POLICY{$name}
+            // die "Temporalio::Workflow::Runner: unknown id_reuse_policy "
+                 . "'$name'";
+    }
+
     # Seconds (float) -> google.protobuf.Duration { seconds, nanos }. Mirrors
     # Temporalio::Common::RetryPolicy::_duration; the activity timeouts cross
     # the wire as Durations.
@@ -1552,6 +2004,10 @@ Returns the run id of the workflow execution.
 =head2 schedule_activity
 
 Emits a ScheduleActivity command and returns the cancellable awaitable that resolves when the activity is resolved.
+
+=head2 start_child_workflow
+
+Emits a StartChildWorkflowExecution command and returns the start awaitable that resolves to a L<Temporalio::Workflow::ChildWorkflowHandle> once the child has started (spec section 18).
 
 =head2 start_timer
 

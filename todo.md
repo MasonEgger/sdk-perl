@@ -280,12 +280,12 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 ## Phase 6 — Workflow feature parity
 
 ### P6.1 Child workflows (spec §18)
-- [ ] P6.1.1 RED: sdk/t/replay/child_workflows.t (T-child-1..12) + WfDef fixtures
-- [ ] P6.1.2 GREEN: execute/start_child_workflow + ChildWorkflowHandle + Commands builders + Runner resolve/seq/cancel-propagation
-- [ ] P6.1.3 RED: sdk/t/integration/child_workflows.t (T-child-13)
-- [ ] P6.1.4 GREEN: wire until green vs dev server
-- [ ] P6.1.5 REFACTOR: share two-future resolve with activity path if duplicated
-- [ ] P6.1.6 Verify: prove -lj4 t
+- [x] P6.1.1 RED: sdk/t/replay/child_workflows.t (T-child-1..12) + WfDef fixtures
+- [x] P6.1.2 GREEN: execute/start_child_workflow + ChildWorkflowHandle + Commands builders + Runner resolve/seq/cancel-propagation
+- [x] P6.1.3 RED: sdk/t/integration/child_workflows.t (T-child-13)
+- [x] P6.1.4 GREEN: wire until green vs dev server
+- [x] P6.1.5 REFACTOR: share two-future resolve with activity path if duplicated
+- [x] P6.1.6 Verify: prove -lj4 t
 
 ### P6.2 Workflow updates (spec §19)
 - [ ] P6.2.1 RED: sdk/t/replay/updates.t (T-upd-1..11) + WfDef fixtures

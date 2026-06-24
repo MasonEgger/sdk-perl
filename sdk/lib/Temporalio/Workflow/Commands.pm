@@ -127,6 +127,47 @@ sub respond_to_query ($query_id, %parts) {
     });
 }
 
+# start_child_workflow_execution { ... } — emitted when the workflow body calls
+# Temporalio::Workflow::execute_child_workflow / start_child_workflow (spec
+# section 18). $fields is the already-assembled StartChildWorkflowExecution
+# field hashref (seq, namespace, workflow_id, workflow_type, task_queue, input,
+# the three timeout Durations, parent_close_policy, workflow_id_reuse_policy,
+# retry_policy, cron_schedule, headers, memo, search_attributes,
+# cancellation_type). The runner owns seq allocation, payload conversion, the
+# default id/task_queue, and the enum string -> number mapping; this builder
+# just wraps the field set in the command oneof.
+sub start_child_workflow_execution ($fields) {
+    return _command_class()->new({ start_child_workflow_execution => $fields });
+}
+
+# cancel_child_workflow_execution { child_workflow_seq, reason } — emitted when
+# a ChildWorkflowHandle is cancelled (spec section 18.2; MUST-match the
+# StartChildWorkflowExecution proto, which keys this on `child_workflow_seq`
+# rather than the activity/timer `seq`). $seq is the seq of the
+# StartChildWorkflowExecution being cancelled. ABANDON-typed children never
+# emit this command (the workflow stops waiting without asking core to cancel
+# the child — see Temporalio::Workflow::Runner's child-handle cancel hook).
+sub cancel_child_workflow_execution ($seq, $reason = undef) {
+    return _command_class()->new({
+        cancel_child_workflow_execution => {
+            child_workflow_seq => $seq,
+            (defined $reason ? (reason => $reason) : ()),
+        },
+    });
+}
+
+# signal_external_workflow_execution { seq, child_workflow_id|workflow_execution,
+# signal_name, args, headers } — emitted when a ChildWorkflowHandle's ->signal
+# is called (spec section 18; the child arm of the SignalExternalWorkflowExecution
+# proto). $fields is the assembled field hashref. A child-targeted signal sets
+# the `child_workflow_id` oneof arm (NOT `workflow_execution`); the runner owns
+# seq allocation and payload conversion.
+sub signal_external_workflow_execution ($fields) {
+    return _command_class()->new({
+        signal_external_workflow_execution => $fields,
+    });
+}
+
 # set_patch_marker { patch_id, deprecated } — emitted the first time the
 # workflow body calls Temporalio::Workflow::patched($id) (or deprecate_patch)
 # and the patch is in use (spec section 10.3 step / versioning; MUST-match
@@ -231,6 +272,27 @@ C<ScheduleActivity> being cancelled. Core forwards the request to the running
 activity according to the activity's C<ActivityCancellationType>; an
 C<abandon>-typed activity never emits this command (the workflow stops waiting
 without asking core to cancel the activity).
+
+=item C<start_child_workflow_execution($fields)>
+
+C<StartChildWorkflowExecution { ... }> — emitted when the workflow body calls
+C<Temporalio::Workflow::execute_child_workflow> / C<start_child_workflow>
+(spec section 18). C<$fields> is the assembled field hashref (the runner owns
+seq allocation, payload conversion, the default id/task queue, and the enum
+string-to-number mapping).
+
+=item C<cancel_child_workflow_execution($seq, $reason)>
+
+C<CancelChildWorkflowExecution { child_workflow_seq, reason }> — emitted when a
+C<Temporalio::Workflow::ChildWorkflowHandle> is cancelled. C<$seq> is the seq of
+the C<StartChildWorkflowExecution> being cancelled; an C<abandon>-typed child
+never emits this command.
+
+=item C<signal_external_workflow_execution($fields)>
+
+C<SignalExternalWorkflowExecution { ... }> — emitted when a
+C<ChildWorkflowHandle>'s C<< ->signal >> is called (spec section 18). C<$fields>
+sets the C<child_workflow_id> oneof arm for a child-targeted signal.
 
 =item C<respond_to_query($query_id, %parts)>
 
