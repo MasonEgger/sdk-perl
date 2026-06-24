@@ -256,6 +256,15 @@ class Temporalio::Workflow::Runner {
     # than buffer a command. A counter (not a bool) so nesting is safe.
     field $read_only_depth = 0;
 
+    # Durable-scheduler suppression depth (spec section 27.4 /
+    # Temporalio::Workflow::Unsafe::durable_scheduler_disabled): while > 0 the
+    # runner is executing a block that must not record on / yield to the durable
+    # scheduler (OpenTelemetry span attach/extract that touches a mutex or real
+    # wall-clock time). A counter (not a bool) so nesting is safe. Read via
+    # durable_scheduler_suppressed; set with Syntax::Keyword::Dynamically so it
+    # unwinds across an await.
+    field $durable_suppress_depth = 0;
+
     # DoUpdate jobs delivered before the instance exists (spec section 19.2):
     # an update arriving in the init activation (ordered before
     # InitializeWorkflow) has no instance to dispatch against yet, so it is
@@ -2370,6 +2379,21 @@ class Temporalio::Workflow::Runner {
         return (undef);
     }
 
+    # durable_scheduler_disabled($code) — run $code with the durable scheduler
+    # disabled (spec section 27.4). Raises $durable_suppress_depth for the
+    # duration of the block via Syntax::Keyword::Dynamically so it unwinds even
+    # across an await, then returns whatever $code returns (in the caller's
+    # context). The OpenTelemetry tracing interceptor wraps span attach/extract
+    # that touches a mutex or real wall-clock time in this so the work never
+    # becomes part of the recorded history.
+    method durable_scheduler_disabled ($code) {
+        dynamically $durable_suppress_depth = $durable_suppress_depth + 1;
+        return $code->();
+    }
+
+    # True while a durable_scheduler_disabled block is on the stack.
+    method durable_scheduler_suppressed { return $durable_suppress_depth > 0 ? 1 : 0 }
+
     # Run a sync update validator under the read-only guard (spec section 19.2
     # step 3). Returns a hashref:
     #   { rejected => $failure_proto }  — the validator threw a normal failure
@@ -3289,6 +3313,19 @@ Returns the workflow info hash (run id, workflow type, namespace, etc.) for the 
 =head2 is_replaying
 
 Returns true while the current activation is replaying history.
+
+=head2 durable_scheduler_disabled
+
+C<< $runner->durable_scheduler_disabled($code) >> runs C<$code> with the durable
+scheduler disabled (spec section 27.4): while the block runs the runner neither
+records commands on nor yields to the deterministic scheduler. Returns whatever
+C<$code> returns. Used by the OpenTelemetry tracing interceptor for span
+attach/extract that touches a mutex or real wall-clock time inside an
+activation. See L<Temporalio::Workflow::Unsafe/durable_scheduler_disabled>.
+
+=head2 durable_scheduler_suppressed
+
+Returns true while a L</durable_scheduler_disabled> block is on the stack.
 
 =head2 logger
 

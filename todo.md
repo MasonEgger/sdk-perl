@@ -356,9 +356,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P10.1.3 Verify: prove -lj4 t
 
 ### P10.2 OpenTelemetry tracing interceptor (spec §27.4)
-- [ ] P10.2.1 RED: sdk/t/unit/tracing.t (T-trace-1..9, skip_all without OTel)
-- [ ] P10.2.2 GREEN: Contrib/OpenTelemetry/TracingInterceptor + durable_scheduler_disabled Runner primitive + W3C fallback
-- [ ] P10.2.3 Verify: prove -lj4 t
+- [x] P10.2.1 RED: sdk/t/unit/tracing.t (T-trace-1..9, skip_all without OTel)
+- [x] P10.2.2 GREEN: Contrib/OpenTelemetry/TracingInterceptor + durable_scheduler_disabled Runner primitive + W3C fallback
+- [x] P10.2.3 Verify: prove -lj4 t
 
 ### P10.3 core→Perl log forwarding (spec §28.1)
 - [ ] P10.3.1 RED: cargo test (kind-7 deep-copy, shutdown free) + sdk/t/unit/log_forwarding.t (T-logfwd-1..7)

@@ -33,6 +33,13 @@ requires 'Math::Random::ISAAC::XS';
 # Logging interop (spec section 16.4)
 requires 'Log::Any';
 
+# OpenTelemetry tracing interceptor (spec section 27.4) is a SOFT dependency:
+# Temporalio::Contrib::OpenTelemetry::TracingInterceptor loads and propagates
+# headers via a built-in W3C carrier shim without these; span creation needs
+# them. t/unit/tracing.t skips the span-tree scenarios when they are absent.
+recommends 'OpenTelemetry';
+recommends 'OpenTelemetry::SDK';
+
 # Protobuf: pure-Perl parser-direct distribution (spec section 4.6)
 requires 'Protobuf',
     git => 'https://github.com/MasonEgger/protobuf-perl.git';
