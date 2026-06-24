@@ -332,9 +332,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P8.1.3 Verify: prove -lj4 t/unit
 
 ### P8.2 ScheduleHandle ops + integration (spec §25)
-- [ ] P8.2.1 RED: sdk/t/unit/schedule_handle.t + sdk/t/integration/schedule.t (T-sched-1..7)
-- [ ] P8.2.2 GREEN: Client/ScheduleHandle.pm (describe/delete/backfill/trigger/pause/unpause/update)
-- [ ] P8.2.3 Verify: prove -lj4 t — **Phase 8 acceptance: schedules green**
+- [x] P8.2.1 RED: sdk/t/unit/schedule_handle.t + sdk/t/integration/schedule.t (T-sched-1..7)
+- [x] P8.2.2 GREEN: Client/ScheduleHandle.pm (describe/delete/backfill/trigger/pause/unpause/update)
+- [x] P8.2.3 Verify: prove -lj4 t — **Phase 8 acceptance: schedules green**
 
 ## Phase 9 — Nexus
 
