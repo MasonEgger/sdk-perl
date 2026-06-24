@@ -25,6 +25,8 @@ use Temporalio::Exception::WorkflowAlreadyStarted ();
 use Temporalio::Exception::Timeout ();
 use Temporalio::Exception::Nondeterminism ();
 use Temporalio::Exception::Workflow::NoRunner ();
+use Temporalio::Exception::Argument ();
+use Temporalio::Common::SearchAttributeUpdate ();
 
 # The dynamically-scoped pointer to the currently-active runner. Every
 # Temporalio::Workflow:: context function looks it up here (spec section 10.2).
@@ -278,6 +280,15 @@ class Temporalio::Workflow::Runner {
     # Temporalio::Exception::Timeout (sdk-python asyncio.wait_for).
     field @conditions;
 
+    # In-workflow search-attribute / memo views (spec section 24). Seeded from the
+    # InitializeWorkflow job's start-time search_attributes / memo, then kept in
+    # sync as upsert_search_attributes / upsert_memo run. Each is a name -> Perl
+    # value map (an unset/removed key is deleted from the map). Surfaced through
+    # info->{search_attributes} / info->{memo} (NOT BinaryChecksums). Workflow-
+    # scoped, persisting across activations.
+    field %search_attributes_view;
+    field %memo_view;
+
     ADJUST {
         $payload_converter //= Temporalio::Converter::Payload->default;
         $failure_converter //= Temporalio::Converter::Failure->default;
@@ -321,6 +332,11 @@ class Temporalio::Workflow::Runner {
             # The patch ids the server has notified for this run (spec section
             # 10.3 "record in workflow info"). Sorted for a stable view.
             patches       => [ sort keys %patches_notified ],
+            # The in-workflow search-attribute / memo views (spec section 24),
+            # seeded from start-time values and kept in sync by upsert_*. Copied
+            # so callers cannot mutate the runner's view through info.
+            search_attributes => { %search_attributes_view },
+            memo              => { %memo_view },
         };
     }
 
@@ -983,6 +999,105 @@ class Temporalio::Workflow::Runner {
         return $future;
     }
 
+    # --- upsert search attributes & memo (spec section 24) ------------------
+
+    # upsert_search_attributes(@updates) -> emit an UpsertWorkflowSearchAttributes
+    # command (oneof tag 18; MUST-match sdk-python
+    # workflow_upsert_search_attributes). @updates are
+    # Temporalio::Common::SearchAttributeUpdate objects (typed-only: an untyped
+    # mapping raises Temporalio::Exception::Argument — the resolved decision to
+    # reject the Python-deprecated overload). Empty @updates early-return with no
+    # command. Every value is converted BEFORE the command is buffered so a
+    # conversion failure leaves no partial command (a value_set encodes via the
+    # key's encode_value carrying the typed SA metadata; a value_unset writes a
+    # proper null Payload — no type metadata, the server-side deletion
+    # convention). The info->{search_attributes} view is updated in place.
+    method upsert_search_attributes (@updates) {
+        $self->_assert_writable('upsert_search_attributes');
+
+        for my $u (@updates) {
+            unless (Scalar::Util::blessed($u)
+                && $u->isa('Temporalio::Common::SearchAttributeUpdate')) {
+                Temporalio::Exception::Argument->throw(message =>
+                    'upsert_search_attributes accepts only typed updates built '
+                    . 'via $key->value_set / $key->value_unset (an untyped '
+                    . 'mapping is rejected — spec section 24)');
+            }
+        }
+        return unless @updates;   # empty -> no command (spec section 24.2).
+
+        # Convert first (no partial command on failure). Track the post-update
+        # view edits separately so they only land once every value encodes.
+        my %indexed_fields;
+        my @view_edits;
+        for my $u (@updates) {
+            my $key = $u->key;
+            if ($u->is_unset) {
+                $indexed_fields{ $key->name } =
+                    $payload_converter->to_payload(undef);
+                push @view_edits, [ $key->name, undef ];   # undef -> delete.
+            }
+            else {
+                $indexed_fields{ $key->name } = $key->encode_value($u->value);
+                push @view_edits, [ $key->name, $u->value ];
+            }
+        }
+
+        my $SearchAttributes = Temporalio::Core::Proto::resolve(
+            'temporal.api.common.v1.SearchAttributes');
+        push @commands,
+            Temporalio::Workflow::Commands::upsert_workflow_search_attributes(
+                $SearchAttributes->new({ indexed_fields => \%indexed_fields }));
+
+        for my $edit (@view_edits) {
+            my ($name, $value) = @$edit;
+            if (defined $value) { $search_attributes_view{$name} = $value }
+            else                { delete $search_attributes_view{$name} }
+        }
+        return;
+    }
+
+    # upsert_memo($updates) -> emit a ModifyWorkflowProperties command (oneof tag
+    # 19; MUST-match sdk-python workflow_upsert_memo). $updates is a name -> value
+    # hashref; an undef value REMOVES that key (an empty/null Payload — the
+    # deletion convention; removals are emitted even for absent keys). Empty
+    # $updates early-return with no command. Every non-removal value is converted
+    # BEFORE the command is buffered so a conversion failure leaves no partial
+    # command. The info->{memo} view is updated in place.
+    method upsert_memo ($updates) {
+        $self->_assert_writable('upsert_memo');
+        $updates //= {};
+        return unless keys %$updates;   # empty -> no command (spec section 24.2).
+
+        # Convert first (no partial command on failure). A removal (undef value)
+        # is a null Payload; a set is the converted value.
+        my %fields;
+        my @view_edits;
+        for my $name (keys %$updates) {
+            my $value = $updates->{$name};
+            if (defined $value) {
+                $fields{$name} = $payload_converter->to_payload($value);
+                push @view_edits, [ $name, $value ];
+            }
+            else {
+                $fields{$name} = $payload_converter->to_payload(undef);
+                push @view_edits, [ $name, undef ];   # undef -> delete.
+            }
+        }
+
+        my $Memo = Temporalio::Core::Proto::resolve('temporal.api.common.v1.Memo');
+        push @commands,
+            Temporalio::Workflow::Commands::modify_workflow_properties(
+                $Memo->new({ fields => \%fields }));
+
+        for my $edit (@view_edits) {
+            my ($name, $value) = @$edit;
+            if (defined $value) { $memo_view{$name} = $value }
+            else                { delete $memo_view{$name} }
+        }
+        return;
+    }
+
     # --- wait_condition (spec section 10.2 / T-wf-5) -------------------------
 
     # wait_condition($predicate, %opts) -> a Temporalio::Workflow::Future that
@@ -1237,6 +1352,25 @@ class Temporalio::Workflow::Runner {
     method _apply_initialize ($init) {
         # Seed the deterministic RNG from the job (NOT the run id).
         $rng = _make_rng($init->randomness_seed // 0);
+
+        # Seed the in-workflow search-attribute / memo views from the start-time
+        # values on the InitializeWorkflow job (spec section 24 / T-upsert-4). Each
+        # payload is decoded to a Perl value; a null/empty payload decodes to undef
+        # and is skipped (an unset key is simply absent from the view).
+        if (defined(my $sa = $init->search_attributes)) {
+            my $fields = $sa->indexed_fields // {};
+            for my $name (keys %$fields) {
+                my $value = $payload_converter->from_payload($fields->{$name});
+                $search_attributes_view{$name} = $value if defined $value;
+            }
+        }
+        if (defined(my $memo = $init->memo)) {
+            my $fields = $memo->fields // {};
+            for my $name (keys %$fields) {
+                my $value = $payload_converter->from_payload($fields->{$name});
+                $memo_view{$name} = $value if defined $value;
+            }
+        }
 
         # Convert the workflow arguments from payloads to Perl values.
         my @args = map { $payload_converter->from_payload($_) }
@@ -2811,6 +2945,14 @@ Emits a StartChildWorkflowExecution command and returns the start awaitable that
 =head2 start_timer
 
 Emits a StartTimer command and returns the cancellable awaitable that resolves when the timer fires.
+
+=head2 upsert_search_attributes
+
+Emits an UpsertWorkflowSearchAttributes command for the given typed updates (spec section 24) and updates the C<info-E<gt>{search_attributes}> view, converting every value before buffering so a conversion failure leaves no partial command. Empty updates emit no command; an untyped update raises L<Temporalio::Exception::Argument>.
+
+=head2 upsert_memo
+
+Emits a ModifyWorkflowProperties command for the given memo updates (spec section 24) and updates the C<info-E<gt>{memo}> view; an undef value removes the key (a null Payload). Empty updates emit no command; values are converted before buffering so a conversion failure leaves no partial command.
 
 =head2 wait_condition
 

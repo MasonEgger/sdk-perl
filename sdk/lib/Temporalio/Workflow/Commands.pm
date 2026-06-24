@@ -254,6 +254,36 @@ sub update_response ($protocol_instance_id, %parts) {
     });
 }
 
+# upsert_workflow_search_attributes { search_attributes } — emitted when the
+# workflow body calls Temporalio::Workflow::upsert_search_attributes (spec
+# section 24, oneof tag 18; MUST-match sdk-python
+# command.upsert_workflow_search_attributes.search_attributes). $search_attributes
+# is an already-built temporal.api.common.v1.SearchAttributes proto whose
+# indexed_fields map has one Payload per updated key (a set carries the typed SA
+# metadata; an unset carries a proper null Payload — the runner owns the
+# conversion). Core/the server merges the map into the existing attributes, these
+# values winning.
+sub upsert_workflow_search_attributes ($search_attributes) {
+    return _command_class()->new({
+        upsert_workflow_search_attributes => {
+            search_attributes => $search_attributes,
+        },
+    });
+}
+
+# modify_workflow_properties { upserted_memo } — emitted when the workflow body
+# calls Temporalio::Workflow::upsert_memo (spec section 24, oneof tag 19;
+# MUST-match sdk-python command.modify_workflow_properties.upserted_memo). $memo
+# is an already-built temporal.api.common.v1.Memo proto whose fields map has one
+# Payload per key (an undef value is encoded as an empty/null Payload — the
+# server-side deletion convention; the runner owns the conversion). The server
+# merges the map into the existing memo.
+sub modify_workflow_properties ($memo) {
+    return _command_class()->new({
+        modify_workflow_properties => { upserted_memo => $memo },
+    });
+}
+
 # set_patch_marker { patch_id, deprecated } — emitted the first time the
 # workflow body calls Temporalio::Workflow::patched($id) (or deprecate_patch)
 # and the patch is in use (spec section 10.3 step / versioning; MUST-match
@@ -438,6 +468,23 @@ C<< completed => $payload >> for a successful handler result (a
 C<temporal.api.common.v1.Payload>). An accepted update emits two of these (one
 C<accepted>, then one C<completed>/C<rejected>); a pre-acceptance rejection emits
 a single C<rejected>.
+
+=item C<upsert_workflow_search_attributes($search_attributes)>
+
+C<UpsertWorkflowSearchAttributes { search_attributes }> (spec section 24, oneof
+tag 18) — emitted when the workflow body calls
+C<Temporalio::Workflow::upsert_search_attributes>. C<$search_attributes> is a
+built C<temporal.api.common.v1.SearchAttributes> proto whose C<indexed_fields>
+map carries one Payload per updated key (a set carries the typed SA metadata; an
+unset carries a proper null Payload). The runner owns the conversion.
+
+=item C<modify_workflow_properties($memo)>
+
+C<ModifyWorkflowProperties { upserted_memo }> (spec section 24, oneof tag 19) —
+emitted when the workflow body calls C<Temporalio::Workflow::upsert_memo>.
+C<$memo> is a built C<temporal.api.common.v1.Memo> proto whose C<fields> map
+carries one Payload per key (an C<undef> value encodes an empty/null Payload, the
+deletion convention). The runner owns the conversion.
 
 =back
 

@@ -248,6 +248,30 @@ sub all_handlers_finished {
     return _runner()->_all_handlers_finished;
 }
 
+# --- upsert search attributes & memo (spec section 24) ----------------------
+
+# upsert_search_attributes(@updates) -> emit UpsertWorkflowSearchAttributes (spec
+# section 24). @updates are Temporalio::Common::SearchAttributeUpdate objects
+# built via $key->value_set($v) / $key->value_unset on a typed
+# Temporalio::Common::SearchAttributeKey (the typed-only surface — adopting
+# sdk-ruby; the Python-deprecated untyped-dict form is rejected with
+# Temporalio::Exception::Argument by the runner). Empty @updates early-return with
+# no command. Pre-converts before buffering, so a conversion failure leaves no
+# partial command. Outside a workflow body -> NoRunner.
+sub upsert_search_attributes (@updates) {
+    return _runner()->upsert_search_attributes(@updates);
+}
+
+# upsert_memo(\%updates) -> emit ModifyWorkflowProperties (spec section 24).
+# %updates is a name -> value hashref; an undef value REMOVES that key (a proper
+# empty/null Payload — the deletion convention). Removals are emitted even for
+# absent keys. Empty %updates early-return with no command. Pre-converts before
+# buffering, so a conversion failure leaves no partial command. Outside a workflow
+# body -> NoRunner.
+sub upsert_memo ($updates) {
+    return _runner()->upsert_memo($updates);
+}
+
 # --- continue-as-new (spec section 10.2 / 10.3 step 6) ----------------------
 
 # continue_as_new($workflow_or_string, %opts) — request that the current run
@@ -411,6 +435,30 @@ Starts a workflow timer for the given duration and returns its awaitable without
 =head2 time
 
 Returns the deterministic current time as epoch seconds at the activation timestamp.
+
+=head2 upsert_search_attributes
+
+    Temporalio::Workflow::upsert_search_attributes(@updates);
+
+Emits an C<UpsertWorkflowSearchAttributes> command for the typed search-attribute
+updates (spec section 24). C<@updates> are
+L<Temporalio::Common::SearchAttributeUpdate> objects built via C<< $key->value_set($v) >>
+/ C<< $key->value_unset >> on a typed L<Temporalio::Common::SearchAttributeKey>
+(typed-only surface; an untyped mapping raises L<Temporalio::Exception::Argument>).
+Empty updates early-return with no command. Values are converted before the
+command is buffered, so a conversion failure leaves no partial command. Raises
+L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
+
+=head2 upsert_memo
+
+    Temporalio::Workflow::upsert_memo({ reason => 'x', stale => undef });
+
+Emits a C<ModifyWorkflowProperties> command updating the workflow memo (spec
+section 24). The hashref maps names to values; an C<undef> value removes that key
+(a null Payload, the deletion convention) and is emitted even for an absent key.
+Empty updates early-return with no command. Values are converted before the
+command is buffered, so a conversion failure leaves no partial command. Raises
+L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
 
 =head2 wait_condition
 

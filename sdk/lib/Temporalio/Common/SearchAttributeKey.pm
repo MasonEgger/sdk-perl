@@ -8,6 +8,7 @@ no warnings 'experimental::class';
 
 use JSON::PP ();
 use Scalar::Util ();
+use Temporalio::Common::SearchAttributeUpdate ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Payload ();
 
@@ -60,6 +61,30 @@ class Temporalio::Common::SearchAttributeKey {
     sub keyword_list ($class, $name) {
         $class->new(name => $name, metadata_type => 'KeywordList',
             indexed_value_type => 7);
+    }
+
+    # value_set($value) -> a Temporalio::Common::SearchAttributeUpdate that sets
+    # this key to $value (spec section 24; MUST-match sdk-ruby Key#value_set). An
+    # undef value is rejected — use value_unset to delete (sdk-ruby raises the
+    # same ArgumentError). The value is validated/encoded later by the runner via
+    # encode_value, so type errors surface there (before any command is buffered).
+    method value_set ($value) {
+        if (!defined $value) {
+            Temporalio::Exception::Argument->throw(message =>
+                "value_set on search attribute '$name' requires a value; use "
+                . 'value_unset to delete the key');
+        }
+        return Temporalio::Common::SearchAttributeUpdate->new(
+            key => $self, value => $value);
+    }
+
+    # value_unset -> a Temporalio::Common::SearchAttributeUpdate that deletes
+    # this key (spec section 24; MUST-match sdk-ruby Key#value_unset). The runner
+    # encodes an unset as a proper null Payload (no type metadata — the
+    # server-side deletion convention).
+    method value_unset {
+        return Temporalio::Common::SearchAttributeUpdate->new(
+            key => $self, is_unset => 1);
     }
 
     # Encode a value to a temporal.api.common.v1.Payload carrying both the
@@ -232,5 +257,22 @@ Accessor returning the C<name> value.
 =head2 text
 
 Class method constructing a text-typed search attribute key.
+
+=head2 value_set
+
+    my $update = $key->value_set($value);
+
+Returns a L<Temporalio::Common::SearchAttributeUpdate> setting this key to
+C<$value> (spec section 24). An C<undef> value raises
+L<Temporalio::Exception::Argument> (use C<value_unset> to delete). The value is
+encoded by the runner via C<encode_value> when the update is applied.
+
+=head2 value_unset
+
+    my $update = $key->value_unset;
+
+Returns a L<Temporalio::Common::SearchAttributeUpdate> that deletes this key
+(spec section 24). The runner encodes it as a proper null Payload (the
+server-side deletion convention).
 
 =cut

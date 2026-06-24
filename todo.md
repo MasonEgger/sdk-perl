@@ -320,9 +320,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P7.3.3 Verify: prove -lj4 t
 
 ### P7.4 In-workflow upsert search-attributes & memo (spec §24)
-- [ ] P7.4.1 RED: sdk/t/replay/upsert.t (T-upsert-1..9) + WfDef fixtures
-- [ ] P7.4.2 GREEN: upsert_search_attributes/upsert_memo + Commands builders + Runner conversion/info-view + SearchAttributeKey value_set/value_unset
-- [ ] P7.4.3 Verify: prove -lj4 t — **Phase 7 acceptance: activity parity green**
+- [x] P7.4.1 RED: sdk/t/replay/upsert.t (T-upsert-1..9) + WfDef fixtures
+- [x] P7.4.2 GREEN: upsert_search_attributes/upsert_memo + Commands builders + Runner conversion/info-view + SearchAttributeKey value_set/value_unset
+- [x] P7.4.3 Verify: prove -lj4 t — **Phase 7 acceptance: activity parity green**
 
 ## Phase 8 — Scheduling
 
