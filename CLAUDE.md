@@ -54,8 +54,11 @@ dzil test                       # per-distribution check (alien-core/, alien-per
 
 ### Build & memory guard (MANDATORY for any cargo / Alien / dzil build)
 
-This host has **7.8 GiB RAM and no swap**; the kernel OOM killer has killed
-`rustc` (and stray long-lived `claude` sessions) during release builds. For
+This host has **7.8 GiB RAM**; the kernel OOM killer has killed `rustc` (and
+stray long-lived `claude` sessions) during release builds. An **8 GiB swapfile
+was added 2026-06-25** (swappiness 60), which removes the hard OOM kills and
+the memory-reclaim freezes that made the integration suite flaky (P10.0.7) —
+but a build that thrashes into swap is slow, so the caps below still apply. For
 EVERY cargo invocation — direct `cargo`, or indirect via `dzil test` / an
 Alien rebuild:
 
