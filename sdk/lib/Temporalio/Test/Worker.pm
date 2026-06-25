@@ -7,6 +7,8 @@ use feature 'class';
 no warnings 'experimental::class';
 
 use Future ();
+use Scalar::Util ();
+use Temporalio::Exception::RpcTimeout ();
 
 class Temporalio::Test::Worker {
     # The worker under test and the IO::Async loop its runtime drives.
@@ -29,7 +31,7 @@ class Temporalio::Test::Worker {
     # test hanging until the timeout). A genuine timeout dies with a clear
     # message. The worker run future is protected from cancellation so awaiting a
     # result never tears the running worker down.
-    method await_result ($future, $timeout = 60) {
+    method await_result ($future, $timeout = 120) {
         $loop->await(Future->wait_any(
             $future,
             $run_future->without_cancel,
@@ -44,10 +46,63 @@ class Temporalio::Test::Worker {
         return $future->get;
     }
 
+    # _is_transient_load_error($err) -> bool. True for the transient gRPC-layer
+    # failures a loaded box raises mid-call when it starves the worker: a clean
+    # DEADLINE_EXCEEDED (Temporalio::Exception::RpcTimeout), an UNAVAILABLE
+    # (gRPC 14), or the RpcError catch-all whose message is a transport hiccup
+    # (h2/http2 protocol error, connection reset, broken pipe, bare transport
+    # error). These are all the SAME load artifact and safe to re-issue on an
+    # idempotent read. Deliberately NARROW: NOT_FOUND / ALREADY_EXISTS /
+    # FAILED_PRECONDITION (QueryRejected) / PERMISSION_DENIED / UNAUTHENTICATED /
+    # INVALID_ARGUMENT are real, non-transient outcomes and must surface at once.
+    sub _is_transient_load_error ($err) {
+        return 0 unless Scalar::Util::blessed($err);
+        return 1 if $err->isa('Temporalio::Exception::RpcTimeout');
+        return 0 unless $err->isa('Temporalio::Exception::RpcError');
+        my $name = $err->status_name // '';
+        return 1 if $name eq 'unavailable' || $name eq 'UNAVAILABLE';
+        my $msg = $err->message // '';
+        return 1 if $msg =~ /
+            \b h2 \b | http2 | transport \s+ error
+            | connection \s+ reset | broken \s+ pipe | connection \s+ closed
+        /xi;
+        return 0;
+    }
+
+    # await_idempotent($producer, %opts) -> the resolved value. $producer is a
+    # coderef returning a FRESH Future per call (so a retry re-issues the RPC).
+    # Wraps await_result, but absorbs a transient load-stall transport failure
+    # (see _is_transient_load_error) by retrying up to %opts{attempts} times with
+    # a short %opts{backoff} pause between tries. RETRY IS SAFE ONLY FOR IDEMPOTENT
+    # operations — query, fetch result/describe, poll loops — where a re-issued
+    # call has no side effect. Do NOT use it for start_workflow (would surface
+    # WorkflowAlreadyStarted) or signal (would double-deliver). Any non-transient
+    # failure is raised immediately, never retried, so this never masks a real
+    # error; a persistent transient failure surfaces after the last attempt.
+    method await_idempotent ($producer, %opts) {
+        my $attempts = $opts{attempts} // 3;
+        my $backoff  = $opts{backoff}  // 0.5;
+        my $timeout  = $opts{timeout}  // 120;
+        for my $attempt (1 .. $attempts) {
+            my ($value, $ok, $err);
+            {
+                local $@;
+                $ok = eval { $value = $self->await_result($producer->(), $timeout); 1 };
+                $err = $@;
+            }
+            return $value if $ok;
+            die $err
+                if !_is_transient_load_error($err) || $attempt == $attempts;
+            $loop->await($loop->delay_future(after => $backoff)) if $backoff > 0;
+        }
+        # Unreachable: the loop either returns or dies on the last attempt.
+        return;
+    }
+
     # shutdown($timeout=60): initiate worker shutdown so the poll loops drain on
     # the ShutDown sentinel, then await the run future so finalize + free + fork
     # pool teardown all complete (no orphaned processes). Idempotent.
-    method shutdown ($timeout = 60) {
+    method shutdown ($timeout = 120) {
         $worker->shutdown;
         $loop->await(Future->wait_any(
             $run_future, $loop->timeout_future(after => $timeout)));
@@ -128,6 +183,23 @@ Constructs a Temporalio::Test::Worker. Named parameters:
 =head2 await_result
 
 Async. Returns a L<Future> resolving once the worker's run loop has finished.
+
+=head2 await_idempotent
+
+    my $value = $tw->await_idempotent(sub { $handle->query('name') });
+    my $value = $tw->await_idempotent($producer, attempts => 3, backoff => 0.5);
+
+Awaits an idempotent read (query, fetch result/describe) with a bounded retry
+around a transient load-stall transport failure, which a loaded test box can
+raise when it starves the worker mid-call: C<Temporalio::Exception::RpcTimeout>
+(gRPC C<DEADLINE_EXCEEDED>), C<UNAVAILABLE>, or the C<RpcError> catch-all whose
+message is an h2/http2 protocol error, connection reset, broken pipe, or bare
+transport error. C<$producer> is a coderef returning a B<fresh> L<Future> per
+attempt so a retry re-issues the RPC. Only these transient failures are retried;
+any real, non-transient error (C<NOT_FOUND>, C<QueryRejected>, etc.) surfaces
+immediately, and a persistent transient failure surfaces after the last attempt.
+B<Use for idempotent operations only>: never C<start_workflow>
+(C<WorkflowAlreadyStarted>) or C<signal> (double-delivery).
 
 =head2 shutdown
 

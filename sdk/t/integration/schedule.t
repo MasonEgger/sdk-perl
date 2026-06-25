@@ -49,7 +49,7 @@ my $server = Temporalio::Test::DevServer->start(
     log_level     => 'warn',
 );
 
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n"
@@ -84,15 +84,23 @@ sub pump ($seconds) {
     await_future($loop->delay_future(after => $seconds), $seconds + 5);
 }
 
+# describe() is an idempotent read. On this loaded box a transient
+# DEADLINE_EXCEEDED can fire mid-describe; treat it as "no answer yet" inside
+# the poll loop (keep polling) rather than aborting the subtest. A non-timeout
+# RpcError still surfaces. Re-issues a fresh future each call.
+sub describe_tolerant ($handle) {
+    return $tw->await_idempotent(sub { $handle->describe });
+}
+
 # Poll a schedule handle's num_actions until it reaches $target (or time out).
-sub await_num_actions ($handle, $target, $timeout = 30) {
+sub await_num_actions ($handle, $target, $timeout = 60) {
     my $deadline = time + $timeout;
     while (time < $deadline) {
-        my $desc = await_future($handle->describe);
+        my $desc = describe_tolerant($handle);
         return $desc if $desc->info->num_actions >= $target;
         pump(1);
     }
-    return await_future($handle->describe);
+    return describe_tolerant($handle);
 }
 
 sub a_schedule (%o) {
@@ -306,7 +314,7 @@ T2->subtest('list_matching_times projects fire times (T-sched-7)' => sub {
 });
 
 # Clean shutdown: drain the worker, close the client, stop the server.
-$tw->shutdown(60);
+$tw->shutdown(120);
 T2->ok($worker->is_shutdown, 'worker shut down cleanly');
 
 $client->connection->close if defined $client;

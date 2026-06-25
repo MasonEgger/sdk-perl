@@ -47,7 +47,7 @@ my $server = Temporalio::Test::DevServer->start(
     log_level     => 'warn',
 );
 
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n" unless $future->is_ready;
@@ -112,10 +112,10 @@ T2->subtest('request_eager_start workflow completes; eagerly_started reported (T
             . 'eager assertion skipped per spec section 23.1');
     }
 
-    my $result = $tw->await_result($handle->result, 60);
+    my $result = $tw->await_idempotent(sub { $handle->result });
     T2->is($result, 'Hello, Alice!', 'eager-requested workflow completed normally');
 
-    $tw->shutdown(60);
+    $tw->shutdown(120);
 });
 
 # ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ T2->subtest('no_remote_activities -> activity times out SCHEDULE_TO_START (T-eag
         task_queue => $no_remote_tq,
     ));
 
-    my $err = exception_from(sub { $tw->await_result($handle->result, 60) });
+    my $err = exception_from(sub { $tw->await_idempotent(sub { $handle->result }) });
     T2->ok(
         Scalar::Util::blessed($err)
             && $err->isa('Temporalio::Exception::WorkflowFailure'),
@@ -170,7 +170,7 @@ T2->subtest('no_remote_activities -> activity times out SCHEDULE_TO_START (T-eag
         if Scalar::Util::blessed($timeout)
             && $timeout->isa('Temporalio::Exception::Timeout');
 
-    $tw->shutdown(60);
+    $tw->shutdown(120);
 });
 
 # Clean shutdown: close the client and stop the dev server + runtime. The

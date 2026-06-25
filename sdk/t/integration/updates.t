@@ -46,7 +46,7 @@ my $server = Temporalio::Test::DevServer->start(
     log_level     => 'warn',
 );
 
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n"
@@ -80,7 +80,7 @@ my $worker = Temporalio::Worker->new(
 
 my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-sub await_with_worker ($future, $timeout = 60) {
+sub await_with_worker ($future, $timeout = 120) {
     return $tw->await_result($future, $timeout);
 }
 
@@ -170,7 +170,7 @@ T2->subtest('explicit update_id round-trips into the handle (T-cli-update-7)' =>
     T2->is($r, 4, 'the explicitly-identified update completed');
 });
 
-$tw->shutdown(60);
+$tw->shutdown(120);
 $client->connection->close if defined $client;
 $server->shutdown;
 $runtime->shutdown;

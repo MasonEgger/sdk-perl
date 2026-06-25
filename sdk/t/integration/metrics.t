@@ -67,7 +67,7 @@ my $server = Temporalio::Test::DevServer->start(
     log_level     => 'warn',
 );
 
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n" unless $future->is_ready;
@@ -104,7 +104,7 @@ my $handle = $tw->await_result($client->start_workflow(
     id         => unique_id('greeting'),
     task_queue => $task_queue,
 ), 60);
-my $result = $tw->await_result($handle->result, 60);
+my $result = $tw->await_idempotent(sub { $handle->result });
 T2->is($result, 'Hello, Metrics!', 'workflow ran under the custom meter');
 
 # Pump the loop briefly so any final marshalled meter requests / aggregated
@@ -121,7 +121,7 @@ T2->ok($meter->recorded > 0,
 # Explicit teardown (P7.2 precedent): drain the worker, close the client, stop
 # the server, and shut the runtime down so the -j4 harness never wedges on an
 # orphaned dev server.
-$tw->shutdown(60);
+$tw->shutdown(120);
 $client->connection->close if defined $client;
 $server->shutdown;
 $runtime->shutdown;

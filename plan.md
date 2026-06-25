@@ -1603,6 +1603,26 @@ protected, not just the tests.
    files run one-at-a-time (one dev server live at once) while unit/replay tests
    stay parallel — the command remains `prove -lj4 t`. Verify: full `prove -lj4
    t` 6x consecutive, all exit 0 (429 tests each).
+5. P10.0.5 (a SECOND, distinct flake from the P10.0.4 teardown dirty-exit): a
+   subtest in signals_queries.t intermittently dies with a transient
+   gRPC-transport error because the -j4 unit-suite load starves the
+   query-answering worker mid-call (load artifact; client RPC `timeout` defaults
+   to 0 = no client deadline). Two shapes observed under forced contention:
+   `RpcTimeout` / `DEADLINE_EXCEEDED`, and `h2 protocol error: http2 error` (the
+   RpcError catch-all from a tonic transport hiccup). Fix is test-only: add
+   `Temporalio::Test::Worker::await_idempotent($producer, attempts=>3,
+   backoff=>0.5)` — a bounded retry that re-issues the RPC on a transient
+   load-stall transport failure ONLY (classifier `_is_transient_load_error`:
+   DEADLINE_EXCEEDED, UNAVAILABLE, or an h2/http2/connection-reset/broken-pipe/
+   transport-error RpcError; a persistent failure surfaces after the last
+   attempt; every real non-transient error — NOT_FOUND, QueryRejected,
+   ALREADY_EXISTS, … — surfaces immediately) — and wrap idempotent reads (query,
+   fetch result, schedule describe poll) across t/integration/*.t with it, while
+   leaving non-idempotent start_workflow/signal/terminate un-retried. Also raise
+   the test-harness await ceilings (not production timeouts): await_future
+   30→60, await_with_worker/await_result 60→120, shutdown 60→120,
+   await_num_actions 30→60. RED: t/unit/test_worker_retry.t. Verify: full `prove
+   -lj4 t` 8x consecutive under forced CPU contention, all exit 0.
 ```
 
 ### Step P10.1: Interceptor framework (spec §27)

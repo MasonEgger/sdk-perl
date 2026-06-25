@@ -55,7 +55,7 @@ my sub teardown {
 }
 END { teardown() }
 
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n" unless $future->is_ready;
@@ -135,10 +135,10 @@ T2->subtest('T-tuner-5 custom supplier drives a worker; callbacks on main thread
         id         => unique('wf'),
         task_queue => $task_queue,
     ), 60);
-    my $result = $tw->await_result($handle->result, 60);
+    my $result = $tw->await_idempotent(sub { $handle->result });
     T2->is($result, 'Hello, Tuner!', 'workflow completed with the custom tuner');
 
-    $tw->shutdown(60);
+    $tw->shutdown(120);
     T2->ok($worker->is_shutdown, 'worker shut down cleanly');
 
     # The custom supplier was actually exercised: at least one reservation
@@ -194,11 +194,11 @@ T2->subtest('T-tuner-6 try_reserve undef defers to a poll-reserve' => sub {
         id         => unique('wf'),
         task_queue => $task_queue,
     ), 60);
-    my $result = $tw->await_result($handle->result, 60);
+    my $result = $tw->await_idempotent(sub { $handle->result });
     T2->is($result, 'Hello, Defer!',
         'workflow completes even though try_reserve always defers');
 
-    $tw->shutdown(60);
+    $tw->shutdown(120);
     T2->ok($supplier->{reserve} > 0,
         'the async reserve path was used when try_reserve deferred');
 });

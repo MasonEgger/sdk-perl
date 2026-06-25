@@ -69,7 +69,7 @@ my $worker = Temporalio::Worker->new(
 
 my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-sub await_with_worker ($future, $timeout = 60) {
+sub await_with_worker ($future, $timeout = 120) {
     return $tw->await_result($future, $timeout);
 }
 
@@ -137,7 +137,7 @@ T2->subtest('signalling a non-existent id surfaces as Application (T-ext-10b)' =
         or T2->diag('chain: ' . ($err // 'undef'));
 });
 
-$tw->shutdown(60);
+$tw->shutdown(120);
 T2->ok($worker->is_shutdown, 'worker shut down cleanly after run drained');
 
 $client->connection->close if defined $client;

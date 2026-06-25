@@ -58,7 +58,7 @@ my sub teardown {
 }
 END { teardown() }
 
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n" unless $future->is_ready;
@@ -104,11 +104,11 @@ T2->subtest('T-wkrver-4 routing: a deployment-versioned worker routes + reports 
         id         => unique('wf'),
         task_queue => $task_queue,
     ), 60);
-    my $result = $tw->await_result($handle->result, 60);
+    my $result = $tw->await_idempotent(sub { $handle->result });
     T2->is($result, 'Hello, Alice!',
         'deployment-versioned workflow completed (behavior reported, routed)');
 
-    $tw->shutdown(60);
+    $tw->shutdown(120);
     T2->ok($worker->is_shutdown, 'worker shut down cleanly');
 });
 

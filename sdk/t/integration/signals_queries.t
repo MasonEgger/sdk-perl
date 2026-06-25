@@ -54,7 +54,7 @@ my $server = Temporalio::Test::DevServer->start(
 );
 
 # Await $future on the loop, but never hang the suite.
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n"
@@ -90,8 +90,18 @@ my $worker = Temporalio::Worker->new(
 # surfaces a worker crash promptly rather than hanging the per-result wait.
 my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-sub await_with_worker ($future, $timeout = 60) {
+sub await_with_worker ($future, $timeout = 120) {
     return $tw->await_result($future, $timeout);
+}
+
+# IDEMPOTENT reads only (query, fetch result): $producer returns a FRESH future
+# per attempt so a transient load-stall transport failure (DEADLINE_EXCEEDED,
+# UNAVAILABLE, or an h2/http2 protocol hiccup) — fired when this loaded box
+# starves the worker mid-poll — is re-issued rather than failing the subtest. A
+# real (non-transient) error still surfaces immediately. Never wrap
+# start_workflow / signal / terminate (non-idempotent) in this.
+sub await_idempotent ($producer) {
+    return $tw->await_idempotent($producer);
 }
 
 T2->subtest('signal drives a Perl :Signal handler; query reads :Query state (T-cli-signal-1, T-cli-query-1)' => sub {
@@ -103,7 +113,7 @@ T2->subtest('signal drives a Perl :Signal handler; query reads :Query state (T-c
     ));
 
     # Before the signal: the query observes the empty initial name.
-    my $before = await_with_worker($handle->query('currentName'));
+    my $before = await_idempotent(sub { $handle->query('currentName') });
     T2->is($before, '', 'query observes empty name before the signal');
 
     # Send the signal; the worker's :Signal handler sets the name and the
@@ -116,14 +126,14 @@ T2->subtest('signal drives a Perl :Signal handler; query reads :Query state (T-c
     # query is dispatched.
     my $after;
     for (1 .. 20) {
-        $after = await_with_worker($handle->query('currentName'));
+        $after = await_idempotent(sub { $handle->query('currentName') });
         last if $after eq 'Ada';
         await_future($loop->delay_future(after => 0.25));
     }
     T2->is($after, 'Ada', 'query observes the signalled name after the signal');
 
     # The signal unblocked wait_condition; the workflow greets and completes.
-    my $result = await_with_worker($handle->result, 60);
+    my $result = await_idempotent(sub { $handle->result });
     T2->is($result, 'Hello, Ada!', 'signal unblocked the workflow to completion');
 });
 
@@ -141,9 +151,10 @@ T2->subtest('query against a terminated workflow with reject_condition raises Qu
     await_with_worker($handle->terminate(reason => 'terminated for reject test'));
 
     my $err = exception_from(sub {
-        await_with_worker(
+        await_idempotent(sub {
             $handle->query('currentName', [],
-                reject_condition => QUERY_REJECT_NOT_OPEN));
+                reject_condition => QUERY_REJECT_NOT_OPEN);
+        });
     });
     T2->ok(
         Scalar::Util::blessed($err)
@@ -155,7 +166,7 @@ T2->subtest('query against a terminated workflow with reject_condition raises Qu
 # Clean shutdown: initiate worker shutdown (poll loops drain on the ShutDown
 # sentinel), await the run future so finalize + free + fork-pool teardown all
 # complete, then close the client and stop the server. No orphaned processes.
-$tw->shutdown(60);
+$tw->shutdown(120);
 T2->ok($worker->is_shutdown, 'worker shut down cleanly after run drained');
 
 $client->connection->close if defined $client;

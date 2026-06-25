@@ -58,7 +58,7 @@ my $server = Temporalio::Test::DevServer->start(
 );
 
 # Await $future on the loop, but never hang the suite.
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n"
@@ -109,7 +109,7 @@ my $worker = Temporalio::Worker->new(
 # surfaces a worker crash promptly rather than hanging the per-result wait.
 my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-sub await_with_worker ($future, $timeout = 60) {
+sub await_with_worker ($future, $timeout = 120) {
     return $tw->await_result($future, $timeout);
 }
 
@@ -175,7 +175,7 @@ T2->subtest('abandon-typed activity is left running; workflow still ends Cancell
 # sentinel), await the run future so finalize + free + fork-pool teardown all
 # complete, then close the client and stop the server. No orphaned processes —
 # the abandoned activity is bounded so its fork-pool child exits on its own.
-$tw->shutdown(60);
+$tw->shutdown(120);
 T2->ok($worker->is_shutdown, 'worker shut down cleanly after run drained');
 
 $client->connection->close if defined $client;

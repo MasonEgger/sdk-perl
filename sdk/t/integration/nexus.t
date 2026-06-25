@@ -61,7 +61,7 @@ require WfDef::NexusCallerIntegration;
 my $loop    = IO::Async::Loop->new;
 my $runtime = Temporalio::Runtime->new(loop => $loop);
 
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n" unless $future->is_ready;

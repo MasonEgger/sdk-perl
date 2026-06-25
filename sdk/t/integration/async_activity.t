@@ -48,7 +48,7 @@ my $server = Temporalio::Test::DevServer->start(
     log_level     => 'warn',
 );
 
-sub await_future ($future, $timeout = 30) {
+sub await_future ($future, $timeout = 60) {
     $loop->await(
         Future->wait_any($future, $loop->timeout_future(after => $timeout)));
     die "future did not resolve within ${timeout}s\n" unless $future->is_ready;
@@ -113,14 +113,14 @@ T2->subtest('complete_async -> out-of-band completion end-to-end (T-asyncact-7)'
     my $async = $client->async_activity_handle(task_token => $captured_tokens[0]);
     $tw->await_result($async->complete('out-of-band!'));
 
-    my $result = $tw->await_result($handle->result);
+    my $result = $tw->await_idempotent(sub { $handle->result });
     T2->is($result, 'out-of-band!', 'workflow result is the out-of-band value');
 });
 
 # Clean shutdown (mirrors end_to_end.t): drain the worker poll loops, close the
 # client, and stop the dev server + runtime. Skipping this leaks the dev-server
 # child, which inherits the TAP harness pipe and wedges a parallel `prove` run.
-$tw->shutdown(60);
+$tw->shutdown(120);
 $client->connection->close if defined $client;
 $server->shutdown;
 $runtime->shutdown;
