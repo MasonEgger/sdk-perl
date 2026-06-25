@@ -238,6 +238,17 @@ class Temporalio::Runtime {
             Temporalio::Runtime::MetricMeter->_clear_active;
             $custom_meter = 0;
         }
+        # 1d. Release the custom slot-supplier registry (spec §29.2) before the
+        # queue is freed: stop the shim routing supplier callbacks to it, free
+        # every leaked callbacks struct, and clear the active impl map. A no-op
+        # unless this runtime's queue owns the registry (a worker on this
+        # runtime claimed it). Safe here because the core runtime is freed below
+        # and no supplier callback can fire afterward.
+        if (defined $queue_ptr) {
+            Temporalio::Core::FFI::supplier_unregister($queue_ptr);
+            require Temporalio::Worker::SlotSupplierRegistry;
+            Temporalio::Worker::SlotSupplierRegistry->_clear_active;
+        }
         # 2. Free the shim callback queue (drops undrained entries).
         Temporalio::Core::FFI::queue_free($queue_ptr) if defined $queue_ptr;
         $queue_ptr = undef;

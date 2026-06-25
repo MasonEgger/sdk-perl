@@ -3,7 +3,7 @@
 
 use std::ffi::{c_char, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use crossbeam_queue::SegQueue;
 
@@ -1117,6 +1117,528 @@ pub extern "C" fn temporalio_perl_bridge_meter_attributes_free_ptr() -> *mut c_v
 #[no_mangle]
 pub extern "C" fn temporalio_perl_bridge_meter_meter_free_ptr() -> *mut c_void {
     temporalio_perl_bridge_meter_meter_free as *mut c_void
+}
+
+// --- Custom slot suppliers (spec section 29.2, the one v0.2 feature needing
+// new shim work) -------------------------------------------------------------
+//
+// Core invokes the six `TemporalCoreCustomSlotSupplierCallbacks` on Tokio
+// threads. The same never-touch-Perl-off-core-threads discipline as the metric
+// meter applies: the shim NEVER blocks and NEVER calls Perl from a callback. It
+// parks a request on the per-runtime queue, signals the wakeup fd, and the
+// IO::Async loop drains and runs the Perl method on the main thread.
+//
+// reserve: async — core hands a `completion_ctx`; the shim parks a reserve
+//   request carrying it, and the main-thread drain runs the Perl `reserve_slot`,
+//   gets a permit id, and calls `temporal_core_complete_async_reserve`. The
+//   `complete` fn pointer is passed in from Perl (FFI::Platypus loads libs
+//   RTLD_LOCAL, so the shim cannot reference the undefined core extern directly
+//   — the P10.3/P10.4 precedent). The completion pointer is stored as a usize.
+// try_reserve: synchronous, returns a permit id or 0. The shim cannot consult
+//   Perl synchronously without re-entering a libffi closure, so it always
+//   returns 0 (decline). Eager reservations then defer to the async reserve
+//   path (T-tuner-6). The request is still parked so Perl can observe the call.
+// mark_used / release: non-blocking — park, drain runs the Perl method.
+// available_slots / free: see below (available_slots is left NULL; free parks).
+
+/// Request tags the custom-supplier drain switches on (Perl side).
+pub const TEMPORALIO_PERL_BRIDGE_SLOT_REQ_RESERVE: u8 = 1;
+pub const TEMPORALIO_PERL_BRIDGE_SLOT_REQ_TRY_RESERVE: u8 = 2;
+pub const TEMPORALIO_PERL_BRIDGE_SLOT_REQ_MARK_USED: u8 = 3;
+pub const TEMPORALIO_PERL_BRIDGE_SLOT_REQ_RELEASE: u8 = 4;
+pub const TEMPORALIO_PERL_BRIDGE_SLOT_REQ_FREE: u8 = 5;
+
+/// A `temporal_core_complete_async_reserve` function pointer, stored as a usize
+/// so the request struct stays `Send`. Bound once via
+/// `temporalio_perl_bridge_supplier_set_complete_reserve`.
+static SUPPLIER_COMPLETE_RESERVE: AtomicUsize = AtomicUsize::new(0);
+
+/// The reserve-context fields, copied out of the borrowed `SlotReserveCtx`
+/// (valid only for the callback's duration) so the parked request outlives it.
+#[derive(Clone, Default)]
+struct SlotReserveCtxCopy {
+    slot_type: i32,
+    task_queue: String,
+    worker_identity: String,
+    worker_build_id: String,
+    is_sticky: bool,
+}
+
+/// A parked custom-supplier request the main-thread drain runs.
+struct SlotRequest {
+    tag: u8,
+    /// Which Perl supplier (the user_data id we set in the callbacks struct).
+    supplier_id: u64,
+    /// Reserve context (reserve / try_reserve).
+    ctx: SlotReserveCtxCopy,
+    /// Opaque `completion_ctx` pointer for an async reserve, as usize.
+    completion_ctx: usize,
+    /// Slot kind type for mark_used/release (the slot_info tag), or 0.
+    slot_info_type: i32,
+    /// Lang-issued permit id for mark_used/release.
+    permit: usize,
+}
+
+unsafe impl Send for SlotRequest {}
+
+/// One per-runtime custom-supplier registry. Holds the parked requests and the
+/// queue to signal. Suppliers are identified by an id (set as the callbacks
+/// struct `user_data`); the registry maps ids to nothing Rust-side — the Perl
+/// drain owns the Perl supplier objects and dispatches by id.
+struct SupplierRegistry {
+    queue: *const TemporalioPerlBridgeQueue,
+    next_id: AtomicU64,
+    requests: std::sync::Mutex<std::collections::VecDeque<SlotRequest>>,
+    /// Live callbacks structs leaked for each supplier, reclaimed on unregister.
+    callbacks: std::sync::Mutex<Vec<*mut TemporalCoreCustomSlotSupplierCallbacks>>,
+}
+
+unsafe impl Send for SupplierRegistry {}
+unsafe impl Sync for SupplierRegistry {}
+
+static SUPPLIER_REGISTRY: AtomicPtr<SupplierRegistry> = AtomicPtr::new(ptr::null_mut());
+static SUPPLIER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+impl SupplierRegistry {
+    fn alloc_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn park(&self, req: SlotRequest) {
+        {
+            let mut q = self.requests.lock().unwrap();
+            q.push_back(req);
+        }
+        if !self.queue.is_null() {
+            // SAFETY: queue is a live borrow for the registry's lifetime.
+            unsafe { (*self.queue).signal() };
+        }
+    }
+}
+
+fn supplier_registry() -> Option<&'static SupplierRegistry> {
+    let p = SUPPLIER_REGISTRY.load(Ordering::Acquire);
+    if p.is_null() {
+        None
+    } else {
+        // SAFETY: non-null is a leaked Box live until unregister, which the
+        // owning runtime calls only after core has stopped invoking callbacks.
+        Some(unsafe { &*p })
+    }
+}
+
+/// Mirror of `TemporalCoreSlotReserveCtx` (header :598). The borrowed pointer is
+/// valid only for the callback's duration; the trampoline copies it out.
+#[repr(C)]
+pub struct TemporalCoreSlotReserveCtx {
+    pub slot_type: i32,
+    pub task_queue: TemporalCoreByteArrayRef,
+    pub worker_identity: TemporalCoreByteArrayRef,
+    pub worker_build_id: TemporalCoreByteArrayRef,
+    pub is_sticky: bool,
+}
+
+unsafe fn copy_reserve_ctx(ctx: *const TemporalCoreSlotReserveCtx) -> SlotReserveCtxCopy {
+    if ctx.is_null() {
+        return SlotReserveCtxCopy::default();
+    }
+    let c = &*ctx;
+    SlotReserveCtxCopy {
+        slot_type: c.slot_type,
+        task_queue: ref_to_string(&c.task_queue),
+        worker_identity: ref_to_string(&c.worker_identity),
+        worker_build_id: ref_to_string(&c.worker_build_id),
+        is_sticky: c.is_sticky,
+    }
+}
+
+/// The six custom-supplier callbacks core invokes. The signatures match the
+/// header typedefs; `user_data` is the supplier id we set when building the
+/// callbacks struct.
+
+/// reserve: park a reserve request carrying the completion ctx, return. The
+/// drain runs the Perl `reserve_slot` and completes the async reservation.
+unsafe extern "C" fn supplier_reserve(
+    ctx: *const TemporalCoreSlotReserveCtx,
+    completion_ctx: *const c_void,
+    user_data: *mut c_void,
+) {
+    let Some(reg) = supplier_registry() else { return };
+    reg.park(SlotRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_SLOT_REQ_RESERVE,
+        supplier_id: user_data as u64,
+        ctx: copy_reserve_ctx(ctx),
+        completion_ctx: completion_ctx as usize,
+        slot_info_type: 0,
+        permit: 0,
+    });
+}
+
+/// cancel_reserve: core cancels a pending reserve. The shim parks nothing and
+/// relies on the main-thread drain having already (or about to) complete the
+/// reservation; cancellation completion is a no-op here because the Perl
+/// reserve_slot resolves immediately on drain (best-effort, spec §29.2).
+unsafe extern "C" fn supplier_cancel_reserve(
+    _completion_ctx: *const c_void,
+    _user_data: *mut c_void,
+) {
+}
+
+/// try_reserve: synchronous eager path. The shim cannot consult Perl
+/// synchronously, so it parks the call (for observability) and declines (0).
+/// Eager reservations defer to the async reserve path (T-tuner-6).
+unsafe extern "C" fn supplier_try_reserve(
+    ctx: *const TemporalCoreSlotReserveCtx,
+    user_data: *mut c_void,
+) -> usize {
+    let Some(reg) = supplier_registry() else { return 0 };
+    reg.park(SlotRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_SLOT_REQ_TRY_RESERVE,
+        supplier_id: user_data as u64,
+        ctx: copy_reserve_ctx(ctx),
+        completion_ctx: 0,
+        slot_info_type: 0,
+        permit: 0,
+    });
+    0
+}
+
+/// Mirror of `TemporalCoreSlotMarkUsedCtx` enough to read the permit and the
+/// slot_info tag (the first u32 of the SlotInfo union).
+#[repr(C)]
+pub struct TemporalCoreSlotMarkUsedCtxHeader {
+    pub slot_info_tag: i32,
+}
+
+unsafe extern "C" fn supplier_mark_used(ctx: *const c_void, user_data: *mut c_void) {
+    let Some(reg) = supplier_registry() else { return };
+    // SlotMarkUsedCtx { SlotInfo slot_info; uintptr_t slot_permit; }. SlotInfo
+    // is { u32 tag; <union> }; the union is at most two ByteArrayRefs (32 bytes)
+    // plus the tag word (8 with padding) = 40 bytes, so slot_permit is at
+    // offset 40. Read the tag at 0 and the permit at 40.
+    let (tag, permit) = if ctx.is_null() {
+        (0, 0)
+    } else {
+        let base = ctx as *const u8;
+        let tag = *(base as *const i32);
+        let permit = *(base.add(40) as *const usize);
+        (tag, permit)
+    };
+    reg.park(SlotRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_SLOT_REQ_MARK_USED,
+        supplier_id: user_data as u64,
+        ctx: SlotReserveCtxCopy::default(),
+        completion_ctx: 0,
+        slot_info_type: tag,
+        permit,
+    });
+}
+
+unsafe extern "C" fn supplier_release(ctx: *const c_void, user_data: *mut c_void) {
+    let Some(reg) = supplier_registry() else { return };
+    // SlotReleaseCtx { const SlotInfo *slot_info; uintptr_t slot_permit; }.
+    // slot_info may be null (slot never used); slot_permit is at offset 8.
+    let (tag, permit) = if ctx.is_null() {
+        (0, 0)
+    } else {
+        let base = ctx as *const u8;
+        let info_ptr = *(base as *const usize) as *const i32;
+        let tag = if info_ptr.is_null() { -1 } else { *info_ptr };
+        let permit = *(base.add(8) as *const usize);
+        (tag, permit)
+    };
+    reg.park(SlotRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_SLOT_REQ_RELEASE,
+        supplier_id: user_data as u64,
+        ctx: SlotReserveCtxCopy::default(),
+        completion_ctx: 0,
+        slot_info_type: tag,
+        permit,
+    });
+}
+
+/// free: core drops the supplier. Park a free request so Perl can release its
+/// per-supplier state; the callbacks struct itself is reclaimed at unregister.
+unsafe extern "C" fn supplier_free(userimpl: *const c_void) {
+    let Some(reg) = supplier_registry() else { return };
+    // userimpl is &CustomSlotSupplierCallbacksImpl ( == &(&callbacks) ); recover
+    // the supplier id from the callbacks struct's user_data.
+    let supplier_id = if userimpl.is_null() {
+        0
+    } else {
+        let cb_ptr = *(userimpl as *const usize) as *const TemporalCoreCustomSlotSupplierCallbacks;
+        if cb_ptr.is_null() {
+            0
+        } else {
+            (*cb_ptr).user_data as u64
+        }
+    };
+    reg.park(SlotRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_SLOT_REQ_FREE,
+        supplier_id,
+        ctx: SlotReserveCtxCopy::default(),
+        completion_ctx: 0,
+        slot_info_type: 0,
+        permit: 0,
+    });
+}
+
+/// The `TemporalCoreCustomSlotSupplierCallbacks` struct core retains by pointer.
+/// Mirrors the header field-for-field. `user_data` is the supplier id; the
+/// other fields are our callback function pointers.
+#[repr(C)]
+pub struct TemporalCoreCustomSlotSupplierCallbacks {
+    pub reserve: unsafe extern "C" fn(
+        *const TemporalCoreSlotReserveCtx,
+        *const c_void,
+        *mut c_void,
+    ),
+    pub cancel_reserve: unsafe extern "C" fn(*const c_void, *mut c_void),
+    pub try_reserve:
+        unsafe extern "C" fn(*const TemporalCoreSlotReserveCtx, *mut c_void) -> usize,
+    pub mark_used: unsafe extern "C" fn(*const c_void, *mut c_void),
+    pub release: unsafe extern "C" fn(*const c_void, *mut c_void),
+    /// available_slots — left NULL (core treats it as "never known").
+    pub available_slots: usize,
+    pub free: unsafe extern "C" fn(*const c_void),
+    pub user_data: *mut c_void,
+}
+
+/// Claim the process-global supplier registry for `queue`. Returns true on
+/// success, false if one is already active (Perl raises Argument).
+///
+/// # Safety
+/// `queue` must be a live queue pointer for the registry's lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_supplier_register(
+    queue: *mut TemporalioPerlBridgeQueue,
+) -> bool {
+    if SUPPLIER_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // Already active: succeed if it is the SAME queue (multiple workers on
+        // one runtime share the registry — their suppliers accumulate), fail
+        // only for a different runtime's queue (the one-per-process rule).
+        let p = SUPPLIER_REGISTRY.load(Ordering::Acquire);
+        return !p.is_null() && (*p).queue == queue;
+    }
+    let registry = Box::new(SupplierRegistry {
+        queue,
+        next_id: AtomicU64::new(0),
+        requests: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        callbacks: std::sync::Mutex::new(Vec::new()),
+    });
+    SUPPLIER_REGISTRY.store(Box::into_raw(registry), Ordering::Release);
+    true
+}
+
+/// Release the supplier registry held by `queue`, freeing every leaked
+/// callbacks struct. Called from `Runtime->shutdown` after the worker is gone.
+///
+/// # Safety
+/// Must be called only after core has stopped invoking the supplier callbacks.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_supplier_unregister(
+    queue: *mut TemporalioPerlBridgeQueue,
+) {
+    let p = SUPPLIER_REGISTRY.load(Ordering::Acquire);
+    if p.is_null() || (*p).queue != queue {
+        return;
+    }
+    SUPPLIER_REGISTRY.store(ptr::null_mut(), Ordering::Release);
+    let reg = Box::from_raw(p);
+    {
+        let mut cbs = reg.callbacks.lock().unwrap();
+        for cb in cbs.drain(..) {
+            drop(Box::from_raw(cb));
+        }
+    }
+    drop(reg);
+    SUPPLIER_ACTIVE.store(false, Ordering::Release);
+}
+
+/// Bind the `temporal_core_complete_async_reserve` fn pointer (passed in from
+/// Perl via find_symbol, since the shim cannot reference the core extern under
+/// RTLD_LOCAL — the P10.3 precedent).
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_supplier_set_complete_reserve(ptr: *mut c_void) {
+    SUPPLIER_COMPLETE_RESERVE.store(ptr as usize, Ordering::Release);
+}
+
+/// Build a custom-supplier callbacks struct, leak it, and return its pointer
+/// (the value packed into the Custom slot-supplier union). Allocates a supplier
+/// id stored as `user_data`. Returns null if no registry is active.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_supplier_new() -> *const c_void {
+    let Some(reg) = supplier_registry() else {
+        return ptr::null();
+    };
+    let id = reg.alloc_id();
+    let callbacks = Box::new(TemporalCoreCustomSlotSupplierCallbacks {
+        reserve: supplier_reserve,
+        cancel_reserve: supplier_cancel_reserve,
+        try_reserve: supplier_try_reserve,
+        mark_used: supplier_mark_used,
+        release: supplier_release,
+        available_slots: 0,
+        free: supplier_free,
+        user_data: id as *mut c_void,
+    });
+    let raw = Box::into_raw(callbacks);
+    {
+        let mut cbs = reg.callbacks.lock().unwrap();
+        cbs.push(raw);
+    }
+    raw as *const c_void
+}
+
+/// Read the supplier id (the callbacks struct `user_data`) from a callbacks
+/// pointer returned by `supplier_new`. Perl uses it to bind the registry's
+/// impl dispatch.
+///
+/// # Safety
+/// `callbacks` must be a pointer from `supplier_new`, still live.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_supplier_callbacks_user_data(
+    callbacks: *const c_void,
+) -> u64 {
+    if callbacks.is_null() {
+        return 0;
+    }
+    (*(callbacks as *const TemporalCoreCustomSlotSupplierCallbacks)).user_data as u64
+}
+
+/// Pop the next parked supplier request into a heap box; return its pointer
+/// (null when empty) and write the tag via `out_tag`. The Perl drain reads the
+/// request via the `slot_req_*` accessors, runs the Perl method, then frees it
+/// with `temporalio_perl_bridge_supplier_free_request`.
+///
+/// # Safety
+/// `out_tag` must be a writable u8 slot.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_supplier_next_request(
+    out_tag: *mut u8,
+) -> *const c_void {
+    let Some(reg) = supplier_registry() else {
+        return ptr::null();
+    };
+    let req = {
+        let mut q = reg.requests.lock().unwrap();
+        q.pop_front()
+    };
+    match req {
+        None => ptr::null(),
+        Some(req) => {
+            if !out_tag.is_null() {
+                *out_tag = req.tag;
+            }
+            Box::into_raw(Box::new(req)).cast::<c_void>()
+        }
+    }
+}
+
+/// Free a request box returned by `supplier_next_request`.
+///
+/// # Safety
+/// `request` must be a pointer from `supplier_next_request`, not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_supplier_free_request(request: *const c_void) {
+    if !request.is_null() {
+        drop(Box::from_raw(request.cast::<SlotRequest>().cast_mut()));
+    }
+}
+
+unsafe fn slot_req<'a>(request: *const c_void) -> &'a SlotRequest {
+    &*request.cast::<SlotRequest>()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_slot_req_supplier_id(request: *const c_void) -> u64 {
+    slot_req(request).supplier_id
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_slot_req_slot_type(request: *const c_void) -> i32 {
+    slot_req(request).ctx.slot_type
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_slot_req_is_sticky(request: *const c_void) -> bool {
+    slot_req(request).ctx.is_sticky
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_slot_req_task_queue(
+    request: *const c_void,
+) -> ForwardedLogByteArrayRef {
+    let s = &slot_req(request).ctx.task_queue;
+    ForwardedLogByteArrayRef {
+        data: s.as_ptr(),
+        size: s.len(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_slot_req_worker_identity(
+    request: *const c_void,
+) -> ForwardedLogByteArrayRef {
+    let s = &slot_req(request).ctx.worker_identity;
+    ForwardedLogByteArrayRef {
+        data: s.as_ptr(),
+        size: s.len(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_slot_req_worker_build_id(
+    request: *const c_void,
+) -> ForwardedLogByteArrayRef {
+    let s = &slot_req(request).ctx.worker_build_id;
+    ForwardedLogByteArrayRef {
+        data: s.as_ptr(),
+        size: s.len(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_slot_req_completion_ctx(
+    request: *const c_void,
+) -> *const c_void {
+    slot_req(request).completion_ctx as *const c_void
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_slot_req_permit(request: *const c_void) -> usize {
+    slot_req(request).permit
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_slot_req_slot_info_type(
+    request: *const c_void,
+) -> i32 {
+    slot_req(request).slot_info_type
+}
+
+/// Complete an async reservation: call the bound
+/// `temporal_core_complete_async_reserve(completion_ctx, permit_id)`. Returns
+/// true if it completed (false means core cancelled before completion — the
+/// caller should drop the permit). No-op (false) if no completion fn is bound.
+///
+/// # Safety
+/// `completion_ctx` must be a pointer from a parked reserve request, used once.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_supplier_complete_reserve(
+    completion_ctx: *const c_void,
+    permit_id: usize,
+) -> bool {
+    let f = SUPPLIER_COMPLETE_RESERVE.load(Ordering::Acquire);
+    if f == 0 || completion_ctx.is_null() {
+        return false;
+    }
+    let complete: unsafe extern "C" fn(*const c_void, usize) -> bool =
+        std::mem::transmute(f);
+    complete(completion_ctx, permit_id)
 }
 
 // The custom-metric attribute types core passes to `attributes_new`. Mirrors
@@ -2995,5 +3517,168 @@ storage_drivers=[]
         assert_eq!(unsafe { temporalio_perl_bridge_meter_req_new_id(req) }, id);
         unsafe { temporalio_perl_bridge_meter_free_request(req) };
         unsafe { unregister_and_free(q, r, w) };
+    }
+
+    // ---- P10.6 / spec section 29.2: custom slot suppliers ------------------
+    //
+    // The supplier registry is a single process-global, so these tests
+    // serialize on this lock (cargo runs tests multi-threaded).
+    static SUPPLIER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe fn supplier_unregister_and_free(
+        q: *mut TemporalioPerlBridgeQueue,
+        r: i32,
+        w: i32,
+    ) {
+        temporalio_perl_bridge_supplier_unregister(q);
+        temporalio_perl_bridge_queue_free(q);
+        libc::close(r);
+        libc::close(w);
+    }
+
+    fn reserve_ctx(slot_type: i32) -> TemporalCoreSlotReserveCtx {
+        TemporalCoreSlotReserveCtx {
+            slot_type,
+            task_queue: TemporalCoreByteArrayRef { data: ptr::null(), size: 0 },
+            worker_identity: TemporalCoreByteArrayRef { data: ptr::null(), size: 0 },
+            worker_build_id: TemporalCoreByteArrayRef { data: ptr::null(), size: 0 },
+            is_sticky: false,
+        }
+    }
+
+    // The reserve/mark_used/release callbacks fire on a worker thread and PARK
+    // requests onto the per-runtime queue; the main thread drains them. Each
+    // request carries the supplier id, the slot type, and (for release) the
+    // permit. try_reserve returns 0 (declines) and still parks for observation.
+    #[test]
+    fn t_tuner_supplier_callbacks_park_off_thread_and_drain() {
+        let _guard = SUPPLIER_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(unsafe { temporalio_perl_bridge_supplier_register(q) });
+
+        // Build a supplier; its callbacks struct user_data is the supplier id.
+        let cb_ptr = unsafe { temporalio_perl_bridge_supplier_new() } as *const _
+            as *const TemporalCoreCustomSlotSupplierCallbacks;
+        assert!(!cb_ptr.is_null(), "supplier_new returns a callbacks pointer");
+        let supplier_id = unsafe { (*cb_ptr).user_data } as u64;
+        assert!(supplier_id != 0, "supplier id is non-zero");
+
+        // Fire reserve on a separate thread (mirrors a Tokio core thread).
+        let cb_addr = cb_ptr as usize;
+        std::thread::spawn(move || {
+            let cb = cb_addr as *const TemporalCoreCustomSlotSupplierCallbacks;
+            let ctx = reserve_ctx(1); // ActivitySlotKindType
+            let completion = 0xDEAD_BEEFusize as *const c_void;
+            unsafe { ((*cb).reserve)(&ctx, completion, (*cb).user_data) };
+        })
+        .join()
+        .unwrap();
+
+        // try_reserve returns 0 (declines) and parks a request.
+        let try_permit = unsafe {
+            let ctx = reserve_ctx(0);
+            ((*cb_ptr).try_reserve)(&ctx, (*cb_ptr).user_data)
+        };
+        assert_eq!(try_permit, 0, "try_reserve declines (returns 0)");
+
+        // Drain the two parked requests on the main thread.
+        let mut tag = 0u8;
+        let req1 = unsafe { temporalio_perl_bridge_supplier_next_request(&mut tag) };
+        assert!(!req1.is_null());
+        assert_eq!(tag, TEMPORALIO_PERL_BRIDGE_SLOT_REQ_RESERVE);
+        assert_eq!(
+            unsafe { temporalio_perl_bridge_slot_req_supplier_id(req1) },
+            supplier_id
+        );
+        assert_eq!(unsafe { temporalio_perl_bridge_slot_req_slot_type(req1) }, 1);
+        assert_eq!(
+            unsafe { temporalio_perl_bridge_slot_req_completion_ctx(req1) } as usize,
+            0xDEAD_BEEFusize
+        );
+        unsafe { temporalio_perl_bridge_supplier_free_request(req1) };
+
+        let req2 = unsafe { temporalio_perl_bridge_supplier_next_request(&mut tag) };
+        assert!(!req2.is_null());
+        assert_eq!(tag, TEMPORALIO_PERL_BRIDGE_SLOT_REQ_TRY_RESERVE);
+        unsafe { temporalio_perl_bridge_supplier_free_request(req2) };
+
+        // No more parked requests.
+        let req3 = unsafe { temporalio_perl_bridge_supplier_next_request(&mut tag) };
+        assert!(req3.is_null(), "queue drained empty");
+
+        unsafe { supplier_unregister_and_free(q, r, w) };
+    }
+
+    // A register for a DIFFERENT queue fails while one is active (the
+    // "only one custom-supplier registry per process" rule, enforced Perl-side
+    // as an Argument). Re-registering the SAME queue succeeds (multiple workers
+    // on one runtime share the registry — their suppliers accumulate).
+    #[test]
+    fn t_tuner_second_register_rules() {
+        let _guard = SUPPLIER_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(unsafe { temporalio_perl_bridge_supplier_register(q) });
+
+        // Same queue: idempotent success.
+        assert!(
+            unsafe { temporalio_perl_bridge_supplier_register(q) },
+            "re-registering the same queue succeeds"
+        );
+
+        // Different queue: fails while the first is active.
+        let (r2, w2) = nonblocking_pipe();
+        let q2 = temporalio_perl_bridge_queue_new(w2);
+        assert!(
+            !unsafe { temporalio_perl_bridge_supplier_register(q2) },
+            "a second runtime's queue cannot claim the active registry"
+        );
+        unsafe { temporalio_perl_bridge_queue_free(q2) };
+        unsafe { libc::close(r2) };
+        unsafe { libc::close(w2) };
+
+        unsafe { supplier_unregister_and_free(q, r, w) };
+    }
+
+    // complete_reserve with no bound completion fn is a no-op (false); binding a
+    // test fn routes the completion_ctx + permit through.
+    #[test]
+    fn t_tuner_complete_reserve_routes_through_bound_fn() {
+        let _guard = SUPPLIER_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(unsafe { temporalio_perl_bridge_supplier_register(q) });
+
+        // Unbound: no-op false.
+        temporalio_perl_bridge_supplier_set_complete_reserve(ptr::null_mut());
+        assert!(
+            !unsafe {
+                temporalio_perl_bridge_supplier_complete_reserve(
+                    0x1234 as *const c_void,
+                    7,
+                )
+            },
+            "complete_reserve is a no-op without a bound fn"
+        );
+
+        // Bind a recording stub and confirm it receives the ctx + permit.
+        static LAST_CTX: AtomicUsize = AtomicUsize::new(0);
+        static LAST_PERMIT: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn stub(ctx: *const c_void, permit: usize) -> bool {
+            LAST_CTX.store(ctx as usize, Ordering::Release);
+            LAST_PERMIT.store(permit, Ordering::Release);
+            true
+        }
+        temporalio_perl_bridge_supplier_set_complete_reserve(stub as *mut c_void);
+        let ok = unsafe {
+            temporalio_perl_bridge_supplier_complete_reserve(0xABCD as *const c_void, 42)
+        };
+        assert!(ok, "bound complete_reserve returns the stub's true");
+        assert_eq!(LAST_CTX.load(Ordering::Acquire), 0xABCD);
+        assert_eq!(LAST_PERMIT.load(Ordering::Acquire), 42);
+
+        temporalio_perl_bridge_supplier_set_complete_reserve(ptr::null_mut());
+        unsafe { supplier_unregister_and_free(q, r, w) };
     }
 }

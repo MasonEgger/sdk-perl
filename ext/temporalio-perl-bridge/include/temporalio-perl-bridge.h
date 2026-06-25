@@ -49,6 +49,19 @@ typedef struct TemporalCoreCustomMetricAttribute TemporalCoreCustomMetricAttribu
 #define TEMPORALIO_PERL_BRIDGE_METER_REQ_METER_FREE 5
 
 /**
+ * Request tags the custom-supplier drain switches on (Perl side).
+ */
+#define TEMPORALIO_PERL_BRIDGE_SLOT_REQ_RESERVE 1
+
+#define TEMPORALIO_PERL_BRIDGE_SLOT_REQ_TRY_RESERVE 2
+
+#define TEMPORALIO_PERL_BRIDGE_SLOT_REQ_MARK_USED 3
+
+#define TEMPORALIO_PERL_BRIDGE_SLOT_REQ_RELEASE 4
+
+#define TEMPORALIO_PERL_BRIDGE_SLOT_REQ_FREE 5
+
+/**
  * Thread-safe completion queue: an unbounded `SegQueue` plus the signal fd.
  * One allocation per `Temporalio::Core::Runtime` instance.
  */
@@ -361,6 +374,96 @@ void *temporalio_perl_bridge_meter_attributes_new_ptr(void);
 void *temporalio_perl_bridge_meter_attributes_free_ptr(void);
 
 void *temporalio_perl_bridge_meter_meter_free_ptr(void);
+
+/**
+ * Claim the process-global supplier registry for `queue`. Returns true on
+ * success, false if one is already active (Perl raises Argument).
+ *
+ * # Safety
+ * `queue` must be a live queue pointer for the registry's lifetime.
+ */
+bool temporalio_perl_bridge_supplier_register(struct TemporalioPerlBridgeQueue *queue);
+
+/**
+ * Release the supplier registry held by `queue`, freeing every leaked
+ * callbacks struct. Called from `Runtime->shutdown` after the worker is gone.
+ *
+ * # Safety
+ * Must be called only after core has stopped invoking the supplier callbacks.
+ */
+void temporalio_perl_bridge_supplier_unregister(struct TemporalioPerlBridgeQueue *queue);
+
+/**
+ * Bind the `temporal_core_complete_async_reserve` fn pointer (passed in from
+ * Perl via find_symbol, since the shim cannot reference the core extern under
+ * RTLD_LOCAL — the P10.3 precedent).
+ */
+void temporalio_perl_bridge_supplier_set_complete_reserve(void *ptr);
+
+/**
+ * Build a custom-supplier callbacks struct, leak it, and return its pointer
+ * (the value packed into the Custom slot-supplier union). Allocates a supplier
+ * id stored as `user_data`. Returns null if no registry is active.
+ */
+const void *temporalio_perl_bridge_supplier_new(void);
+
+/**
+ * Read the supplier id (the callbacks struct `user_data`) from a callbacks
+ * pointer returned by `supplier_new`. Perl uses it to bind the registry's
+ * impl dispatch.
+ *
+ * # Safety
+ * `callbacks` must be a pointer from `supplier_new`, still live.
+ */
+uint64_t temporalio_perl_bridge_supplier_callbacks_user_data(const void *callbacks);
+
+/**
+ * Pop the next parked supplier request into a heap box; return its pointer
+ * (null when empty) and write the tag via `out_tag`. The Perl drain reads the
+ * request via the `slot_req_*` accessors, runs the Perl method, then frees it
+ * with `temporalio_perl_bridge_supplier_free_request`.
+ *
+ * # Safety
+ * `out_tag` must be a writable u8 slot.
+ */
+const void *temporalio_perl_bridge_supplier_next_request(uint8_t *out_tag);
+
+/**
+ * Free a request box returned by `supplier_next_request`.
+ *
+ * # Safety
+ * `request` must be a pointer from `supplier_next_request`, not yet freed.
+ */
+void temporalio_perl_bridge_supplier_free_request(const void *request);
+
+uint64_t temporalio_perl_bridge_slot_req_supplier_id(const void *request);
+
+int32_t temporalio_perl_bridge_slot_req_slot_type(const void *request);
+
+bool temporalio_perl_bridge_slot_req_is_sticky(const void *request);
+
+struct ForwardedLogByteArrayRef temporalio_perl_bridge_slot_req_task_queue(const void *request);
+
+struct ForwardedLogByteArrayRef temporalio_perl_bridge_slot_req_worker_identity(const void *request);
+
+struct ForwardedLogByteArrayRef temporalio_perl_bridge_slot_req_worker_build_id(const void *request);
+
+const void *temporalio_perl_bridge_slot_req_completion_ctx(const void *request);
+
+size_t temporalio_perl_bridge_slot_req_permit(const void *request);
+
+int32_t temporalio_perl_bridge_slot_req_slot_info_type(const void *request);
+
+/**
+ * Complete an async reservation: call the bound
+ * `temporal_core_complete_async_reserve(completion_ctx, permit_id)`. Returns
+ * true if it completed (false means core cancelled before completion — the
+ * caller should drop the permit). No-op (false) if no completion fn is bound.
+ *
+ * # Safety
+ * `completion_ctx` must be a pointer from a parked reserve request, used once.
+ */
+bool temporalio_perl_bridge_supplier_complete_reserve(const void *completion_ctx, size_t permit_id);
 
 /**
  * Allocate a queue signalling `signal_fd` (eventfd, or pipe write-end as

@@ -25,6 +25,7 @@ use Temporalio::Exception::WorkflowAlreadyStarted ();
 use Temporalio::Exception::WorkflowNotFound ();
 use Temporalio::Runtime::LogForwardingConfig ();
 use Temporalio::Runtime::MetricMeter ();
+use Temporalio::Worker::SlotSupplierRegistry ();
 
 # Process-wide monotonic 64-bit callback id (spec section 4.5).
 my $NEXT_CALLBACK_ID = 1;
@@ -336,6 +337,15 @@ class Temporalio::Core::Callback {
         if (defined Temporalio::Runtime::MetricMeter->active) {
             _service_meter_requests();
             _drain_meter_records();
+        }
+
+        # Service custom slot-supplier callbacks (spec §29.2) on the same
+        # main-thread wakeup: the shim parked each reserve/try_reserve/mark_used/
+        # release/free off a core thread; run the Perl impl method here and
+        # complete any async reservation. Same never-touch-Perl-off-core-thread
+        # discipline as the meter.
+        if (Temporalio::Worker::SlotSupplierRegistry->active) {
+            Temporalio::Worker::SlotSupplierRegistry->_service_requests;
         }
         return;
     }

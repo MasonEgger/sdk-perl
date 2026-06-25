@@ -60,6 +60,13 @@ class Temporalio::Worker {
     field $max_concurrent_local_activities     :param = 100;
     field $max_concurrent_workflow_task_polls  :param = 5;
     field $max_concurrent_activity_task_polls  :param = 5;
+    # Worker tuner (spec §29.2). A Temporalio::Worker::Tuner holding four slot
+    # suppliers, mutually exclusive with the max_concurrent_* slot kwargs. When
+    # absent the worker synthesizes a FixedSize tuner from those kwargs (v0.1
+    # parity). $tuner_custom_registered tracks whether this worker claimed the
+    # runtime's process-global custom-supplier registry (released at shutdown).
+    field $tuner                               :param = undef;
+    field $tuner_custom_registered = 0;
     field $nonsticky_to_sticky_poll_ratio      :param = 0.2;
     field $sticky_queue_schedule_to_start_timeout :param = 10;
     field $max_heartbeat_throttle_interval     :param = 60;
@@ -130,6 +137,16 @@ class Temporalio::Worker {
         # carries its own build_id, is not in use).
         if (!defined $build_id && !defined $deployment_options) {
             $build_id = _default_build_id();
+        }
+
+        # Worker tuner (spec §29.2): must be a Temporalio::Worker::Tuner when
+        # given. The mutual exclusion with max_concurrent_* is enforced in the
+        # constructor wrapper (it needs the raw args).
+        if (defined $tuner) {
+            Temporalio::Exception::Argument->throw(
+                message => 'tuner must be a Temporalio::Worker::Tuner')
+                unless ref $tuner
+                    && $tuner->isa('Temporalio::Worker::Tuner');
         }
 
         $activity_registry = Temporalio::Worker::ActivityRegistry->new(
@@ -219,6 +236,79 @@ class Temporalio::Worker {
         return (versioning_build_id => $build_id);
     }
 
+    # _slot_supplier_options() -> the four *_slot_supplier_spec kwargs for
+    # WorkerOptions::build (spec §29.2). With an explicit tuner each pool packs
+    # its supplier's _pack_spec; custom suppliers are registered with the
+    # runtime's process-global registry first so their callbacks pointer is
+    # bound before packing. With no tuner, fall back to the legacy *_slots
+    # FixedSize defaults (v0.1 parity) — WorkerOptions::build synthesizes them.
+    method _slot_supplier_options () {
+        unless (defined $tuner) {
+            return (
+                workflow_slots       => $max_concurrent_workflow_tasks,
+                activity_slots       => $max_concurrent_activities,
+                local_activity_slots => $max_concurrent_local_activities,
+                nexus_task_slots     => 100,
+            );
+        }
+
+        $self->_register_custom_suppliers;
+        return (
+            workflow_slot_supplier_spec =>
+                $tuner->workflow_slot_supplier->_pack_spec,
+            activity_slot_supplier_spec =>
+                $tuner->activity_slot_supplier->_pack_spec,
+            local_activity_slot_supplier_spec =>
+                $tuner->local_activity_slot_supplier->_pack_spec,
+            nexus_task_slot_supplier_spec =>
+                $tuner->nexus_task_slot_supplier->_pack_spec,
+        );
+    }
+
+    # Register every Custom slot supplier in the tuner with the runtime's
+    # process-global custom-supplier registry (spec §29.2). Each gets a
+    # shim-allocated callbacks struct whose pointer is bound onto the supplier
+    # so its _pack_spec packs that pointer into the Custom union. Idempotent per
+    # worker. Skipped entirely when the tuner has no Custom suppliers.
+    method _register_custom_suppliers () {
+        my @custom = grep {
+            $_->isa('Temporalio::Worker::SlotSupplier::Custom')
+        } $tuner->suppliers;
+        return unless @custom;
+
+        require Temporalio::Worker::SlotSupplierRegistry;
+        my $runtime = $self->_runtime;
+
+        # Claim the process-global registry for this runtime's queue (refuse a
+        # second active custom-supplier set, mirroring the meter rule).
+        unless ($tuner_custom_registered) {
+            Temporalio::Core::FFI::bind_supplier_complete_reserve();
+            unless (Temporalio::Core::FFI::supplier_register($runtime->queue_ptr)) {
+                Temporalio::Exception::Argument->throw(
+                    message => 'a custom slot supplier is already active on'
+                        . ' another runtime in this process (only one allowed)');
+            }
+            Temporalio::Worker::SlotSupplierRegistry->_set_active;
+            $tuner_custom_registered = 1;
+        }
+
+        for my $supplier (@custom) {
+            # Already bound (e.g. a re-validate) -> keep the existing pointer.
+            next if $supplier->_callbacks_ptr;
+            my $cb_ptr = Temporalio::Core::FFI::supplier_new()
+                or Temporalio::Exception::Runtime->throw(
+                    message => 'failed to allocate a custom slot supplier'
+                        . ' (no active registry)');
+            $supplier->_set_callbacks_ptr($cb_ptr);
+            # The shim sets the callbacks struct user_data to a supplier id; read
+            # it back so the registry can dispatch drained requests to this impl.
+            my $id = Temporalio::Core::FFI::supplier_callbacks_user_data($cb_ptr);
+            Temporalio::Worker::SlotSupplierRegistry->_register_impl(
+                $id, $supplier->impl);
+        }
+        return;
+    }
+
     method _build_worker_options ($keep) {
         return Temporalio::Core::FFI::WorkerOptions::build($keep,
             namespace            => $client->namespace,
@@ -229,12 +319,10 @@ class Temporalio::Worker {
             identity_override    => $identity_override,
             max_cached_workflows => $max_cached_workflows,
 
-            # FixedSize tuner from the max_concurrent_* slots; the nexus slot
-            # supplier is a fixed 100 in v0.1 (spec 8.1).
-            workflow_slots       => $max_concurrent_workflow_tasks,
-            activity_slots       => $max_concurrent_activities,
-            local_activity_slots => $max_concurrent_local_activities,
-            nexus_task_slots     => 100,
+            # Slot suppliers (spec §29.2): an explicit tuner packs each pool's
+            # supplier directly; otherwise synthesize a FixedSize tuner from the
+            # max_concurrent_* slots (nexus is a fixed 100 in v0.1, spec 8.1).
+            $self->_slot_supplier_options,
 
             # task_types: workflows + remote activities only (spec 8.1).
             # no_remote_activities (spec 23.2) flips enable_remote_activities;
@@ -674,7 +762,24 @@ sub Temporalio::Worker::_shutdown_error_is_tolerable ($err) {
 {
     my $orig_new = Temporalio::Worker->can('new');
     no warnings 'redefine';
+    # The max_concurrent_* slot kwargs that are mutually exclusive with an
+    # explicit tuner (spec §29.2). Detected here (not in ADJUST) because
+    # `class` params default silently, so "explicitly passed" is only visible
+    # in the raw constructor args.
+    my @SLOT_KWARGS = qw(
+        max_concurrent_workflow_tasks
+        max_concurrent_activities
+        max_concurrent_local_activities
+    );
     *Temporalio::Worker::new = sub ($class, %args) {
+        if (defined $args{tuner}) {
+            for my $kw (@SLOT_KWARGS) {
+                next unless exists $args{tuner} && exists $args{$kw};
+                Temporalio::Exception::Argument->throw(
+                    message => "Temporalio::Worker->new: tuner is mutually"
+                        . " exclusive with $kw (spec §29.2)");
+            }
+        }
         my $self = eval { $orig_new->($class, %args) };
         if (!defined $self) {
             my $err = $@;
@@ -773,6 +878,11 @@ C<run> and those loops arrive in later plan steps (P2.4 / P3.6).
 =head2 activity_registry
 
 Accessor returning the C<activity_registry> value.
+
+=head2 build_id
+
+Accessor returning the worker's build id (the explicit C<build_id> kwarg, or the
+MD5-of-C<%INC> per-process default; spec §29.1).
 
 =head2 client
 

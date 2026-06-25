@@ -721,6 +721,53 @@ my @phase0_attach = (
       [ 'opaque', 'size_t' ] => 'double' ],
     [ temporalio_perl_bridge_meter_req_attr_bool => 'meter_req_attr_bool',
       [ 'opaque', 'size_t' ] => 'bool' ],
+    # Custom slot suppliers (spec section 29.2). Like the meter, the six
+    # TemporalCoreCustomSlotSupplierCallbacks route via a process-global
+    # registry (one per runtime). supplier_register claims it for a queue
+    # (false if one is active -> Argument). supplier_new builds a callbacks
+    # struct (leaked, reclaimed at unregister) and returns the pointer Perl
+    # packs into the Custom slot-supplier union; its user_data is a supplier id.
+    # Core invokes the callbacks on Tokio threads; each PARKS a request on the
+    # queue (never blocks, never calls Perl). supplier_next_request pops the
+    # next parked request (read fields via slot_req_*), the drain runs the Perl
+    # method, supplier_free_request frees it. supplier_complete_reserve calls
+    # the bound temporal_core_complete_async_reserve(completion_ctx, permit);
+    # supplier_set_complete_reserve binds that core fn pointer (passed in from
+    # Perl via find_symbol — the shim cannot link the extern under RTLD_LOCAL).
+    [ temporalio_perl_bridge_supplier_register => 'supplier_register',
+      [ 'TemporalioPerlBridgeQueue' ] => 'bool' ],
+    [ temporalio_perl_bridge_supplier_unregister => 'supplier_unregister',
+      [ 'TemporalioPerlBridgeQueue' ] => 'void' ],
+    [ temporalio_perl_bridge_supplier_set_complete_reserve => 'supplier_set_complete_reserve',
+      [ 'opaque' ] => 'void' ],
+    [ temporalio_perl_bridge_supplier_new => 'supplier_new',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_supplier_callbacks_user_data => 'supplier_callbacks_user_data',
+      [ 'opaque' ] => 'uint64' ],
+    [ temporalio_perl_bridge_supplier_next_request => 'supplier_next_request',
+      [ 'opaque' ] => 'opaque' ],
+    [ temporalio_perl_bridge_supplier_free_request => 'supplier_free_request',
+      [ 'opaque' ] => 'void' ],
+    [ temporalio_perl_bridge_supplier_complete_reserve => 'supplier_complete_reserve',
+      [ 'opaque', 'size_t' ] => 'bool' ],
+    [ temporalio_perl_bridge_slot_req_supplier_id => 'slot_req_supplier_id',
+      [ 'opaque' ] => 'uint64' ],
+    [ temporalio_perl_bridge_slot_req_slot_type => 'slot_req_slot_type',
+      [ 'opaque' ] => 'sint32' ],
+    [ temporalio_perl_bridge_slot_req_is_sticky => 'slot_req_is_sticky',
+      [ 'opaque' ] => 'bool' ],
+    [ temporalio_perl_bridge_slot_req_task_queue => 'slot_req_task_queue',
+      [ 'opaque' ] => 'TemporalCoreByteArrayRef' ],
+    [ temporalio_perl_bridge_slot_req_worker_identity => 'slot_req_worker_identity',
+      [ 'opaque' ] => 'TemporalCoreByteArrayRef' ],
+    [ temporalio_perl_bridge_slot_req_worker_build_id => 'slot_req_worker_build_id',
+      [ 'opaque' ] => 'TemporalCoreByteArrayRef' ],
+    [ temporalio_perl_bridge_slot_req_completion_ctx => 'slot_req_completion_ctx',
+      [ 'opaque' ] => 'opaque' ],
+    [ temporalio_perl_bridge_slot_req_permit => 'slot_req_permit',
+      [ 'opaque' ] => 'size_t' ],
+    [ temporalio_perl_bridge_slot_req_slot_info_type => 'slot_req_slot_info_type',
+      [ 'opaque' ] => 'sint32' ],
     # WorkerOptions marshalling spike (plan P0.10): the shim parses a
     # TemporalCoreWorkerOptions built Perl-side and echoes every field as a
     # NUL-terminated "field=value" summary string (cast it to 'string', then
@@ -750,6 +797,22 @@ sub forwarded_log_accessor_ptrs () {
     return @_forwarded_log_accessor_ptr{
         qw(target message timestamp_millis fields_json)
     };
+}
+
+# Custom slot supplier (spec section 29.2): bind the core
+# temporal_core_complete_async_reserve fn pointer into the shim once. Resolved
+# via find_symbol (the shim cannot link the core extern under RTLD_LOCAL — the
+# P10.3 forwarded-log-accessor precedent). Idempotent + memoized.
+my $_supplier_complete_reserve_bound = 0;
+sub bind_supplier_complete_reserve () {
+    return if $_supplier_complete_reserve_bound;
+    my $sym = 'temporal_core_complete_async_reserve';
+    my $ptr = $ffi->find_symbol($sym)
+        or die "Temporalio::Core::FFI: core bridge symbol '$sym' not found"
+             . ' (version skew with the compiled core bridge?)';
+    supplier_set_complete_reserve($ptr);
+    $_supplier_complete_reserve_bound = 1;
+    return;
 }
 
 # Custom metric meter (spec section 28.2) helpers.

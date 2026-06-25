@@ -302,4 +302,10 @@ Marks the annotated method as a signal handler (C<:Signal>). Base-class attribut
 
 Marks the annotated method as an update handler (C<:Update>). Base-class attribute handler.
 
+=head2 VersioningBehavior
+
+Sets the workflow's versioning behavior (C<:VersioningBehavior('pinned')> or
+C<'auto_upgrade'>) for worker deployment versioning (spec §29.1). Base-class
+attribute handler.
+
 =cut

@@ -382,9 +382,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P10.5.3 Verify: prove -lj4 t
 
 ### P10.6 Slot suppliers / worker tuner (spec §29.2)
-- [ ] P10.6.1 RED: sdk/t/unit/tuner.t + cargo test + integration (T-tuner-1..7)
-- [ ] P10.6.2 GREEN: Tuner + SlotSupplier/{FixedSize,ResourceBased,Custom} + context classes + WorkerOptions packers + shim custom-supplier callbacks
-- [ ] P10.6.3 Verify: cargo test && prove -lj4 t
+- [x] P10.6.1 RED: sdk/t/unit/tuner.t + cargo test + integration (T-tuner-1..7)
+- [x] P10.6.2 GREEN: Tuner + SlotSupplier/{FixedSize,ResourceBased,Custom} + context classes + WorkerOptions packers + shim custom-supplier callbacks
+- [x] P10.6.3 Verify: cargo test && prove -lj4 t
 
 ### P10.7 Autoscaling pollers (spec §29.3)
 - [ ] P10.7.1 RED: sdk/t/unit/poller_behavior.t + integration smoke (T-poller-1..5)

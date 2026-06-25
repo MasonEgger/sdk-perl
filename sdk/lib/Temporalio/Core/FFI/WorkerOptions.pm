@@ -33,10 +33,12 @@ use Temporalio::Core::FFI ();
 #     LegacyBuildIdBased
 #   TemporalCoreSlotSupplier_Tag: FixedSize, ResourceBased, Custom
 use constant {
-    VERSIONING_TAG_NONE             => 0,
-    VERSIONING_TAG_DEPLOYMENT_BASED => 1,
-    VERSIONING_TAG_LEGACY_BUILD_ID  => 2,
-    SLOT_SUPPLIER_TAG_FIXED_SIZE    => 0,
+    VERSIONING_TAG_NONE                => 0,
+    VERSIONING_TAG_DEPLOYMENT_BASED    => 1,
+    VERSIONING_TAG_LEGACY_BUILD_ID     => 2,
+    SLOT_SUPPLIER_TAG_FIXED_SIZE       => 0,
+    SLOT_SUPPLIER_TAG_RESOURCE_BASED   => 1,
+    SLOT_SUPPLIER_TAG_CUSTOM           => 2,
 };
 
 # sizeof() of each by-value union = its largest member:
@@ -90,6 +92,23 @@ my %KNOWN_FIELD = map { $_ => 1 } @FIELDS;
 # Optional versioning alternatives to the None{build_id} default; accepted by
 # build() but not required.
 $KNOWN_FIELD{$_} = 1 for qw(versioning_deployment versioning_legacy_build_id);
+# Optional per-pool slot-supplier specs (spec §29.2). When present they pack the
+# pool's TemporalCoreSlotSupplier directly (FixedSize/ResourceBased/Custom);
+# when absent the legacy *_slots => N FixedSize default is used. The four
+# *_slots fields are therefore only required when no matching spec is given.
+$KNOWN_FIELD{$_} = 1 for qw(
+    workflow_slot_supplier_spec
+    activity_slot_supplier_spec
+    local_activity_slot_supplier_spec
+    nexus_task_slot_supplier_spec
+);
+# Maps each slot-supplier-spec key to the *_slots field it replaces.
+my %SLOT_SPEC_FOR = (
+    workflow_slots       => 'workflow_slot_supplier_spec',
+    activity_slots       => 'activity_slot_supplier_spec',
+    local_activity_slots => 'local_activity_slot_supplier_spec',
+    nexus_task_slots     => 'nexus_task_slot_supplier_spec',
+);
 
 sub _throw_argument ($message) {
     require Temporalio::Exception::Argument;
@@ -182,6 +201,63 @@ sub _pack_fixed_size_slot_supplier ($num_slots) {
     );
 }
 
+# TemporalCoreResourceBasedSlotSupplier body (40 bytes == the union size):
+#   uintptr_t minimum_slots;            // 0
+#   uintptr_t maximum_slots;            // 8
+#   uint64_t  ramp_throttle_ms;         // 16
+#   TemporalCoreResourceBasedTunerOptions tuner_options {
+#       double target_memory_usage;     // 24
+#       double target_cpu_usage;        // 32
+#   }                                   // 40
+# (header struct TemporalCoreResourceBasedSlotSupplier.)
+sub _pack_resource_based_slot_supplier ($rb) {
+    my $body = pack('Q Q Q',
+        $rb->{minimum_slots}    // 0,
+        $rb->{maximum_slots}    // 0,
+        $rb->{ramp_throttle_ms} // 0,
+    ) . pack('d d',
+        $rb->{target_memory_usage} // 0,
+        $rb->{target_cpu_usage}    // 0,
+    );
+    return _pack_tagged_union(
+        SLOT_SUPPLIER_TAG_RESOURCE_BASED,
+        $body,
+        SLOT_SUPPLIER_UNION_SIZE,
+    );
+}
+
+# TemporalCoreSlotSupplier as Custom{TemporalCoreCustomSlotSupplierCallbacksImpl}.
+# The union body is a single pointer to the callbacks struct the shim allocated
+# and @keep-pinned for the worker lifetime; 0/undef packs a NULL pointer (the
+# worker binds the real pointer before passing the options to core).
+sub _pack_custom_slot_supplier ($callbacks_ptr) {
+    return _pack_tagged_union(
+        SLOT_SUPPLIER_TAG_CUSTOM,
+        pack('Q', $callbacks_ptr // 0),
+        SLOT_SUPPLIER_UNION_SIZE,
+    );
+}
+
+# pack_slot_supplier(\@keep, \%spec) -> the 48-byte TemporalCoreSlotSupplier
+# union member (4-byte tag + 4 pad + 40-byte body). Exactly one spec key picks
+# the variant:
+#   { fixed_size     => $num_slots }   -> FixedSize     (tag 0)
+#   { resource_based => \%hash }       -> ResourceBased (tag 1)
+#   { custom         => $ptr }         -> Custom        (tag 2)
+# The resource_based hash carries minimum_slots/maximum_slots/ramp_throttle_ms/
+# target_memory_usage/target_cpu_usage. Public so the tuner unit test can
+# inspect the packed tag/body directly. (\@keep is accepted for signature
+# symmetry with pack_versioning_union; no variant here keeps extra buffers.)
+sub pack_slot_supplier ($keep, $spec) {
+    if (exists $spec->{resource_based}) {
+        return _pack_resource_based_slot_supplier($spec->{resource_based});
+    }
+    if (exists $spec->{custom}) {
+        return _pack_custom_slot_supplier($spec->{custom});
+    }
+    return _pack_fixed_size_slot_supplier($spec->{fixed_size});
+}
+
 # TemporalCorePollerBehavior holds POINTERS to its variants; pack the
 # TemporalCorePollerBehaviorSimpleMaximum struct (one uintptr_t) into kept
 # memory and reference it, with autoscaling NULL.
@@ -216,6 +292,12 @@ sub build ($keep, %options) {
         || defined $options{versioning_legacy_build_id};
     for my $field (@FIELDS) {
         next if $field eq 'versioning_build_id' && $has_versioning_alt;
+        # A *_slots field is satisfied by its matching *_slot_supplier_spec
+        # (spec §29.2): the spec packs that pool's supplier directly instead of
+        # synthesizing a FixedSize from the count.
+        if (my $spec_key = $SLOT_SPEC_FOR{$field}) {
+            next if defined $options{$spec_key};
+        }
         _throw_argument("missing WorkerOptions field '$field'")
             unless exists $options{$field};
     }
@@ -231,8 +313,16 @@ sub build ($keep, %options) {
     });
     $buf .= _pack_byte_array_ref($keep, $options{identity_override});    # 80
     $buf .= pack('L x4', $options{max_cached_workflows});                # 96 (u32 + pad)
-    $buf .= _pack_fixed_size_slot_supplier($options{$_})                 # 104 (4 x 48)
-        for qw(workflow_slots activity_slots local_activity_slots nexus_task_slots);
+    # The four slot suppliers (104, 4 x 48). Each pool packs from its explicit
+    # *_slot_supplier_spec when given (FixedSize/ResourceBased/Custom), else
+    # from the legacy *_slots => N FixedSize default (spec §29.2).
+    for my $slots_field (qw(workflow_slots activity_slots local_activity_slots nexus_task_slots)) {
+        my $spec_key = $SLOT_SPEC_FOR{$slots_field};
+        my $spec = defined $options{$spec_key}
+            ? $options{$spec_key}
+            : { fixed_size => $options{$slots_field} };
+        $buf .= pack_slot_supplier($keep, $spec);
+    }
     $buf .= pack('C4', map { $options{$_} ? 1 : 0 }                      # 296 (4 bools)
         qw(enable_workflows enable_local_activities enable_remote_activities enable_nexus));
     $buf .= "\0" x 4;                                                    # pad to 304
@@ -300,5 +390,17 @@ suppliers, and C<simple_maximum> poller behaviors per spec section 8.1.
 =head2 build
 
 Builds the by-value C<TemporalCoreWorkerOptions> record (with hand-packed tagged unions) from the SDK-level worker options.
+
+=head2 pack_versioning_union
+
+Packs the 48-byte C<TemporalCoreWorkerVersioningStrategy> union member from a
+strategy spec (spec §29.1). Public so the marshalling test can inspect the
+packed tag/body.
+
+=head2 pack_slot_supplier
+
+Packs the 48-byte C<TemporalCoreSlotSupplier> union member from a supplier spec
+(C<fixed_size>/C<resource_based>/C<custom>; spec §29.2). Public so the tuner
+test can inspect the packed tag/body.
 
 =cut
