@@ -394,9 +394,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P10.7.3 Verify: prove -lj4 t
 
 ### P10.8 Determinism enforcement (spec §29.4)
-- [ ] P10.8.1 RED: sdk/t/unit/determinism_guard.t + WfDef fixtures (T-det-1..7)
-- [ ] P10.8.2 GREEN: Workflow/Unsafe + Workflow/DeterminismGuard (CORE::GLOBAL:: overrides gated on context + dynamically-scoped suppression) + worker disable kwarg
-- [ ] P10.8.3 Verify: prove -lj4 t — **Phase 10 worker-hardening green**
+- [x] P10.8.1 RED: sdk/t/unit/determinism_guard.t + WfDef fixtures (T-det-1..7)
+- [x] P10.8.2 GREEN: Workflow/Unsafe + Workflow/DeterminismGuard (CORE::GLOBAL:: overrides gated on context + dynamically-scoped suppression) + worker disable kwarg
+- [x] P10.8.3 Verify: prove -lj4 t — **Phase 10 worker-hardening green**
 
 ### P10.9 Client extras — reset + http_proxy (spec §30)
 - [ ] P10.9.1 RED: sdk/t/unit/reset.t + http_proxy.t + integration (T-reset-1..5, T-proxy-1..5)

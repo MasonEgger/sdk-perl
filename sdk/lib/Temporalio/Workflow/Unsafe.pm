@@ -1,11 +1,30 @@
-# ABOUTME: Unsafe workflow escapes (spec section 27.4 / 29.4) — durable_scheduler_disabled.
-# ABOUTME: Runs a block without recording on / yielding to the durable scheduler.
+# ABOUTME: Unsafe workflow escapes (spec section 27.4 / 29.4): durable_scheduler_disabled
+# ABOUTME: and illegal_call_tracing_disabled - run a block outside a determinism contract.
 package Temporalio::Workflow::Unsafe;
 
 use v5.38;
 use warnings;
 
-# durable_scheduler_disabled($code) — run $code with the durable scheduler
+use Syntax::Keyword::Dynamically;
+
+use Temporalio::Workflow::DeterminismGuard ();
+
+# illegal_call_tracing_disabled($code) - run $code with the determinism guard
+# suppressed, returning whatever $code returns. While the block runs, the
+# guard's time/entropy overrides delegate straight to the real builtin even
+# inside workflow context (spec §29.4). The suppression is dynamically scoped
+# (Syntax::Keyword::Dynamically, never `local` - Future::AsyncAwait panics on
+# `local`, spec §16.1) so it unwinds correctly across an await and does NOT leak
+# past the block. Outside a workflow body the guard already delegates, so this is
+# effectively transparent; it is still valid to call there. Mirrors sdk-ruby's
+# Workflow::Unsafe.illegal_call_tracing_disabled.
+sub illegal_call_tracing_disabled ($code) {
+    dynamically $Temporalio::Workflow::DeterminismGuard::SUPPRESS_DEPTH
+        = $Temporalio::Workflow::DeterminismGuard::SUPPRESS_DEPTH + 1;
+    return $code->();
+}
+
+# durable_scheduler_disabled($code) - run $code with the durable scheduler
 # disabled, returning whatever $code returns. "Disabled" means: while the block
 # runs, the runner does not record commands on / yield to the deterministic
 # scheduler. This is the escape hatch the OpenTelemetry tracing interceptor uses
@@ -13,7 +32,7 @@ use warnings;
 # workflow activation, so that work never becomes part of the recorded history
 # (spec section 27.4 resolved decision).
 #
-# Outside a workflow body (no active runner) the block simply runs — there is no
+# Outside a workflow body (no active runner) the block simply runs - there is no
 # scheduler to disable. Inside a workflow body it delegates to the runner's
 # durable_scheduler_disabled method, which dynamically raises a suppression
 # depth for the duration of the block. The block is run in the caller's list
@@ -41,6 +60,17 @@ Holds escape hatches that step outside the deterministic workflow contract. They
 are "unsafe" because misuse breaks determinism; use them only as the SDK does.
 
 =head1 FUNCTIONS
+
+=head2 illegal_call_tracing_disabled
+
+C<< Temporalio::Workflow::Unsafe::illegal_call_tracing_disabled($code) >> runs
+C<$code> with the determinism guard suppressed and returns its result. While the
+block runs, the guard's time/entropy overrides
+(L<Temporalio::Workflow::DeterminismGuard>) delegate straight to the real
+builtin even inside a workflow body. Use it only when a call into a third-party
+library provably does not affect workflow determinism. The suppression is
+dynamically scoped, so it unwinds across an C<await> and does not leak past the
+block. Outside a workflow body the block simply runs.
 
 =head2 durable_scheduler_disabled
 

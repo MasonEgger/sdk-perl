@@ -2699,6 +2699,21 @@ class Temporalio::Workflow::Runner {
             return $self->_successful_completion;
         }
 
+        # A Nondeterminism escaping :Run (e.g. the determinism guard trapped a
+        # time/entropy builtin in the body — spec §29.4) routes the SAME as a
+        # recorded non-determinism: a workflow-TASK failure by default (the
+        # server retries the task), a workflow failure only when
+        # nondeterminism_as_workflow_fail is set. This is checked BEFORE the
+        # generic Temporal-failure branch below, which would otherwise fail the
+        # WORKFLOW because Nondeterminism isa Temporalio::Exception.
+        if (Scalar::Util::blessed($err)
+            && $err->isa('Temporalio::Exception::Nondeterminism'))
+        {
+            return $nondeterminism_as_workflow_fail
+                ? $self->_workflow_failed_completion($err)
+                : $self->_task_failed_completion($err);
+        }
+
         # A Temporal failure exception, or a class listed in
         # workflow_failure_exception_types, fails the WORKFLOW.
         if ($self->_is_workflow_failure_exception($err)) {

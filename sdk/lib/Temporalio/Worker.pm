@@ -26,6 +26,7 @@ use Temporalio::Worker::NexusRegistry ();
 use Temporalio::Worker::PollLoop ();
 use Temporalio::Worker::WorkflowDispatcher ();
 use Temporalio::Worker::WorkflowRegistry ();
+use Temporalio::Workflow::DeterminismGuard ();
 
 class Temporalio::Worker {
     # --- spec section 8.1 kwargs -----------------------------------------
@@ -101,6 +102,13 @@ class Temporalio::Worker {
     field $no_remote_activities                :param = 0;
     field $disable_eager_activity_execution    :param = 0;
 
+    # Determinism guard (spec §29.4). Default ON: the worker installs the
+    # best-effort time/entropy guard (Temporalio::Workflow::DeterminismGuard) so
+    # a workflow body that calls a trapped builtin throws Nondeterminism. Set
+    # true to skip installation (the guard is process-global and cannot be
+    # cleanly uninstalled, so "disable" means this worker never installs it).
+    field $disable_determinism_guard           :param = 0;
+
     # IO::Async::Function fork-pool size for sync activities (spec section 8.1
     # / 9.4). Only the count matters Perl-side; sync activities run in a child.
     field $sync_activity_workers               :param = 4;
@@ -122,6 +130,13 @@ class Temporalio::Worker {
         Temporalio::Exception::Argument->throw(
             message => 'Temporalio::Worker->new requires a non-empty task_queue')
             unless defined $task_queue && length $task_queue;
+
+        # Determinism guard (spec §29.4): default ON. Installing it is safe even
+        # if there is no workflow on this worker — the overrides delegate to the
+        # real builtin unless a workflow body is on the stack. Idempotent, so
+        # multiple workers (or a re-run) share one install.
+        Temporalio::Workflow::DeterminismGuard::install()
+            unless $disable_determinism_guard;
 
         # Worker versioning (spec §29.1): exactly one strategy reaches core.
         # deployment_options (deployment-based) is mutually exclusive with the
