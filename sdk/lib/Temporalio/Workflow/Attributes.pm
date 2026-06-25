@@ -63,6 +63,22 @@ sub parse_handler ($data, $method_name, $kind) {
     }
 
     $name //= $method_name;
+
+    # Catch the unquoted kwargs mistake: :Signal(name=foo,dynamic=1) collapses
+    # to the single string "name=foo,dynamic=1", so the name above captures
+    # "foo,dynamic=1". A real handler name never contains ',' or '='; reject it
+    # with the fix rather than registering a handler that can never be matched.
+    if ($name =~ /[,=]/) {
+        require Temporalio::Exception::Argument;
+        Temporalio::Exception::Argument->throw(
+            message =>
+                "Invalid :$kind name '$name': a handler name cannot contain "
+              . "',' or '='. Quote each kwargs token so Perl passes them "
+              . "separately, e.g. :$kind('foo', 'dynamic=1') "
+              . "(not :$kind(name=foo,dynamic=1)).",
+        );
+    }
+
     return ($name, %opts);
 }
 

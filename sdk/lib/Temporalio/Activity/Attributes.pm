@@ -8,9 +8,15 @@ use warnings;
 # Parse the $data arrayref handed to the :Defn handler (spec section 10.1
 # constraint 4: $data is an ARRAYREF or undef, never a bare string).
 #
-#   :Defn                                     -> undef          (default name)
-#   :Defn('Custom')                           -> ['Custom']     (explicit name)
-#   :Defn(name=Custom,no_thread_cancellation=1) -> ['name=Custom', 'no_thread_cancellation=1']
+#   :Defn                          -> undef               (default name)
+#   :Defn('Custom')                -> ['Custom']          (explicit name)
+#   :Defn('Custom', 'sync=1')      -> ['Custom', 'sync=1'] (kwargs form)
+#
+# The kwargs tokens MUST be quoted. Attribute::Handlers eval()s the paren
+# content as a Perl list; an unquoted token like name=Custom is not a valid
+# expression, so the whole thing collapses to one string ("name=Custom,sync=1")
+# and the name silently absorbs the trailing options. parse_defn rejects that
+# below rather than registering a broken type name.
 #
 # Returns ($name, %opts). $name defaults to the method name, or the class
 # basename when the decorated method is named "run".
@@ -54,6 +60,22 @@ sub parse_defn ($data, $method_name, $pkg) {
     }
 
     $name //= $default_name;
+
+    # Catch the unquoted kwargs mistake: :Defn(name=Foo,sync=1) collapses to the
+    # single string "name=Foo,sync=1", so the name above captures "Foo,sync=1".
+    # A real activity type name never contains ',' or '='; reject it with the
+    # fix rather than registering an activity the workflow can never resolve.
+    if ($name =~ /[,=]/) {
+        require Temporalio::Exception::Argument;
+        Temporalio::Exception::Argument->throw(
+            message =>
+                "Invalid :Defn activity name '$name': a type name cannot "
+              . "contain ',' or '='. Quote each kwargs token so Perl passes "
+              . "them separately, e.g. :Defn('Foo', 'sync=1') "
+              . "(not :Defn(name=Foo,sync=1)).",
+        );
+    }
+
     return ($name, %opts);
 }
 

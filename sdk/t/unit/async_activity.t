@@ -96,7 +96,7 @@ T2->subtest('complete builds the right request (token + ById)' => sub {
     T2->is($req->task_token, 'tok-c', 'task_token set');
     T2->is($req->namespace, 'ns-async', 'namespace from client');
     T2->is($req->identity, 'id-async@host', 'identity from client');
-    T2->is($req->result->payloads->[0]->data, 'the-result', 'result payload');
+    T2->is($req->result->payloads->[0]->data, '"the-result"', 'result payload (json/plain)');
 
     # T-asyncact-9: no result -> empty result field
     my $void = $h->_build_complete_request()->get;
@@ -112,7 +112,7 @@ T2->subtest('complete builds the right request (token + ById)' => sub {
     T2->is($reqid->activity_id, 'act', 'ById activity_id');
     T2->is($reqid->namespace, 'ns-async', 'ById namespace');
     T2->is($reqid->identity, 'id-async@host', 'ById identity');
-    T2->is($reqid->result->payloads->[0]->data, 'r', 'ById result payload');
+    T2->is($reqid->result->payloads->[0]->data, '"r"', 'ById result payload (json/plain)');
 });
 
 # ---------------------------------------------------------------------------
@@ -130,8 +130,8 @@ T2->subtest('fail builds request with failure + last_heartbeat_details' => sub {
     T2->is($req->task_token, 'tok-f', 'task_token set');
     T2->is($req->namespace, 'ns-async', 'namespace');
     T2->ok(defined $req->failure, 'failure proto present');
-    T2->is($req->last_heartbeat_details->payloads->[0]->data, 'hb1',
-        'last_heartbeat_details payload');
+    T2->is($req->last_heartbeat_details->payloads->[0]->data, '"hb1"',
+        'last_heartbeat_details payload (json/plain)');
 
     # default: no last_heartbeat_details
     my $req2 = $h->_build_fail_request($err)->get;
@@ -146,8 +146,8 @@ T2->subtest('fail builds request with failure + last_heartbeat_details' => sub {
         'Temporalio::Proto::Api::Workflowservice::V1::RespondActivityTaskFailedByIdRequest');
     T2->is($reqid->workflow_id, 'wf', 'ById workflow_id');
     T2->is($reqid->activity_id, 'act', 'ById activity_id');
-    T2->is($reqid->last_heartbeat_details->payloads->[0]->data, 'h',
-        'ById last_heartbeat_details');
+    T2->is($reqid->last_heartbeat_details->payloads->[0]->data, '"h"',
+        'ById last_heartbeat_details (json/plain)');
 });
 
 # ---------------------------------------------------------------------------
@@ -162,8 +162,8 @@ T2->subtest('report_cancellation builds Canceled request' => sub {
         'Temporalio::Proto::Api::Workflowservice::V1::RespondActivityTaskCanceledRequest');
     T2->is($req->task_token, 'tok-x', 'task_token');
     T2->is($req->namespace, 'ns-async', 'namespace');
-    T2->is($req->details->payloads->[0]->data, 'd1', 'details payload 0');
-    T2->is($req->details->payloads->[1]->data, 'd2', 'details payload 1');
+    T2->is($req->details->payloads->[0]->data, '"d1"', 'details payload 0 (json/plain)');
+    T2->is($req->details->payloads->[1]->data, '"d2"', 'details payload 1 (json/plain)');
 
     my $empty = $h->_build_report_cancellation_request()->get;
     T2->ok(!defined $empty->details, 'no details -> details field absent');
@@ -189,7 +189,7 @@ T2->subtest('heartbeat builds Record request with details' => sub {
     T2->is($req->task_token, 'tok-h', 'task_token');
     T2->is($req->namespace, 'ns-async', 'namespace');
     T2->is($req->identity, 'id-async@host', 'identity');
-    T2->is($req->details->payloads->[0]->data, 'beat', 'details payload');
+    T2->is($req->details->payloads->[0]->data, '"beat"', 'details payload (json/plain)');
 
     my $hid = $client->async_activity_handle(
         workflow_id => 'wf', run_id => 'run', activity_id => 'act');

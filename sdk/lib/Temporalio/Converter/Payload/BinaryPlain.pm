@@ -1,10 +1,9 @@
 # ABOUTME: Payload converter for raw bytes — the Temporal-spec binary/plain
-# ABOUTME: encoding for byte strings and RawBytes-hinted values (spec section 5.2).
+# ABOUTME: encoding, claimed only by RawBytes-wrapped values (spec section 5.2).
 use v5.38;
 use warnings;
 use feature 'class';
 no warnings 'experimental::class';
-no warnings 'experimental::builtin';
 
 use Scalar::Util ();
 use Temporalio::Converter::Payload;
@@ -17,27 +16,19 @@ class Temporalio::Converter::Payload::BinaryPlain
     method encoding { 'binary/plain' }
 
     method to_payload ($value) {
-        my $bytes;
-        if (Scalar::Util::blessed($value)
-            && $value->isa('Temporalio::Payload::RawBytes'))
-        {
-            $bytes = $value->bytes;
-        }
-        elsif (defined $value
-            && !ref $value
-            && builtin::created_as_string($value)
-            && !utf8::is_utf8($value))
-        {
-            # Spec section 5.2: a string without the UTF-8 flag IS raw bytes.
-            # Numbers are not strings and fall through to the Json catch-all.
-            $bytes = $value;
-        }
-        else {
-            return undef;
-        }
+        # binary/plain is claimed ONLY by an explicit RawBytes wrapper. Perl has
+        # no distinct byte-string type, so a bare scalar is treated as text and
+        # falls through to the json/plain catch-all — matching sdk-python (only
+        # `bytes` is binary) and sdk-ruby (only ASCII_8BIT strings). Auto-routing
+        # plain strings here would emit binary/plain that other SDKs decode as
+        # bytes, not a string, and that tooling shows as base64 (spec section 5.2).
+        return undef
+            unless Scalar::Util::blessed($value)
+            && $value->isa('Temporalio::Payload::RawBytes');
+
         return Temporalio::Payload->new({
             metadata => { encoding => $self->encoding },
-            data     => $bytes,
+            data     => $value->bytes,
         });
     }
 

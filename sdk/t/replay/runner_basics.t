@@ -57,15 +57,15 @@ T2->subtest('trivial workflow completes (T-wf-11)' => sub {
     T2->is($cmd->which_variant, 'complete_workflow_execution',
         'the command is CompleteWorkflowExecution');
 
-    # The :Run returns the plain (non-UTF-8) string "Hello, Alice!". The spec
-    # composite converter encodes a non-UTF-8 string as binary/plain raw bytes
-    # (BinaryPlain wins ahead of the json/plain catch-all — spec section 5.2),
-    # so the result payload carries the string verbatim under binary/plain.
+    # The :Run returns the string "Hello, Alice!". A bare string is text, so the
+    # spec composite converter encodes it json/plain (binary/plain is reserved
+    # for RawBytes-wrapped values, spec section 5.2), so the result payload
+    # carries the JSON-encoded string.
     my $result_payload = $cmd->complete_workflow_execution->result;
-    T2->is($result_payload->metadata->{encoding}, 'binary/plain',
-        'result payload uses binary/plain encoding (non-UTF-8 string)');
-    T2->is($result_payload->data, 'Hello, Alice!',
-        'result payload carries the converted return value');
+    T2->is($result_payload->metadata->{encoding}, 'json/plain',
+        'result payload uses json/plain encoding');
+    T2->is($result_payload->data, '"Hello, Alice!"',
+        'result payload carries the JSON-encoded return value');
 
     # And it round-trips back to the original Perl value through the converter.
     require Temporalio::Converter::Payload;

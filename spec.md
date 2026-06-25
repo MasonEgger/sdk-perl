@@ -875,8 +875,14 @@ my $pc = Temporalio::Converter::Payload->default;
 **Subclasses (one per encoding) — all in `sdk/lib/Temporalio/Converter/Payload/`:**
 
 - `BinaryNull`: handles `undef`. Encoding `binary/null`. Data empty.
-- `BinaryPlain`: handles raw bytes (strings without UTF-8 flag set, or
-  objects with `->isa('Temporalio::Payload::RawBytes')`). Encoding `binary/plain`.
+- `BinaryPlain`: handles raw bytes — claimed ONLY by objects with
+  `->isa('Temporalio::Payload::RawBytes')`. Perl has no distinct byte-string
+  type, so a bare scalar is treated as text and falls through to `Json`
+  (`json/plain`); callers wrap genuine bytes in `RawBytes` to opt in. This
+  matches the reference SDKs' explicit-bytes rule (sdk-python only `bytes`,
+  sdk-ruby only `ASCII_8BIT` strings) and keeps strings interoperable and
+  human-readable in tooling rather than emitting `binary/plain` that other
+  SDKs decode as bytes and the UI/CLI render as base64. Encoding `binary/plain`.
 - `JsonProtobuf`: handles generated `Temporalio::Proto::*` message
   instances (detected via the `Protobuf::Class::Generator` registry /
   `$value->can('descriptor')`) serialized through `Protobuf::JSON`.

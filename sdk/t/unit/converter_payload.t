@@ -94,19 +94,22 @@ T2->subtest('BinaryProto hint selects binary/protobuf' => sub {
     T2->is($got->run_id,      'run-2', 'run_id survives');
 });
 
-# Raw-bytes values -> binary/plain round-trip (bare bytes and the RawBytes hint).
-T2->subtest('raw bytes round-trip via binary/plain' => sub {
+# binary/plain is claimed ONLY by the explicit RawBytes wrapper. A bare scalar
+# is treated as text and encodes json/plain (matching sdk-python/sdk-ruby and
+# keeping strings interoperable + readable in tooling). Wrap bytes to opt in.
+T2->subtest('RawBytes -> binary/plain; bare strings -> json/plain' => sub {
     my $raw = "\x00\x01\xfe\xff";
-
-    my $payload = $pc->to_payload($raw);
-    T2->is($payload->metadata->{encoding}, 'binary/plain', 'encoding is binary/plain');
-    T2->is($payload->data, $raw, 'data is the bytes verbatim');
-    T2->is($pc->from_payload($payload), $raw, 'bytes round-trip');
 
     my $wrapped = $pc->to_payload(Temporalio::Payload::RawBytes->new(bytes => $raw));
     T2->is($wrapped->metadata->{encoding}, 'binary/plain', 'RawBytes hint maps to binary/plain');
     T2->is($wrapped->data, $raw, 'hinted bytes stored verbatim');
     T2->is($pc->from_payload($wrapped), $raw, 'hinted bytes round-trip');
+
+    # The common case: a bare string is text, so it goes json/plain, not binary.
+    my $sp = $pc->to_payload('Hello, Mason!');
+    T2->is($sp->metadata->{encoding}, 'json/plain', 'a bare string encodes json/plain');
+    T2->is($sp->data, '"Hello, Mason!"', 'json/plain data is the JSON-quoted string');
+    T2->is($pc->from_payload($sp), 'Hello, Mason!', 'the string round-trips');
 });
 
 # T-pay-4: unhandled blessed object raises DataConverter naming the class.

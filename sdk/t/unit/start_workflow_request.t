@@ -68,14 +68,13 @@ T2->subtest('all kwargs land in the right request fields' => sub {
     T2->is($req->identity, 'id-test@host', 'identity from client');
     T2->ok(length($req->request_id) > 0, 'request_id populated (uuid)');
 
-    # args -> input.payloads via the data converter. A bare Perl string is a
-    # byte buffer, so the composite converter encodes it binary/plain (spec
-    # 5.2 order: BinaryPlain precedes Json); the integer 42 has no POK flag and
-    # falls through to json/plain. This matches the P1.4 converter exactly.
+    # args -> input.payloads via the data converter. A bare Perl string is
+    # treated as text and encodes json/plain (binary/plain is reserved for
+    # RawBytes-wrapped values, spec 5.2); the integer 42 also encodes json/plain.
     my @payloads = $req->input->payloads->@*;
     T2->is(scalar(@payloads), 2, 'two args -> two payloads');
-    T2->is($payloads[0]->metadata->{encoding}, 'binary/plain', 'arg0 binary/plain');
-    T2->is($payloads[0]->data, 'Alice', 'arg0 data');
+    T2->is($payloads[0]->metadata->{encoding}, 'json/plain', 'arg0 json/plain');
+    T2->is($payloads[0]->data, '"Alice"', 'arg0 data (JSON string)');
     T2->is($payloads[1]->metadata->{encoding}, 'json/plain', 'arg1 json/plain');
     T2->is($payloads[1]->data, '42', 'arg1 data');
 
@@ -95,12 +94,12 @@ T2->subtest('all kwargs land in the right request fields' => sub {
     T2->is($req->priority->priority_key, 1, 'priority embedded');
 
     # memo / headers -> map<string, Payload>; bare string values encode
-    # binary/plain (raw bytes) through the same converter as args.
-    T2->is($req->memo->fields->{foo}->data, 'bar', 'memo value encoded');
-    T2->is($req->memo->fields->{foo}->metadata->{encoding}, 'binary/plain',
-        'memo value binary/plain');
-    T2->is($req->header->fields->{'x-trace-id'}->data, 'abc',
-        'header value encoded');
+    # json/plain through the same converter as args.
+    T2->is($req->memo->fields->{foo}->data, '"bar"', 'memo value encoded (JSON string)');
+    T2->is($req->memo->fields->{foo}->metadata->{encoding}, 'json/plain',
+        'memo value json/plain');
+    T2->is($req->header->fields->{'x-trace-id'}->data, '"abc"',
+        'header value encoded (JSON string)');
 
     # search attributes
     T2->is($req->search_attributes->indexed_fields->{CustomKeywordField}
@@ -230,8 +229,8 @@ T2->subtest('signal_with_start request carries signal name + args' => sub {
         'Temporalio::Proto::Api::Workflowservice::V1::SignalWithStartWorkflowExecutionRequest');
     T2->is($req->workflow_id, 'wf-s', 'workflow_id');
     T2->is($req->signal_name, 'greet', 'signal_name');
-    T2->is($req->signal_input->payloads->[0]->data, 'hi', 'signal arg payload');
-    T2->is($req->input->payloads->[0]->data, 'arg', 'workflow arg payload');
+    T2->is($req->signal_input->payloads->[0]->data, '"hi"', 'signal arg payload (json/plain)');
+    T2->is($req->input->payloads->[0]->data, '"arg"', 'workflow arg payload (json/plain)');
 });
 
 T2->subtest('signal_with_start requires a signal name' => sub {

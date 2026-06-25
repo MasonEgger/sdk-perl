@@ -182,7 +182,7 @@ T2->subtest('upsert_memo set emits ModifyWorkflowProperties (T-upsert-5)' => sub
     T2->ok($cmd, 'a ModifyWorkflowProperties command was emitted');
     my $field = $cmd->modify_workflow_properties->upserted_memo->fields->{reason};
     T2->ok($field, 'upserted_memo.fields carries the memo key');
-    T2->is($field->data, 'x', 'the memo value is encoded onto the field');
+    T2->is($field->data, '"x"', 'the memo value is encoded json/plain onto the field');
     T2->is($h->runner->info->{memo}{reason}, 'x',
         'the in-workflow memo view is kept in sync');
 });

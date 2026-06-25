@@ -167,4 +167,32 @@ T2->subtest('invalid workflow entry raises Argument' => sub {
     );
 });
 
+# Same footgun as :Defn — an unquoted :Signal(name=foo,dynamic=1) collapses to a
+# single string and would register a handler named "foo,dynamic=1". parse_handler
+# rejects a name containing ',' or '=' with a fix-it message.
+T2->subtest('unquoted handler kwargs form is rejected with guidance' => sub {
+    require Temporalio::Workflow::Attributes;
+
+    my $err = T2->dies(sub {
+        Temporalio::Workflow::Attributes::parse_handler(
+            'name=setName,dynamic=1', 'set_name', 'Signal');
+    });
+    T2->ok(
+        Scalar::Util::blessed($err)
+            && $err->isa('Temporalio::Exception::Argument'),
+        'unquoted :Signal kwargs raises Argument',
+    );
+    T2->like("$err", qr/Invalid :Signal name/, 'message names the attribute kind');
+    T2->like("$err", qr/Quote each kwargs token/, 'message shows the quoted fix');
+
+    # Valid quoted forms still parse.
+    my ($n) = Temporalio::Workflow::Attributes::parse_handler(
+        ['setName'], 'set_name', 'Signal');
+    T2->is($n, 'setName', 'quoted positional handler name parses');
+
+    my (undef, %o) = Temporalio::Workflow::Attributes::parse_handler(
+        ['dynamic=1'], 'set_name', 'Signal');
+    T2->is($o{dynamic}, 1, 'quoted dynamic kwarg parses');
+});
+
 T2->done_testing;

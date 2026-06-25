@@ -131,4 +131,36 @@ T2->subtest('invalid activity entry raises Argument' => sub {
     );
 });
 
+# The kwargs form must be quoted. Written unquoted, :Defn(name=Foo,sync=1)
+# reaches the handler as the single string "name=Foo,sync=1", which would
+# otherwise register an activity named "Foo,sync=1" that no workflow can
+# resolve. parse_defn rejects a name containing ',' or '=' with a fix-it message.
+T2->subtest('unquoted :Defn kwargs form is rejected with guidance' => sub {
+    require Temporalio::Activity::Attributes;
+
+    for my $bad ('name=Foo,sync=1', 'name=GetIP,sync=1') {
+        my $err = T2->dies(sub {
+            Temporalio::Activity::Attributes::parse_defn($bad, 'get_ip', 'Pkg');
+        });
+        T2->ok(
+            Scalar::Util::blessed($err)
+                && $err->isa('Temporalio::Exception::Argument'),
+            "unquoted '$bad' raises Argument",
+        );
+        T2->like("$err", qr/cannot contain ',' or '='/,
+            'the message explains the constraint');
+        T2->like("$err", qr/Quote each kwargs token/,
+            'the message shows the quoted fix');
+    }
+
+    # The valid forms still parse: positional name and quoted kwargs.
+    my ($n1) = Temporalio::Activity::Attributes::parse_defn(['GetIP'], 'm', 'P');
+    T2->is($n1, 'GetIP', 'quoted positional name parses');
+
+    my ($n2, %o2) =
+        Temporalio::Activity::Attributes::parse_defn(['GetIP', 'sync=1'], 'm', 'P');
+    T2->is($n2, 'GetIP', 'quoted kwargs name parses');
+    T2->is($o2{sync}, 1, 'quoted kwargs option parses');
+});
+
 T2->done_testing;
