@@ -387,9 +387,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P10.6.3 Verify: cargo test && prove -lj4 t
 
 ### P10.7 Autoscaling pollers (spec §29.3)
-- [ ] P10.7.1 RED: sdk/t/unit/poller_behavior.t + integration smoke (T-poller-1..5)
-- [ ] P10.7.2 GREEN: PollerBehavior/{SimpleMaximum,Autoscaling} + Worker *_poller_behavior kwargs + override resolution + WorkerOptions packer
-- [ ] P10.7.3 Verify: prove -lj4 t
+- [x] P10.7.1 RED: sdk/t/unit/poller_behavior.t + integration smoke (T-poller-1..5)
+- [x] P10.7.2 GREEN: PollerBehavior/{SimpleMaximum,Autoscaling} + Worker *_poller_behavior kwargs + override resolution + WorkerOptions packer
+- [x] P10.7.3 Verify: prove -lj4 t
 
 ### P10.8 Determinism enforcement (spec §29.4)
 - [ ] P10.8.1 RED: sdk/t/unit/determinism_guard.t + WfDef fixtures (T-det-1..7)

@@ -58,8 +58,20 @@ class Temporalio::Worker {
     field $max_concurrent_workflow_tasks       :param = 100;
     field $max_concurrent_activities           :param = 100;
     field $max_concurrent_local_activities     :param = 100;
-    field $max_concurrent_workflow_task_polls  :param = 5;
-    field $max_concurrent_activity_task_polls  :param = 5;
+    # Legacy poll-count kwargs (spec §29.3, DEPRECATED). undef means "unset" so
+    # an explicitly-passed value can override a poller-behavior object with
+    # SimpleMaximum(that) per the Python override model (_worker.py:587-598).
+    field $max_concurrent_workflow_task_polls  :param = undef;
+    field $max_concurrent_activity_task_polls  :param = undef;
+    # Poller behaviors (spec §29.3). Each accepts a
+    # Temporalio::Worker::PollerBehavior::{SimpleMaximum,Autoscaling}. The
+    # default is SimpleMaximum(5) (built in ADJUST to avoid loading the class at
+    # field-init time). The behavior field is primary; an explicitly-set legacy
+    # max_concurrent_*_task_polls overrides it with SimpleMaximum(that). Nexus
+    # has no legacy equivalent and is taken directly.
+    field $workflow_task_poller_behavior       :param = undef;
+    field $activity_task_poller_behavior       :param = undef;
+    field $nexus_task_poller_behavior          :param = undef;
     # Worker tuner (spec §29.2). A Temporalio::Worker::Tuner holding four slot
     # suppliers, mutually exclusive with the max_concurrent_* slot kwargs. When
     # absent the worker synthesizes a FixedSize tuner from those kwargs (v0.1
@@ -147,6 +159,27 @@ class Temporalio::Worker {
                 message => 'tuner must be a Temporalio::Worker::Tuner')
                 unless ref $tuner
                     && $tuner->isa('Temporalio::Worker::Tuner');
+        }
+
+        # Poller behaviors (spec §29.3): each kwarg, when given, must be a
+        # PollerBehavior::{SimpleMaximum,Autoscaling}. undef means the
+        # SimpleMaximum(5) default.
+        for my $pair (
+            [workflow_task_poller_behavior => $workflow_task_poller_behavior],
+            [activity_task_poller_behavior => $activity_task_poller_behavior],
+            [nexus_task_poller_behavior    => $nexus_task_poller_behavior],
+        ) {
+            my ($name, $behavior) = @$pair;
+            next unless defined $behavior;
+            Temporalio::Exception::Argument->throw(
+                message => "$name must be a "
+                    . 'Temporalio::Worker::PollerBehavior::SimpleMaximum or '
+                    . '::Autoscaling')
+                unless ref $behavior
+                    && ($behavior->isa(
+                            'Temporalio::Worker::PollerBehavior::SimpleMaximum')
+                        || $behavior->isa(
+                            'Temporalio::Worker::PollerBehavior::Autoscaling'));
         }
 
         $activity_registry = Temporalio::Worker::ActivityRegistry->new(
@@ -309,6 +342,49 @@ class Temporalio::Worker {
         return;
     }
 
+    # _poller_behavior_options() -> the three *_poller_behavior_spec kwargs for
+    # WorkerOptions::build (spec §29.3). The behavior object is primary; an
+    # explicitly-set legacy max_concurrent_*_task_polls overrides the workflow /
+    # activity behavior with SimpleMaximum(that) (Python _worker.py:587-598).
+    # Nexus has no legacy equivalent. The default behavior is SimpleMaximum(5).
+    # The resolved workflow behavior must allow >= 2 concurrent polls (core
+    # constraint); a smaller SimpleMaximum is an Argument.
+    method _poller_behavior_options () {
+        require Temporalio::Worker::PollerBehavior::SimpleMaximum;
+
+        my $resolve = sub ($behavior, $override) {
+            # An explicit legacy poll count overrides the behavior entirely.
+            if (defined $override) {
+                return Temporalio::Worker::PollerBehavior::SimpleMaximum->new(
+                    maximum => $override);
+            }
+            return $behavior
+                // Temporalio::Worker::PollerBehavior::SimpleMaximum->new;
+        };
+
+        my $workflow = $resolve->(
+            $workflow_task_poller_behavior, $max_concurrent_workflow_task_polls);
+        my $activity = $resolve->(
+            $activity_task_poller_behavior, $max_concurrent_activity_task_polls);
+        my $nexus = $nexus_task_poller_behavior
+            // Temporalio::Worker::PollerBehavior::SimpleMaximum->new;
+
+        # Core requires the workflow-task pool to allow >= 2 concurrent polls.
+        if ($workflow->isa('Temporalio::Worker::PollerBehavior::SimpleMaximum')
+            && $workflow->maximum < 2) {
+            Temporalio::Exception::Argument->throw(
+                message => 'workflow_task_poller_behavior SimpleMaximum maximum'
+                    . ' must be >= 2 for the workflow-task pool (got '
+                    . $workflow->maximum . ')');
+        }
+
+        return (
+            workflow_task_poller_behavior_spec => $workflow->_pack_spec,
+            activity_task_poller_behavior_spec => $activity->_pack_spec,
+            nexus_task_poller_behavior_spec    => $nexus->_pack_spec,
+        );
+    }
+
     method _build_worker_options ($keep) {
         return Temporalio::Core::FFI::WorkerOptions::build($keep,
             namespace            => $client->namespace,
@@ -344,9 +420,10 @@ class Temporalio::Worker {
                 $max_task_queue_activities_per_second // 0,
             graceful_shutdown_period_millis => int($graceful_shutdown_period * 1000),
 
-            workflow_task_poller_simple_maximum => $max_concurrent_workflow_task_polls,
-            activity_task_poller_simple_maximum => $max_concurrent_activity_task_polls,
-            nexus_task_poller_simple_maximum    => 5,
+            # Poller behaviors (spec §29.3): the behavior field is primary; an
+            # explicitly-set legacy max_concurrent_*_task_polls overrides it with
+            # SimpleMaximum(that). Resolved into *_poller_behavior_spec kwargs.
+            $self->_poller_behavior_options,
             nonsticky_to_sticky_poll_ratio      => $nonsticky_to_sticky_poll_ratio,
 
             nondeterminism_as_workflow_fail => $nondeterminism_as_workflow_fail ? 1 : 0,

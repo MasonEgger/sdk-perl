@@ -109,6 +109,23 @@ my %SLOT_SPEC_FOR = (
     local_activity_slots => 'local_activity_slot_supplier_spec',
     nexus_task_slots     => 'nexus_task_slot_supplier_spec',
 );
+# Optional per-pool poller-behavior specs (spec §29.3). When present they pack
+# the pool's TemporalCorePollerBehavior directly (SimpleMaximum or Autoscaling);
+# when absent the legacy *_poller_simple_maximum => N SimpleMaximum default is
+# used. The three *_poller_simple_maximum fields are therefore only required
+# when no matching behavior spec is given.
+$KNOWN_FIELD{$_} = 1 for qw(
+    workflow_task_poller_behavior_spec
+    activity_task_poller_behavior_spec
+    nexus_task_poller_behavior_spec
+);
+# Maps each poller-behavior-spec key to the *_poller_simple_maximum field it
+# replaces.
+my %POLLER_SPEC_FOR = (
+    workflow_task_poller_simple_maximum => 'workflow_task_poller_behavior_spec',
+    activity_task_poller_simple_maximum => 'activity_task_poller_behavior_spec',
+    nexus_task_poller_simple_maximum    => 'nexus_task_poller_behavior_spec',
+);
 
 sub _throw_argument ($message) {
     require Temporalio::Exception::Argument;
@@ -258,12 +275,39 @@ sub pack_slot_supplier ($keep, $spec) {
     return _pack_fixed_size_slot_supplier($spec->{fixed_size});
 }
 
-# TemporalCorePollerBehavior holds POINTERS to its variants; pack the
-# TemporalCorePollerBehaviorSimpleMaximum struct (one uintptr_t) into kept
-# memory and reference it, with autoscaling NULL.
+# TemporalCorePollerBehavior is NOT a tagged union but a struct of two nullable
+# pointers { const SimpleMaximum *simple_maximum; const Autoscaling *autoscaling; }
+# (header:786-789). The active variant is the non-NULL pointer; the other is
+# NULL. The outer struct is 16 bytes (two pointers) regardless of variant, so
+# the WorkerOptions field offsets (352/376/392) never move.
+
+# SimpleMaximum variant -> (simple_ptr, NULL). The sub-struct
+# TemporalCorePollerBehaviorSimpleMaximum is one uintptr_t (header:776-778),
+# kept in @keep so the pointer stays valid for the worker lifetime.
 sub _pack_simple_maximum_poller ($keep, $maximum) {
     my ($struct_ptr) = Temporalio::Core::FFI::keep_buffer($keep, pack('Q', $maximum));
     return pack('Q Q', $struct_ptr, 0);
+}
+
+# Autoscaling variant -> (NULL, autoscaling_ptr). The sub-struct
+# TemporalCorePollerBehaviorAutoscaling is three uintptr_t
+# (minimum/maximum/initial, header:780-784), kept in @keep.
+sub _pack_autoscaling_poller ($keep, $as) {
+    my ($struct_ptr) = Temporalio::Core::FFI::keep_buffer($keep,
+        pack('Q Q Q', $as->{minimum}, $as->{maximum}, $as->{initial}));
+    return pack('Q Q', 0, $struct_ptr);
+}
+
+# pack_poller_behavior(\@keep, \%spec) -> the 16-byte TemporalCorePollerBehavior
+# two-pointer struct. Exactly one spec key selects the variant:
+#   { simple_maximum => $maximum }            -> SimpleMaximum  (simple_ptr, NULL)
+#   { autoscaling    => { minimum, maximum, initial } } -> Autoscaling (NULL, ptr)
+# Public so the poller-behavior unit test can inspect the packed pointers.
+sub pack_poller_behavior ($keep, $spec) {
+    if (defined $spec->{autoscaling}) {
+        return _pack_autoscaling_poller($keep, $spec->{autoscaling});
+    }
+    return _pack_simple_maximum_poller($keep, $spec->{simple_maximum});
 }
 
 # TemporalCoreByteArrayRefArray { const TemporalCoreByteArrayRef *data;
@@ -273,6 +317,19 @@ sub _pack_byte_array_ref_array ($keep, $items) {
     my $elements = join '', map { _pack_byte_array_ref($keep, $_) } @$items;
     my ($data_ptr) = Temporalio::Core::FFI::keep_buffer($keep, $elements);
     return pack('Q Q', $data_ptr, scalar @$items);
+}
+
+# _pack_poller_field(\@keep, \%options, $pool) -> the 16-byte poller-behavior
+# struct for a pool ('workflow_task'/'activity_task'/'nexus_task'). Uses the
+# pool's *_poller_behavior_spec when given, else synthesizes SimpleMaximum from
+# the legacy *_poller_simple_maximum count (spec §29.3 override resolution is
+# applied earlier in Worker.pm; this is the raw pack dispatch).
+sub _pack_poller_field ($keep, $options, $pool) {
+    my $spec_key = "${pool}_poller_behavior_spec";
+    my $spec = defined $options->{$spec_key}
+        ? $options->{$spec_key}
+        : { simple_maximum => $options->{"${pool}_poller_simple_maximum"} };
+    return pack_poller_behavior($keep, $spec);
 }
 
 # build(\@keep, %options) — packs a complete TemporalCoreWorkerOptions and
@@ -296,6 +353,12 @@ sub build ($keep, %options) {
         # (spec §29.2): the spec packs that pool's supplier directly instead of
         # synthesizing a FixedSize from the count.
         if (my $spec_key = $SLOT_SPEC_FOR{$field}) {
+            next if defined $options{$spec_key};
+        }
+        # A *_poller_simple_maximum field is satisfied by its matching
+        # *_poller_behavior_spec (spec §29.3): the spec packs that pool's
+        # PollerBehavior directly instead of synthesizing SimpleMaximum from N.
+        if (my $spec_key = $POLLER_SPEC_FOR{$field}) {
             next if defined $options{$spec_key};
         }
         _throw_argument("missing WorkerOptions field '$field'")
@@ -332,10 +395,14 @@ sub build ($keep, %options) {
     $buf .= pack('d', $options{max_activities_per_second});              # 328 (f64)
     $buf .= pack('d', $options{max_task_queue_activities_per_second});   # 336 (f64)
     $buf .= pack('Q', $options{graceful_shutdown_period_millis});        # 344
-    $buf .= _pack_simple_maximum_poller($keep, $options{workflow_task_poller_simple_maximum}); # 352
+    # The three poller behaviors (spec §29.3). Each pool packs from its explicit
+    # *_poller_behavior_spec when given (SimpleMaximum/Autoscaling), else from
+    # the legacy *_poller_simple_maximum => N SimpleMaximum default. The outer
+    # struct is 16 bytes either way, so offsets 352/376/392 are fixed.
+    $buf .= _pack_poller_field($keep, \%options, 'workflow_task'); # 352
     $buf .= pack('f x4', $options{nonsticky_to_sticky_poll_ratio});      # 368 (f32 + pad)
-    $buf .= _pack_simple_maximum_poller($keep, $options{activity_task_poller_simple_maximum}); # 376
-    $buf .= _pack_simple_maximum_poller($keep, $options{nexus_task_poller_simple_maximum});    # 392
+    $buf .= _pack_poller_field($keep, \%options, 'activity_task'); # 376
+    $buf .= _pack_poller_field($keep, \%options, 'nexus_task');    # 392
     $buf .= pack('C x7', $options{nondeterminism_as_workflow_fail} ? 1 : 0);    # 408 (bool + pad)
     $buf .= _pack_byte_array_ref_array($keep, $options{nondeterminism_as_workflow_fail_for_types}); # 416
     $buf .= _pack_byte_array_ref_array($keep, $options{plugins});         # 432
@@ -402,5 +469,13 @@ packed tag/body.
 Packs the 48-byte C<TemporalCoreSlotSupplier> union member from a supplier spec
 (C<fixed_size>/C<resource_based>/C<custom>; spec §29.2). Public so the tuner
 test can inspect the packed tag/body.
+
+=head2 pack_poller_behavior
+
+Packs the 16-byte C<TemporalCorePollerBehavior> two-pointer struct from a poller
+spec (C<simple_maximum> or C<autoscaling>; spec §29.3). The struct is two
+nullable pointers, not a tagged union: SimpleMaximum is C<(ptr, NULL)>,
+Autoscaling is C<(NULL, ptr)>. Public so the poller-behavior unit test can
+inspect the packed pointers.
 
 =cut
