@@ -14,7 +14,10 @@ typedef struct TemporalCoreEphemeralServer TemporalCoreEphemeralServer;
 typedef struct TemporalCoreWorkerOptions TemporalCoreWorkerOptions;
 
 /**
- * `kind` discriminator values, 1..6 in spec section 3 trampoline order.
+ * `kind` discriminator values, 1..6 in spec section 3 trampoline order, plus
+ * the kind-7 log-forwarding entry (spec section 28.1). Kind 7 differs from
+ * 1..6: it carries no `callback_id` (no pending Future) and owns its buffers
+ * shim-side, freed via `temporalio_perl_bridge_forwarded_log_free`.
  */
 #define TEMPORALIO_PERL_BRIDGE_KIND_WORKER_POLL 1
 
@@ -28,11 +31,24 @@ typedef struct TemporalCoreWorkerOptions TemporalCoreWorkerOptions;
 
 #define TEMPORALIO_PERL_BRIDGE_KIND_EPHEMERAL_SERVER_SHUTDOWN 6
 
+#define TEMPORALIO_PERL_BRIDGE_KIND_FORWARDED_LOG 7
+
 /**
  * Thread-safe completion queue: an unbounded `SegQueue` plus the signal fd.
  * One allocation per `Temporalio::Core::Runtime` instance.
  */
 typedef struct TemporalioPerlBridgeQueue TemporalioPerlBridgeQueue;
+
+/**
+ * Opaque borrow of sdk-core-c-bridge's `ForwardedLog`. The shim never
+ * dereferences this — it only passes the pointer back to core's
+ * `temporal_core_forwarded_log_*` accessors, which are valid only for the
+ * duration of the `forward_to` callback (the log is freed the instant the
+ * callback returns).
+ */
+typedef struct TemporalCoreForwardedLog {
+  uint8_t _private[0];
+} TemporalCoreForwardedLog;
 
 /**
  * One queued completion. `kind` discriminates which trampoline fired (1..6)
@@ -55,7 +71,9 @@ typedef struct TemporalioPerlBridgeEntry {
    */
   void *success_handle;
   /**
-   * RPC call extras (fail_ba carries the failure_message).
+   * RPC call extras (fail_ba carries the failure_message). For a kind-7
+   * forwarded-log entry, `rpc_status_code` carries the forwarded log level
+   * (0..4 = Trace..Error).
    */
   uint32_t rpc_status_code;
   const TemporalCoreByteArray *rpc_failure_details;
@@ -63,11 +81,82 @@ typedef struct TemporalioPerlBridgeEntry {
    * Ephemeral server start target string.
    */
   const TemporalCoreByteArray *ephemeral_target;
+  /**
+   * Kind-7 forwarded-log payload (spec section 28.1). These three buffers
+   * are deep copies owned by the shim (NUL-terminated C strings), freed by
+   * `temporalio_perl_bridge_forwarded_log_free` after the Perl drain reads
+   * them, or by `Entry::drop` for undrained entries at queue free. They are
+   * null for every kind other than 7.
+   */
+  char *log_target;
+  char *log_message;
+  char *log_fields_json;
+  /**
+   * Kind-7 forwarded-log timestamp (milliseconds since the Unix epoch).
+   */
+  uint64_t log_timestamp_ms;
 } TemporalioPerlBridgeEntry;
 
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * Claim the process-global forwarding registry for `q`, recording the four
+ * core accessor function pointers (passed as opaque from Perl). Returns true
+ * on success, false if a runtime already forwards logs (the caller raises
+ * Argument). The compare-and-set on the active flag makes the claim race-free
+ * across runtimes constructed concurrently.
+ *
+ * # Safety
+ * The four pointers must be the live `temporal_core_forwarded_log_*` symbols
+ * from the loaded core bridge, valid for the life of the registration.
+ */
+bool temporalio_perl_bridge_forwarding_register(struct TemporalioPerlBridgeQueue *q,
+                                                const void *target,
+                                                const void *message,
+                                                const void *timestamp_millis,
+                                                const void *fields_json);
+
+/**
+ * Release the forwarding registry held by `q`. A no-op unless `q` is the
+ * currently registered queue (so a non-forwarding runtime's shutdown never
+ * clears another runtime's registration). Called from `Runtime->shutdown`
+ * before the queue is freed.
+ */
+void temporalio_perl_bridge_forwarding_unregister(struct TemporalioPerlBridgeQueue *q);
+
+/**
+ * Trampoline for core's `TemporalCoreForwardedLogCallback` (kind 7). Reads
+ * the log's target/message/timestamp/fields-JSON via core's accessors,
+ * deep-copies each string into shim-owned buffers, and pushes a kind-7 entry
+ * onto the registered forwarding queue. A null registry (forwarding torn down
+ * mid-flight) drops the log. No `user_data`: routing is via the registry.
+ *
+ * # Safety
+ * `log` must be the valid `ForwardedLog` pointer core passes for the life of
+ * this call; it must not be used after the callback returns.
+ */
+void temporalio_perl_bridge_forwarded_log_callback(uint32_t level,
+                                                   const struct TemporalCoreForwardedLog *log);
+
+/**
+ * Address of the forwarded-log trampoline, for the `forward_to` slot of
+ * `TemporalCoreLoggingOptions`.
+ */
+void *temporalio_perl_bridge_forwarded_log_callback_ptr(void);
+
+/**
+ * Free the shim-owned kind-7 log buffers of a drained entry. Called by the
+ * Perl drain after it copies the target/message/fields strings out of the
+ * entry. Idempotent (null pointers no-op); undrained entries are freed by
+ * `Entry::drop` at queue free instead.
+ *
+ * # Safety
+ * `entry` must point at a drained `TemporalioPerlBridgeEntry` written by
+ * `temporalio_perl_bridge_queue_drain`, not yet freed.
+ */
+void temporalio_perl_bridge_forwarded_log_free(struct TemporalioPerlBridgeEntry *entry);
 
 /**
  * Allocate a queue signalling `signal_fd` (eventfd, or pipe write-end as

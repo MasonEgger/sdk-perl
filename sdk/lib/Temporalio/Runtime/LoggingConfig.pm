@@ -1,5 +1,5 @@
 # ABOUTME: Runtime logging configuration (spec section 4.2): wraps either a
-# ABOUTME: LoggingFilter or a raw filter string; builds the LoggingOptions record.
+# ABOUTME: LoggingFilter or a raw filter string; optionally forwards core logs.
 use v5.38;
 use warnings;
 use feature 'class';
@@ -10,12 +10,17 @@ use FFI::Platypus::Buffer ();
 use Temporalio::Core::FFI ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Runtime::LoggingFilter ();
+use Temporalio::Runtime::LogForwardingConfig ();
 
 class Temporalio::Runtime::LoggingConfig {
     # Either a Temporalio::Runtime::LoggingFilter or a raw filter string.
-    # Log forwarding to a Perl logger is deferred past v0.1 (spec section 15),
-    # so forward_to is always NULL in the FFI record.
     field $filter :param = Temporalio::Runtime::LoggingFilter->new;
+
+    # Optional log forwarding (spec section 28.1): a
+    # Temporalio::Runtime::LogForwardingConfig, or undef for no forwarding (the
+    # default — forward_to stays NULL in the FFI record). The name is kept as
+    # forward_to for bridge symmetry (resolved decision, spec section 28.1).
+    field $forward_to :param = undef;
 
     ADJUST {
         if (ref $filter
@@ -26,13 +31,22 @@ class Temporalio::Runtime::LoggingConfig {
                          . ' or a raw filter string',
             );
         }
+        if (defined $forward_to
+            && !(Scalar::Util::blessed($forward_to)
+                 && $forward_to->isa('Temporalio::Runtime::LogForwardingConfig'))) {
+            Temporalio::Exception::Argument->throw(
+                message => 'forward_to must be a'
+                         . ' Temporalio::Runtime::LogForwardingConfig or undef',
+            );
+        }
     }
 
     # Default logging configuration: core WARN, other ERROR (the
     # LoggingFilter defaults, matching the reference SDKs).
     sub default ($class) { return $class->new }
 
-    method filter { $filter }
+    method filter     { $filter }
+    method forward_to { $forward_to }
 
     method filter_string () {
         return ref $filter ? $filter->to_string : $filter;
@@ -40,7 +54,10 @@ class Temporalio::Runtime::LoggingConfig {
 
     # Builds a TemporalCoreLoggingOptions record. Anything backing record
     # pointers (here the filter string scalar) is pushed onto @$keep, which
-    # the caller must hold for as long as the record may be dereferenced.
+    # the caller must hold for as long as the record may be dereferenced. When
+    # forwarding is configured the forward_to slot carries the shim's kind-7
+    # trampoline pointer; routing is process-global (Runtime->new registers
+    # the queue and the active LogForwardingConfig), so no per-call user_data.
     method to_ffi ($keep) {
         my $filter_string = $self->filter_string;
         push @$keep, \$filter_string;
@@ -48,7 +65,9 @@ class Temporalio::Runtime::LoggingConfig {
         return Temporalio::Core::FFI::LoggingOptions->new(
             filter_data => $data,
             filter_size => $size,
-            forward_to  => undef,
+            forward_to  => defined $forward_to
+                ? Temporalio::Core::FFI::forwarded_log_callback_ptr()
+                : undef,
         );
     }
 }
@@ -81,9 +100,13 @@ Temporalio::Runtime::LoggingConfig - logging configuration for the core runtime
 
 Carries the log filter for the core runtime (spec section 4.2). C<filter>
 accepts a L<Temporalio::Runtime::LoggingFilter> or a raw string; any other
-reference raises L<Temporalio::Exception::Argument>. C<to_ffi(\@keep)>
-produces the C<TemporalCoreLoggingOptions> record with C<forward_to> NULL
-(log forwarding is deferred past v0.1, spec section 15); buffers backing the
+reference raises L<Temporalio::Exception::Argument>. C<forward_to> optionally
+takes a L<Temporalio::Runtime::LogForwardingConfig> to surface core's
+structured logs through a Perl logger (spec section 28.1); C<undef> (the
+default) means no forwarding. C<to_ffi(\@keep)> produces the
+C<TemporalCoreLoggingOptions> record: C<forward_to> is NULL without
+forwarding, else the shim's kind-7 trampoline pointer (routing is
+process-global, set up by L<Temporalio::Runtime>). Buffers backing the
 record are pushed onto C<@keep> and must outlive any use of the record.
 
 =head1 CONSTRUCTOR
@@ -102,6 +125,11 @@ Constructs a Temporalio::Runtime::LoggingConfig. Named parameters:
 
 (optional, default C<Temporalio::Runtime::LoggingFilter->new>)
 
+=item C<forward_to>
+
+(optional, default C<undef>) A L<Temporalio::Runtime::LogForwardingConfig>
+enabling core-log forwarding, or C<undef> for none.
+
 =back
 
 =head1 METHODS
@@ -113,6 +141,11 @@ Class method returning the default logging config.
 =head2 filter
 
 Accessor returning the C<filter> value.
+
+=head2 forward_to
+
+Accessor returning the C<forward_to> value (a
+L<Temporalio::Runtime::LogForwardingConfig> or C<undef>).
 
 =head2 filter_string
 

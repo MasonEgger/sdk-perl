@@ -38,11 +38,15 @@ package Temporalio::Core::FFI::CallbackEntry {
     use FFI::Platypus::Record;
     # struct TemporalioPerlBridgeEntry (temporalio-perl-bridge.h): one queued
     # completion popped by temporalio_perl_bridge_queue_drain. kind (1..6 in
-    # trampoline order) discriminates which fields are meaningful. Only ever
-    # handled BY POINTER into the drain buffer; record_layout_1 inserts the
-    # same interior padding as the C layout (callback_id 0, kind 8 + 7 pad,
-    # pointers 16/24/32, rpc_status_code 40 + 4 pad, pointers 48/56) for the
-    # C struct's 64-byte stride, so casting buffer + i * sizeof views slot i.
+    # trampoline order, 7 for forwarded logs) discriminates which fields are
+    # meaningful. Only ever handled BY POINTER into the drain buffer;
+    # record_layout_1 inserts the same interior padding as the C layout
+    # (callback_id 0, kind 8 + 7 pad, pointers 16/24/32, rpc_status_code 40 + 4
+    # pad, pointers 48/56, the kind-7 log buffers 64/72/80, log_timestamp_ms
+    # 88, sizeof 96) so casting buffer + i * sizeof views slot i.
+    # For a kind-7 entry rpc_status_code carries the forwarded log level
+    # (0..4); log_target/log_message/log_fields_json are shim-owned
+    # NUL-terminated C strings freed via forwarded_log_free after the drain.
     record_layout_1(
         uint64 => 'callback_id',
         uint8  => 'kind',
@@ -52,6 +56,10 @@ package Temporalio::Core::FFI::CallbackEntry {
         uint32 => 'rpc_status_code',
         opaque => 'rpc_failure_details',
         opaque => 'ephemeral_target',
+        opaque => 'log_target',
+        opaque => 'log_message',
+        opaque => 'log_fields_json',
+        uint64 => 'log_timestamp_ms',
     );
 }
 
@@ -587,6 +595,29 @@ my @phase0_attach = (
       [] => 'opaque' ],
     [ temporalio_perl_bridge_ephemeral_server_shutdown_callback_ptr => 'ephemeral_server_shutdown_callback_ptr',
       [] => 'opaque' ],
+    # Log forwarding (spec section 28.1, kind 7). The forward_to trampoline
+    # has no user_data, so it routes via a process-global registry:
+    # forwarding_register claims it for a queue (returns false if a second
+    # runtime requests forwarding while one is active -> Perl raises Argument),
+    # forwarding_unregister releases it at shutdown. forwarded_log_callback_ptr
+    # is the TemporalCoreForwardedLogCallback for the LoggingOptions forward_to
+    # slot. forwarded_log_free frees a drained kind-7 entry's shim-owned target/
+    # message/fields buffers (undrained entries are freed by the shim's Drop at
+    # queue_free).
+    # forwarding_register takes the queue plus the four core forwarded-log
+    # accessor function pointers (passed as opaque). The shim never hard-links
+    # the core bridge — FFI::Platypus loads each library RTLD_LOCAL, so the
+    # shim's undefined symbols would not resolve against the separately loaded
+    # core lib; instead Perl hands the accessors it resolved itself.
+    [ temporalio_perl_bridge_forwarding_register => 'forwarding_register',
+      [ 'TemporalioPerlBridgeQueue', 'opaque', 'opaque', 'opaque', 'opaque' ]
+        => 'bool' ],
+    [ temporalio_perl_bridge_forwarding_unregister => 'forwarding_unregister',
+      [ 'TemporalioPerlBridgeQueue' ] => 'void' ],
+    [ temporalio_perl_bridge_forwarded_log_callback_ptr => 'forwarded_log_callback_ptr',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_forwarded_log_free => 'forwarded_log_free',
+      [ 'opaque' ] => 'void' ],
     # WorkerOptions marshalling spike (plan P0.10): the shim parses a
     # TemporalCoreWorkerOptions built Perl-side and echoes every field as a
     # NUL-terminated "field=value" summary string (cast it to 'string', then
@@ -596,6 +627,27 @@ my @phase0_attach = (
     [ temporalio_perl_bridge_string_free => 'string_free',
       [ 'opaque' ] => 'void' ],
 );
+
+# The four core forwarded-log accessor function pointers (spec section 28.1).
+# Resolved from the loaded core bridge via FFI::Platypus find_symbol and
+# handed to the shim's forwarding_register so the shim never hard-links core.
+# Memoized: the symbols are stable for the process lifetime.
+my %_forwarded_log_accessor_ptr;
+sub forwarded_log_accessor_ptrs () {
+    return @_forwarded_log_accessor_ptr{
+        qw(target message timestamp_millis fields_json)
+    } if %_forwarded_log_accessor_ptr;
+    for my $name (qw(target message timestamp_millis fields_json)) {
+        my $sym = "temporal_core_forwarded_log_$name";
+        my $ptr = $ffi->find_symbol($sym)
+            or die "Temporalio::Core::FFI: core bridge symbol '$sym' not found"
+                 . ' (version skew with the compiled core bridge?)';
+        $_forwarded_log_accessor_ptr{$name} = $ptr;
+    }
+    return @_forwarded_log_accessor_ptr{
+        qw(target message timestamp_millis fields_json)
+    };
+}
 
 # Attach eagerly at load time and die loudly on any failure so a version
 # skew between the SDK and the compiled bridge surfaces at import, not at

@@ -203,7 +203,7 @@ T2->subtest('LoggingConfig->to_ffi builds LoggingOptions' => sub {
         'filter byte array ref points at the filter string',
     );
     T2->is(scalar $record->forward_to, undef,
-        'forward_to is NULL (log forwarding deferred past v0.1)');
+        'forward_to is NULL with no forwarding configured (spec section 28.1)');
     T2->ok(scalar @keep, 'backing buffers were pushed onto @keep');
 });
 

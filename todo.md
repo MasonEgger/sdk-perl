@@ -367,9 +367,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P10.2.3 Verify: prove -lj4 t
 
 ### P10.3 core→Perl log forwarding (spec §28.1)
-- [ ] P10.3.1 RED: cargo test (kind-7 deep-copy, shutdown free) + sdk/t/unit/log_forwarding.t (T-logfwd-1..7)
-- [ ] P10.3.2 GREEN: LogForwardingConfig + LoggingConfig forward_to + shim 7th trampoline/kind-7/free/Drop + Callback drain builder + global registry
-- [ ] P10.3.3 Verify: cargo test && prove -lj4 t
+- [x] P10.3.1 RED: cargo test (kind-7 deep-copy, shutdown free) + sdk/t/unit/log_forwarding.t (T-logfwd-1..7)
+- [x] P10.3.2 GREEN: LogForwardingConfig + LoggingConfig forward_to + shim 7th trampoline/kind-7/free/Drop + Callback drain builder + global registry
+- [x] P10.3.3 Verify: cargo test && prove -lj4 t
 
 ### P10.4 Custom metric meters (spec §28.2)
 - [ ] P10.4.1 RED: cargo test (8-thread aggregate) + sdk/t/unit/metric_meter.t + sdk/t/integration/metrics.t (T-meter-1..10)

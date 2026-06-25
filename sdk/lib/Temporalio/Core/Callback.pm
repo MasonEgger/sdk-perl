@@ -23,6 +23,7 @@ use Temporalio::Exception::RpcUnauthenticated ();
 use Temporalio::Exception::Runtime ();
 use Temporalio::Exception::WorkflowAlreadyStarted ();
 use Temporalio::Exception::WorkflowNotFound ();
+use Temporalio::Runtime::LogForwardingConfig ();
 
 # Process-wide monotonic 64-bit callback id (spec section 4.5).
 my $NEXT_CALLBACK_ID = 1;
@@ -311,16 +312,54 @@ class Temporalio::Core::Callback {
         while ((my $count = Temporalio::Core::FFI::queue_drain(
                     $runtime->queue_ptr, $buffer_ptr, $DRAIN_CAP)) > 0) {
             for my $slot (0 .. $count - 1) {
+                my $entry_ptr = $buffer_ptr + $slot * $ENTRY_SIZE;
                 my $entry = $ffi->cast(
                     'opaque' => 'record(Temporalio::Core::FFI::CallbackEntry)*',
-                    $buffer_ptr + $slot * $ENTRY_SIZE);
-                $self->_complete($runtime, $entry);
+                    $entry_ptr);
+                $self->_complete($runtime, $entry, $entry_ptr);
             }
         }
         return;
     }
 
-    method _complete ($runtime, $entry) {
+    # Read a shim-owned NUL-terminated C string from an opaque pointer field;
+    # undef pointer -> empty string (the shim never emits a null log buffer).
+    sub _read_cstring ($ptr) {
+        return '' unless defined $ptr;
+        return Temporalio::Core::FFI::ffi()->cast('opaque' => 'string', $ptr);
+    }
+
+    # Kind-7 forwarded-log builder (spec section 28.1). Unlike kinds 1..6,
+    # the entry has no callback_id and no pending Future: the shim routes
+    # every forwarded log to the one process-global registry. Copy the
+    # shim-owned target/message/fields strings into Perl scalars, free the
+    # shim buffers, build %args, and hand the log to the active
+    # LogForwardingConfig. A torn-down registry (no active config) drops the
+    # log after freeing the buffers. $entry_ptr is the entry's address in the
+    # drain buffer (needed to free the buffers in place).
+    sub _forward_log ($entry, $entry_ptr) {
+        my %args = (
+            level        => scalar $entry->rpc_status_code,
+            target       => _read_cstring(scalar $entry->log_target),
+            message      => _read_cstring(scalar $entry->log_message),
+            fields_json  => _read_cstring(scalar $entry->log_fields_json),
+            timestamp_ms => scalar $entry->log_timestamp_ms,
+        );
+        # Free the shim-owned buffers now that the strings are copied out.
+        Temporalio::Core::FFI::forwarded_log_free($entry_ptr);
+
+        my $config = Temporalio::Runtime::LogForwardingConfig->active;
+        return unless defined $config;    # forwarding torn down: drop
+        $config->_on_log(%args);
+        return;
+    }
+
+    method _complete ($runtime, $entry, $entry_ptr) {
+        if ($entry->kind == 7) {
+            _forward_log($entry, $entry_ptr);
+            return;
+        }
+
         my $id     = $entry->callback_id;
         my $kind   = $entry->kind;
         my $record = delete $pending->{$id};

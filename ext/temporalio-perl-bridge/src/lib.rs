@@ -3,7 +3,7 @@
 
 use std::ffi::{c_char, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 
 use crossbeam_queue::SegQueue;
 
@@ -27,13 +27,27 @@ pub struct TemporalCoreEphemeralServer {
     _private: [u8; 0],
 }
 
-/// `kind` discriminator values, 1..6 in spec section 3 trampoline order.
+/// Opaque borrow of sdk-core-c-bridge's `ForwardedLog`. The shim never
+/// dereferences this — it only passes the pointer back to core's
+/// `temporal_core_forwarded_log_*` accessors, which are valid only for the
+/// duration of the `forward_to` callback (the log is freed the instant the
+/// callback returns).
+#[repr(C)]
+pub struct TemporalCoreForwardedLog {
+    _private: [u8; 0],
+}
+
+/// `kind` discriminator values, 1..6 in spec section 3 trampoline order, plus
+/// the kind-7 log-forwarding entry (spec section 28.1). Kind 7 differs from
+/// 1..6: it carries no `callback_id` (no pending Future) and owns its buffers
+/// shim-side, freed via `temporalio_perl_bridge_forwarded_log_free`.
 pub const TEMPORALIO_PERL_BRIDGE_KIND_WORKER_POLL: u8 = 1;
 pub const TEMPORALIO_PERL_BRIDGE_KIND_WORKER: u8 = 2;
 pub const TEMPORALIO_PERL_BRIDGE_KIND_CLIENT_CONNECT: u8 = 3;
 pub const TEMPORALIO_PERL_BRIDGE_KIND_CLIENT_RPC_CALL: u8 = 4;
 pub const TEMPORALIO_PERL_BRIDGE_KIND_EPHEMERAL_SERVER_START: u8 = 5;
 pub const TEMPORALIO_PERL_BRIDGE_KIND_EPHEMERAL_SERVER_SHUTDOWN: u8 = 6;
+pub const TEMPORALIO_PERL_BRIDGE_KIND_FORWARDED_LOG: u8 = 7;
 
 /// One queued completion. `kind` discriminates which trampoline fired (1..6)
 /// and therefore which fields are meaningful. ByteArray pointers must be
@@ -48,11 +62,23 @@ pub struct TemporalioPerlBridgeEntry {
     pub fail_ba: *const TemporalCoreByteArray,
     /// Client connect / ephemeral server start success handle.
     pub success_handle: *mut c_void,
-    /// RPC call extras (fail_ba carries the failure_message).
+    /// RPC call extras (fail_ba carries the failure_message). For a kind-7
+    /// forwarded-log entry, `rpc_status_code` carries the forwarded log level
+    /// (0..4 = Trace..Error).
     pub rpc_status_code: u32,
     pub rpc_failure_details: *const TemporalCoreByteArray,
     /// Ephemeral server start target string.
     pub ephemeral_target: *const TemporalCoreByteArray,
+    /// Kind-7 forwarded-log payload (spec section 28.1). These three buffers
+    /// are deep copies owned by the shim (NUL-terminated C strings), freed by
+    /// `temporalio_perl_bridge_forwarded_log_free` after the Perl drain reads
+    /// them, or by `Entry::drop` for undrained entries at queue free. They are
+    /// null for every kind other than 7.
+    pub log_target: *mut c_char,
+    pub log_message: *mut c_char,
+    pub log_fields_json: *mut c_char,
+    /// Kind-7 forwarded-log timestamp (milliseconds since the Unix epoch).
+    pub log_timestamp_ms: u64,
 }
 
 // Entries hold raw pointers handed to us by sdk-core on Tokio threads; they
@@ -70,7 +96,41 @@ impl TemporalioPerlBridgeEntry {
             rpc_status_code: 0,
             rpc_failure_details: ptr::null(),
             ephemeral_target: ptr::null(),
+            log_target: ptr::null_mut(),
+            log_message: ptr::null_mut(),
+            log_fields_json: ptr::null_mut(),
+            log_timestamp_ms: 0,
         }
+    }
+
+    /// Free the shim-owned kind-7 log buffers, if any, leaving them null.
+    /// Idempotent: a second call is a no-op (null pointers). Called by
+    /// `temporalio_perl_bridge_forwarded_log_free` after the Perl drain reads
+    /// the strings, and by `Drop` for undrained entries at queue free.
+    fn free_log_buffers(&mut self) {
+        for slot in [
+            &mut self.log_target,
+            &mut self.log_message,
+            &mut self.log_fields_json,
+        ] {
+            if !slot.is_null() {
+                // SAFETY: every non-null log_* pointer is a CString::into_raw
+                // allocation from `forwarded_log_trampoline`, reclaimed once.
+                drop(unsafe { std::ffi::CString::from_raw(*slot) });
+                *slot = ptr::null_mut();
+            }
+        }
+    }
+}
+
+impl Drop for TemporalioPerlBridgeEntry {
+    fn drop(&mut self) {
+        // Only kind-7 entries own heap buffers; for kinds 1..6 every log_*
+        // pointer is null and this is a no-op. Drained kind-7 entries are
+        // moved into the Perl drain buffer with `ptr::write` (which never
+        // runs Drop), so this fires only for entries still queued when the
+        // SegQueue is dropped — the shutdown "free undrained" path.
+        self.free_log_buffers();
     }
 }
 
@@ -164,6 +224,195 @@ unsafe fn complete(
     let queue = &*pair.queue;
     queue.push(build(pair.callback_id));
     // `pair` drops here — the single-shot free.
+}
+
+// --- Log forwarding (spec section 28.1, kind 7) -----------------------------
+//
+// Core's `forward_to` callback (a `TemporalCoreForwardedLogCallback`) takes no
+// user_data, so the trampoline cannot route via a (queue, callback_id) pair.
+// Instead a process-global registry holds the single forwarding queue; the
+// trampoline deep-copies the log's fields (the `ForwardedLog` is freed the
+// instant the callback returns) into a shim-owned kind-7 entry and pushes it
+// there. `Runtime->new` raises Argument if a second runtime requests
+// forwarding while one is active (per-id routing deferred, spec section 28.1).
+
+/// A borrowed byte slice as returned by core's forwarded-log accessors,
+/// matching `TemporalCoreByteArrayRef` (data may be null/zero-length).
+#[repr(C)]
+pub struct ForwardedLogByteArrayRef {
+    pub data: *const u8,
+    pub size: usize,
+}
+
+// sdk-core-c-bridge's forwarded-log accessor signatures. The shim does NOT
+// declare these as undefined externs (FFI::Platypus loads each library
+// RTLD_LOCAL, so the shim's undefined symbols would not resolve against the
+// separately loaded core lib). Instead the Perl side — which has its own
+// FFI handle on the core lib — passes the four accessor function pointers to
+// `forwarding_register`, and the trampoline calls through them.
+type LogRefAccessor =
+    unsafe extern "C" fn(*const TemporalCoreForwardedLog) -> ForwardedLogByteArrayRef;
+type LogTimestampAccessor = unsafe extern "C" fn(*const TemporalCoreForwardedLog) -> u64;
+
+/// The accessor function pointers core uses to read a `ForwardedLog`, supplied
+/// by Perl at registration so the shim never hard-links the core bridge.
+struct LogAccessors {
+    target: LogRefAccessor,
+    message: LogRefAccessor,
+    timestamp_millis: LogTimestampAccessor,
+    fields_json: LogRefAccessor,
+}
+
+/// The process-global forwarding queue (null when no runtime forwards logs).
+static FORWARDING_QUEUE: AtomicPtr<TemporalioPerlBridgeQueue> = AtomicPtr::new(ptr::null_mut());
+
+/// The forwarding accessor table. Set under the registry claim, read in the
+/// trampoline. A `Box<LogAccessors>` leaked into a raw pointer; replaced on
+/// each register, never freed (the table is tiny and process-lifetime).
+static FORWARDING_ACCESSORS: AtomicPtr<LogAccessors> = AtomicPtr::new(ptr::null_mut());
+
+/// True while a runtime owns the forwarding registry. Distinct from the queue
+/// pointer being non-null so `Runtime->new`'s "second forwarder" guard is a
+/// single atomic compare-and-set.
+static FORWARDING_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Claim the process-global forwarding registry for `q`, recording the four
+/// core accessor function pointers (passed as opaque from Perl). Returns true
+/// on success, false if a runtime already forwards logs (the caller raises
+/// Argument). The compare-and-set on the active flag makes the claim race-free
+/// across runtimes constructed concurrently.
+///
+/// # Safety
+/// The four pointers must be the live `temporal_core_forwarded_log_*` symbols
+/// from the loaded core bridge, valid for the life of the registration.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_forwarding_register(
+    q: *mut TemporalioPerlBridgeQueue,
+    target: *const c_void,
+    message: *const c_void,
+    timestamp_millis: *const c_void,
+    fields_json: *const c_void,
+) -> bool {
+    if FORWARDING_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let accessors = Box::new(LogAccessors {
+        target: std::mem::transmute::<*const c_void, LogRefAccessor>(target),
+        message: std::mem::transmute::<*const c_void, LogRefAccessor>(message),
+        timestamp_millis: std::mem::transmute::<*const c_void, LogTimestampAccessor>(
+            timestamp_millis,
+        ),
+        fields_json: std::mem::transmute::<*const c_void, LogRefAccessor>(fields_json),
+    });
+    let old = FORWARDING_ACCESSORS.swap(Box::into_raw(accessors), Ordering::AcqRel);
+    if !old.is_null() {
+        drop(Box::from_raw(old));
+    }
+    FORWARDING_QUEUE.store(q, Ordering::Release);
+    true
+}
+
+/// Release the forwarding registry held by `q`. A no-op unless `q` is the
+/// currently registered queue (so a non-forwarding runtime's shutdown never
+/// clears another runtime's registration). Called from `Runtime->shutdown`
+/// before the queue is freed.
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_forwarding_unregister(
+    q: *mut TemporalioPerlBridgeQueue,
+) {
+    if FORWARDING_QUEUE.load(Ordering::Acquire) == q {
+        FORWARDING_QUEUE.store(ptr::null_mut(), Ordering::Release);
+        let old = FORWARDING_ACCESSORS.swap(ptr::null_mut(), Ordering::AcqRel);
+        if !old.is_null() {
+            // SAFETY: every non-null FORWARDING_ACCESSORS value is a leaked
+            // Box from a register call, reclaimed once here.
+            drop(unsafe { Box::from_raw(old) });
+        }
+        FORWARDING_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+/// Deep-copy one accessor's borrowed bytes into a shim-owned NUL-terminated C
+/// string. Interior NULs are stripped (CString rejects them) so a pathological
+/// field can never null-terminate early; the Perl side reads the bytes as
+/// UTF-8. A null/empty ref yields an empty string, never a null pointer, so
+/// the drain always has a readable target/message.
+fn copy_ref_to_cstring(r: &ForwardedLogByteArrayRef) -> *mut c_char {
+    let bytes: Vec<u8> = if r.data.is_null() || r.size == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: core guarantees data/size describe a valid borrow for the
+        // life of the callback; we copy out before returning.
+        unsafe { std::slice::from_raw_parts(r.data, r.size) }
+            .iter()
+            .copied()
+            .filter(|b| *b != 0)
+            .collect()
+    };
+    // unwrap is safe: interior NULs were filtered above.
+    std::ffi::CString::new(bytes).unwrap().into_raw()
+}
+
+/// Trampoline for core's `TemporalCoreForwardedLogCallback` (kind 7). Reads
+/// the log's target/message/timestamp/fields-JSON via core's accessors,
+/// deep-copies each string into shim-owned buffers, and pushes a kind-7 entry
+/// onto the registered forwarding queue. A null registry (forwarding torn down
+/// mid-flight) drops the log. No `user_data`: routing is via the registry.
+///
+/// # Safety
+/// `log` must be the valid `ForwardedLog` pointer core passes for the life of
+/// this call; it must not be used after the callback returns.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_forwarded_log_callback(
+    level: u32,
+    log: *const TemporalCoreForwardedLog,
+) {
+    let queue = FORWARDING_QUEUE.load(Ordering::Acquire);
+    let accessors = FORWARDING_ACCESSORS.load(Ordering::Acquire);
+    if queue.is_null() || accessors.is_null() || log.is_null() {
+        return;
+    }
+    let accessors = &*accessors;
+    let target = copy_ref_to_cstring(&(accessors.target)(log));
+    let message = copy_ref_to_cstring(&(accessors.message)(log));
+    let fields_json = copy_ref_to_cstring(&(accessors.fields_json)(log));
+    let timestamp_ms = (accessors.timestamp_millis)(log);
+    (*queue).push(TemporalioPerlBridgeEntry {
+        kind: TEMPORALIO_PERL_BRIDGE_KIND_FORWARDED_LOG,
+        rpc_status_code: level,
+        log_target: target,
+        log_message: message,
+        log_fields_json: fields_json,
+        log_timestamp_ms: timestamp_ms,
+        ..TemporalioPerlBridgeEntry::empty()
+    });
+}
+
+/// Address of the forwarded-log trampoline, for the `forward_to` slot of
+/// `TemporalCoreLoggingOptions`.
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_forwarded_log_callback_ptr() -> *mut c_void {
+    temporalio_perl_bridge_forwarded_log_callback as *mut c_void
+}
+
+/// Free the shim-owned kind-7 log buffers of a drained entry. Called by the
+/// Perl drain after it copies the target/message/fields strings out of the
+/// entry. Idempotent (null pointers no-op); undrained entries are freed by
+/// `Entry::drop` at queue free instead.
+///
+/// # Safety
+/// `entry` must point at a drained `TemporalioPerlBridgeEntry` written by
+/// `temporalio_perl_bridge_queue_drain`, not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_forwarded_log_free(
+    entry: *mut TemporalioPerlBridgeEntry,
+) {
+    if !entry.is_null() {
+        (*entry).free_log_buffers();
+    }
 }
 
 /// Allocate a queue signalling `signal_fd` (eventfd, or pipe write-end as
@@ -1174,6 +1423,11 @@ mod tests {
             "temporalio_perl_bridge_ephemeral_server_shutdown_callback_ptr",
             "temporalio_perl_bridge_debug_worker_options",
             "temporalio_perl_bridge_string_free",
+            "temporalio_perl_bridge_forwarded_log_callback",
+            "temporalio_perl_bridge_forwarded_log_callback_ptr",
+            "temporalio_perl_bridge_forwarded_log_free",
+            "temporalio_perl_bridge_forwarding_register",
+            "temporalio_perl_bridge_forwarding_unregister",
         ] {
             assert!(header.contains(sym), "header missing {sym}");
         }
@@ -1449,5 +1703,251 @@ storage_drivers=[]
     fn debug_worker_options_null_pointer_is_safe() {
         let summary = unsafe { debug_summary(ptr::null()) };
         assert_eq!(summary, "options=<null>\n");
+    }
+
+    // ---- P10.3 / spec section 28.1: log forwarding (kind 7) ----------------
+    //
+    // The shim calls core's forwarded-log accessors; the cargo test binary
+    // does not link the core bridge, so we supply our own `#[no_mangle]`
+    // definitions backed by a test-owned struct. The struct's strings are
+    // freed the instant the trampoline returns (mirroring core's "log is freed
+    // immediately after the callback") so the deep-copy assertion (T-logfwd-3)
+    // genuinely catches a use-after-free.
+
+    struct TestForwardedLog {
+        target: String,
+        message: String,
+        fields_json: String,
+        timestamp_ms: u64,
+    }
+
+    fn test_log_ref(s: &str) -> ForwardedLogByteArrayRef {
+        ForwardedLogByteArrayRef {
+            data: s.as_ptr(),
+            size: s.len(),
+        }
+    }
+
+    #[no_mangle]
+    extern "C" fn temporal_core_forwarded_log_target(
+        log: *const TemporalCoreForwardedLog,
+    ) -> ForwardedLogByteArrayRef {
+        let log = unsafe { &*log.cast::<TestForwardedLog>() };
+        test_log_ref(&log.target)
+    }
+
+    #[no_mangle]
+    extern "C" fn temporal_core_forwarded_log_message(
+        log: *const TemporalCoreForwardedLog,
+    ) -> ForwardedLogByteArrayRef {
+        let log = unsafe { &*log.cast::<TestForwardedLog>() };
+        test_log_ref(&log.message)
+    }
+
+    #[no_mangle]
+    extern "C" fn temporal_core_forwarded_log_timestamp_millis(
+        log: *const TemporalCoreForwardedLog,
+    ) -> u64 {
+        let log = unsafe { &*log.cast::<TestForwardedLog>() };
+        log.timestamp_ms
+    }
+
+    #[no_mangle]
+    extern "C" fn temporal_core_forwarded_log_fields_json(
+        log: *const TemporalCoreForwardedLog,
+    ) -> ForwardedLogByteArrayRef {
+        let log = unsafe { &*log.cast::<TestForwardedLog>() };
+        test_log_ref(&log.fields_json)
+    }
+
+    unsafe fn cstr(ptr: *mut c_char) -> String {
+        std::ffi::CStr::from_ptr(ptr).to_str().unwrap().to_owned()
+    }
+
+    // Serialize the registry-claiming tests: the forwarding registry is a
+    // single process-global, and cargo runs tests on multiple threads.
+    static FORWARDING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // Claim the registry for `q` with the test accessor function pointers.
+    fn register_test_accessors(q: *mut TemporalioPerlBridgeQueue) -> bool {
+        unsafe {
+            temporalio_perl_bridge_forwarding_register(
+                q,
+                temporal_core_forwarded_log_target as *const c_void,
+                temporal_core_forwarded_log_message as *const c_void,
+                temporal_core_forwarded_log_timestamp_millis as *const c_void,
+                temporal_core_forwarded_log_fields_json as *const c_void,
+            )
+        }
+    }
+
+    // T-logfwd-3: the trampoline deep-copies every field, so the entry stays
+    // intact after the source log (and its backing strings) are freed. The
+    // test frees the TestForwardedLog before reading the drained entry; a
+    // shallow copy would read freed memory (caught under ASan/miri).
+    #[test]
+    fn t_logfwd_3_trampoline_deep_copies_log_surviving_immediate_free() {
+        let _guard = FORWARDING_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(register_test_accessors(q));
+
+        {
+            // Box the log so it has a stable address, then drop it right after
+            // the trampoline returns — exactly core's lifetime contract.
+            let log = Box::new(TestForwardedLog {
+                target: "temporal_sdk_core::worker".to_owned(),
+                message: "polling for tasks".to_owned(),
+                fields_json: r#"{"attempt":3,"run_id":"abc"}"#.to_owned(),
+                timestamp_ms: 1_700_000_000_123,
+            });
+            let log_ptr = (&*log as *const TestForwardedLog).cast::<TemporalCoreForwardedLog>();
+            unsafe {
+                // 3 = Warn (ForwardedLogLevel Trace=0..Error=4).
+                temporalio_perl_bridge_forwarded_log_callback(3, log_ptr);
+            }
+            drop(log); // free the source before reading the deep copy
+        }
+
+        let entries = unsafe { drain_chunk(q, 4) };
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.kind, TEMPORALIO_PERL_BRIDGE_KIND_FORWARDED_LOG);
+        assert_eq!(e.log_timestamp_ms, 1_700_000_000_123);
+        unsafe {
+            assert_eq!(cstr(e.log_target), "temporal_sdk_core::worker");
+            assert_eq!(cstr(e.log_message), "polling for tasks");
+            assert_eq!(cstr(e.log_fields_json), r#"{"attempt":3,"run_id":"abc"}"#);
+        }
+        // Free the drained entry's buffers (the Perl drain's job), then a
+        // second free is a no-op (idempotent).
+        unsafe {
+            let ep = &entries[0] as *const _ as *mut TemporalioPerlBridgeEntry;
+            temporalio_perl_bridge_forwarded_log_free(ep);
+            temporalio_perl_bridge_forwarded_log_free(ep);
+        }
+        unsafe {
+            temporalio_perl_bridge_forwarding_unregister(q);
+            temporalio_perl_bridge_queue_free(q);
+            libc::close(r);
+            libc::close(w);
+        }
+    }
+
+    // The level argument rides in rpc_status_code unchanged (0..4).
+    #[test]
+    fn t_logfwd_level_rides_in_status_code() {
+        let _guard = FORWARDING_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(register_test_accessors(q));
+        let log = Box::new(TestForwardedLog {
+            target: "t".to_owned(),
+            message: "m".to_owned(),
+            fields_json: "{}".to_owned(),
+            timestamp_ms: 1,
+        });
+        let log_ptr = (&*log as *const TestForwardedLog).cast::<TemporalCoreForwardedLog>();
+        unsafe {
+            // 4 = Error
+            temporalio_perl_bridge_forwarded_log_callback(4, log_ptr);
+        }
+        let entries = unsafe { drain_chunk(q, 4) };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].rpc_status_code, 4);
+        unsafe {
+            let ep = &entries[0] as *const _ as *mut TemporalioPerlBridgeEntry;
+            temporalio_perl_bridge_forwarded_log_free(ep);
+            temporalio_perl_bridge_forwarding_unregister(q);
+            temporalio_perl_bridge_queue_free(q);
+            libc::close(r);
+            libc::close(w);
+        }
+    }
+
+    // T-logfwd-5: queue_free with N undrained kind-7 entries frees their
+    // shim-owned buffers via Entry::drop — no leak, no crash (surfaced under
+    // miri/ASan). The drop must run exactly once per buffer.
+    #[test]
+    fn t_logfwd_5_shutdown_frees_undrained_forwarded_log_entries() {
+        let _guard = FORWARDING_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(register_test_accessors(q));
+        for i in 0..5u64 {
+            let log = Box::new(TestForwardedLog {
+                target: format!("target-{i}"),
+                message: format!("message-{i}"),
+                fields_json: "{}".to_owned(),
+                timestamp_ms: i,
+            });
+            let log_ptr =
+                (&*log as *const TestForwardedLog).cast::<TemporalCoreForwardedLog>();
+            unsafe {
+                temporalio_perl_bridge_forwarded_log_callback(2, log_ptr);
+            }
+        }
+        // Never drained: queue_free must drop all 5 entries and their buffers.
+        unsafe {
+            temporalio_perl_bridge_forwarding_unregister(q);
+            temporalio_perl_bridge_queue_free(q);
+            libc::close(r);
+            libc::close(w);
+        }
+    }
+
+    // A second runtime requesting forwarding while one is active is refused
+    // (the Perl side turns the false return into Argument). Unregister frees
+    // the slot for a later runtime.
+    #[test]
+    fn forwarding_register_is_single_owner() {
+        let _guard = FORWARDING_TEST_LOCK.lock().unwrap();
+        let (r1, w1) = nonblocking_pipe();
+        let (r2, w2) = nonblocking_pipe();
+        let q1 = temporalio_perl_bridge_queue_new(w1);
+        let q2 = temporalio_perl_bridge_queue_new(w2);
+        assert!(register_test_accessors(q1));
+        assert!(
+            !register_test_accessors(q2),
+            "second forwarder must be refused while one is active"
+        );
+        // A non-owner unregister is a no-op (q2 never registered).
+        temporalio_perl_bridge_forwarding_unregister(q2);
+        assert!(
+            !register_test_accessors(q2),
+            "registry still held by q1"
+        );
+        temporalio_perl_bridge_forwarding_unregister(q1);
+        assert!(
+            register_test_accessors(q2),
+            "registry free after q1 unregisters"
+        );
+        temporalio_perl_bridge_forwarding_unregister(q2);
+        unsafe {
+            temporalio_perl_bridge_queue_free(q1);
+            temporalio_perl_bridge_queue_free(q2);
+            libc::close(r1);
+            libc::close(w1);
+            libc::close(r2);
+            libc::close(w2);
+        }
+    }
+
+    // A null registry (no forwarder, or torn down mid-flight) drops the log
+    // instead of crashing.
+    #[test]
+    fn forwarded_log_with_no_registry_is_dropped() {
+        let _guard = FORWARDING_TEST_LOCK.lock().unwrap();
+        // Ensure no registry is set.
+        assert!(FORWARDING_QUEUE.load(Ordering::Acquire).is_null());
+        let log = Box::new(TestForwardedLog {
+            target: "t".to_owned(),
+            message: "m".to_owned(),
+            fields_json: "{}".to_owned(),
+            timestamp_ms: 1,
+        });
+        let log_ptr = (&*log as *const TestForwardedLog).cast::<TemporalCoreForwardedLog>();
+        // Must not crash; nothing is queued.
+        unsafe { temporalio_perl_bridge_forwarded_log_callback(0, log_ptr) };
     }
 }

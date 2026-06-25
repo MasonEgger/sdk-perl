@@ -11,7 +11,9 @@ use IO::Async::Loop ();
 use IO::Async::Handle ();
 use Temporalio::Core::Callback ();
 use Temporalio::Core::FFI ();
+use Temporalio::Exception::Argument ();
 use Temporalio::Exception::Runtime ();
+use Temporalio::Runtime::LogForwardingConfig ();
 use Temporalio::Runtime::TelemetryConfig ();
 
 class Temporalio::Runtime {
@@ -23,6 +25,7 @@ class Temporalio::Runtime {
     field $queue_ptr;      # TemporalioPerlBridgeQueue*
     field $callback;       # Temporalio::Core::Callback (owns the wakeup fd)
     field $watch_handle;   # IO::Async::Handle registered on $loop
+    field $forwards_logs = 0;   # true if this runtime owns the log-forward registry
     field $is_shutdown = 0;
 
     # The lazily-created process default (spec section 4.2). Shutdown of the
@@ -31,6 +34,21 @@ class Temporalio::Runtime {
 
     ADJUST {
         $telemetry //= Temporalio::Runtime::TelemetryConfig->new;
+
+        # Log forwarding (spec section 28.1) is process-global: only one
+        # runtime may forward at a time (per-id routing deferred). Detect the
+        # config and refuse a second forwarder up front, before building the
+        # core runtime, so construction fails cleanly.
+        my $forwarding = $telemetry->logging
+            ? $telemetry->logging->forward_to
+            : undef;
+        if (defined $forwarding
+            && defined Temporalio::Runtime::LogForwardingConfig->active) {
+            Temporalio::Exception::Argument->throw(
+                message => 'log forwarding is already active on another runtime'
+                         . ' (only one runtime may forward core logs at a time)',
+            );
+        }
 
         # Build the TemporalCoreRuntimeOptions record tree. @keep pins every
         # nested record and backing buffer until runtime_new returns (the
@@ -67,6 +85,29 @@ class Temporalio::Runtime {
         # the shim completion queue that signals it.
         $callback  = Temporalio::Core::Callback->new;
         $queue_ptr = Temporalio::Core::FFI::queue_new($callback->signal_fd);
+
+        # If forwarding is configured, claim the process-global shim registry
+        # for this queue and install the active LogForwardingConfig the drain
+        # dispatches kind-7 entries to. The shim's compare-and-set guards
+        # against a TOCTOU race past the Perl-side pre-check above.
+        if (defined $forwarding) {
+            my @accessors = Temporalio::Core::FFI::forwarded_log_accessor_ptrs();
+            unless (Temporalio::Core::FFI::forwarding_register($queue_ptr, @accessors)) {
+                Temporalio::Core::FFI::queue_free($queue_ptr);
+                $queue_ptr = undef;
+                $callback->close;
+                $callback = undef;
+                Temporalio::Core::FFI::runtime_free($core_ptr);
+                $core_ptr = undef;
+                Temporalio::Exception::Argument->throw(
+                    message => 'log forwarding is already active on another'
+                             . ' runtime (only one runtime may forward core'
+                             . ' logs at a time)',
+                );
+            }
+            Temporalio::Runtime::LogForwardingConfig->_set_active($forwarding);
+            $forwards_logs = 1;
+        }
 
         # Register the read end with the loop: when the shim signals the fd,
         # drain the completion queue and resolve pending Futures (spec
@@ -124,6 +165,15 @@ class Temporalio::Runtime {
         # 1. Unregister the wakeup fd from the loop.
         $loop->remove($watch_handle) if $watch_handle;
         $watch_handle = undef;
+        # 1b. Release the log-forward registry (spec section 28.1) before the
+        # queue is freed, so the shim stops routing forwarded logs to it, then
+        # clear the active LogForwardingConfig the drain dispatches to.
+        if ($forwards_logs) {
+            Temporalio::Core::FFI::forwarding_unregister($queue_ptr)
+                if defined $queue_ptr;
+            Temporalio::Runtime::LogForwardingConfig->_clear_active;
+            $forwards_logs = 0;
+        }
         # 2. Free the shim callback queue (drops undrained entries).
         Temporalio::Core::FFI::queue_free($queue_ptr) if defined $queue_ptr;
         $queue_ptr = undef;
