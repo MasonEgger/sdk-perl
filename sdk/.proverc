@@ -1,1 +1,8 @@
 --recurse
+# Integration tests each boot their own ephemeral dev server. Running four of
+# them at once under -j4 contends for memory/CPU on small boxes and amplifies a
+# shutdown-time teardown race (P10.0). Run integration files sequentially (one
+# dev server at a time) while unit/replay tests keep running in parallel. First
+# matching rule wins, so the seq rule must precede the catch-all par rule.
+--rules=seq=t/integration/*.t
+--rules=par=**

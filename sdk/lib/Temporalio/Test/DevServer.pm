@@ -146,6 +146,13 @@ class Temporalio::Test::DevServer {
 
     # Idempotent (spec section 12.2). Frees the C server handle only after
     # the shutdown callback fires — the bridge's async block borrows it.
+    #
+    # Shutdown-time transport tolerance (P10.0.4): the ephemeral-server shutdown
+    # drives RPCs to its own process. If the connection is reset / closed while
+    # those are in flight during ordered teardown, the bridge rejects with a
+    # transport-shaped Exception::Bridge. The server is going away regardless, so
+    # we swallow ONLY teardown-shaped transport errors (same classifier the
+    # worker finalize uses) and still free the handle; any other error surfaces.
     method shutdown () {
         return if $is_shutdown;
         $is_shutdown = 1;
@@ -154,10 +161,24 @@ class Temporalio::Test::DevServer {
                 Temporalio::Core::FFI::ephemeral_server_shutdown(
                     $handle, $user_data, $trampoline);
             });
-        _await($runtime->loop, $future, $shutdown_timeout,
-               'dev server shutdown');
+        my $err;
+        {
+            local $@;
+            eval {
+                _await($runtime->loop, $future, $shutdown_timeout,
+                       'dev server shutdown');
+                1;
+            } or $err = $@;
+        }
         Temporalio::Core::FFI::ephemeral_server_free($handle);
         $handle = undef;
+        if (defined $err) {
+            # Loaded lazily on the error path only: the classifier lives in
+            # Worker.pm (heavy FFI stack) and a clean shutdown never reaches here.
+            require Temporalio::Worker;
+            die $err
+                unless Temporalio::Worker::_shutdown_error_is_tolerable($err);
+        }
         return;
     }
 

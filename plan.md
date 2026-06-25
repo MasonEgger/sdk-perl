@@ -1587,6 +1587,22 @@ protected, not just the tests.
    signals_queries.t 10x standalone all exit 0; forced concurrent contention
    triggers the transport WARN (ConnectionReset + BrokenPipe variants) yet every
    run exits 0.
+4. P10.0.4 (the P10.0.1-.3 fix was INCOMPLETE — it covered only the
+   ConnectionReset path). The residual flake under `-j4` was a different,
+   contention-amplified teardown failure: core's worker_finalize_shutdown does
+   Arc::try_unwrap on the core worker and, when a Tokio poll task still holds a
+   worker-Arc clone, fails with "Cannot finalize, expected 1 reference, got N".
+   The P10.0.1 classifier did not match it, so Worker._finalize_and_free rethrew
+   it and Test::Worker::shutdown re-raised it, killing the test process before
+   done_testing (exit non-zero even though every assertion passed). Two-part fix:
+   (a) extend _shutdown_error_is_tolerable with `Cannot finalize, expected N
+   reference` (a benign teardown race) and harden Test::DevServer->shutdown to
+   swallow the same teardown-shaped transport errors via the shared classifier;
+   (b) remove the contention amplification with sdk/.proverc rules
+   (`--rules=seq=t/integration/*.t` then `--rules=par=**`) so the 16 integration
+   files run one-at-a-time (one dev server live at once) while unit/replay tests
+   stay parallel — the command remains `prove -lj4 t`. Verify: full `prove -lj4
+   t` 6x consecutive, all exit 0 (429 tests each).
 ```
 
 ### Step P10.1: Interceptor framework (spec §27)

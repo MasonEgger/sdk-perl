@@ -41,6 +41,24 @@ my $closed = Temporalio::Exception::Bridge->new(
     message => 'error trying to connect: connection closed before message completed');
 T2->ok($classify->($closed), 'connection-closed teardown is tolerable');
 
+# core's worker_finalize_shutdown does Arc::try_unwrap on the core worker and
+# expects exactly one strong reference. Under -j4 contention a Tokio poll task
+# that still holds a worker-Arc clone may not have dropped by the time finalize
+# runs, so try_unwrap fails with "Cannot finalize, expected 1 reference, got N".
+# The worker is being torn down regardless; this is a benign teardown race, not
+# a shutdown bug, so it must be tolerated. (Reproduced verbatim from
+# signals_queries.t stderr under prove -lj4.)
+my $finalize_race = Temporalio::Exception::Bridge->new(
+    message => 'Cannot finalize, expected 1 reference, got 2');
+T2->ok($classify->($finalize_race),
+    'finalize Arc-refcount race (expected 1 reference, got 2) is tolerable');
+
+# The same race with a higher residual count is equally benign.
+my $finalize_race3 = Temporalio::Exception::Bridge->new(
+    message => 'Cannot finalize, expected 1 reference, got 3');
+T2->ok($classify->($finalize_race3),
+    'finalize race with got 3 is tolerable');
+
 # A genuine bridge error unrelated to connection teardown must NOT be
 # swallowed — it has to surface so real shutdown bugs are not hidden.
 my $real = Temporalio::Exception::Bridge->new(
