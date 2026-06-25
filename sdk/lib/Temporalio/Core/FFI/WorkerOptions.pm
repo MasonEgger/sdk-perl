@@ -33,8 +33,10 @@ use Temporalio::Core::FFI ();
 #     LegacyBuildIdBased
 #   TemporalCoreSlotSupplier_Tag: FixedSize, ResourceBased, Custom
 use constant {
-    VERSIONING_TAG_NONE          => 0,
-    SLOT_SUPPLIER_TAG_FIXED_SIZE => 0,
+    VERSIONING_TAG_NONE             => 0,
+    VERSIONING_TAG_DEPLOYMENT_BASED => 1,
+    VERSIONING_TAG_LEGACY_BUILD_ID  => 2,
+    SLOT_SUPPLIER_TAG_FIXED_SIZE    => 0,
 };
 
 # sizeof() of each by-value union = its largest member:
@@ -49,6 +51,12 @@ use constant {
 
 # Every field is required (pass undef/[] explicitly); a struct builder with
 # hidden defaults would let an omitted field silently become zero bytes.
+# versioning_build_id is the None{build_id} fallback. The DeploymentBased and
+# LegacyBuildIdBased strategies arrive instead as versioning_deployment (a hash:
+# deployment_name, build_id, use_worker_versioning, default_versioning_behavior)
+# or versioning_legacy_build_id (a string); both are optional and only one may
+# be set (Worker.pm enforces mutual exclusion). They are NOT in @FIELDS because
+# they are optional alternatives, not required fields.
 my @FIELDS = qw(
     namespace
     task_queue
@@ -79,6 +87,9 @@ my @FIELDS = qw(
     storage_drivers
 );
 my %KNOWN_FIELD = map { $_ => 1 } @FIELDS;
+# Optional versioning alternatives to the None{build_id} default; accepted by
+# build() but not required.
+$KNOWN_FIELD{$_} = 1 for qw(versioning_deployment versioning_legacy_build_id);
 
 sub _throw_argument ($message) {
     require Temporalio::Exception::Argument;
@@ -108,6 +119,58 @@ sub _pack_versioning_none ($keep, $build_id) {
         _pack_byte_array_ref($keep, $build_id),
         VERSIONING_UNION_SIZE,
     );
+}
+
+# TemporalCoreWorkerDeploymentOptions body (40 bytes, == the union size):
+#   TemporalCoreWorkerDeploymentVersion version {
+#       ByteArrayRef deployment_name;   // 16
+#       ByteArrayRef build_id;          // 16
+#   }                                   // 32
+#   bool use_worker_versioning;         // 32 (+3 pad)
+#   int32_t default_versioning_behavior;// 36
+# (spec §29.1; header struct TemporalCoreWorkerDeploymentOptions.)
+sub _pack_deployment_body ($keep, $deployment) {
+    my $body = _pack_byte_array_ref($keep, $deployment->{deployment_name})
+             . _pack_byte_array_ref($keep, $deployment->{build_id})
+             . pack('C x3', $deployment->{use_worker_versioning} ? 1 : 0)
+             . pack('l', $deployment->{default_versioning_behavior} // 0);
+    return $body;
+}
+
+# TemporalCoreWorkerVersioningStrategy as DeploymentBased{deployment_options}.
+sub _pack_versioning_deployment ($keep, $deployment) {
+    return _pack_tagged_union(
+        VERSIONING_TAG_DEPLOYMENT_BASED,
+        _pack_deployment_body($keep, $deployment),
+        VERSIONING_UNION_SIZE,
+    );
+}
+
+# TemporalCoreWorkerVersioningStrategy as LegacyBuildIdBased{build_id}.
+sub _pack_versioning_legacy ($keep, $build_id) {
+    return _pack_tagged_union(
+        VERSIONING_TAG_LEGACY_BUILD_ID,
+        _pack_byte_array_ref($keep, $build_id),
+        VERSIONING_UNION_SIZE,
+    );
+}
+
+# pack_versioning_union(\@keep, \%spec) -> the 40-byte versioning union bytes.
+# Exactly one of the spec keys selects the strategy:
+#   { build_id        => $str }      -> None{build_id}        (tag 0)
+#   { deployment      => \%hash }    -> DeploymentBased       (tag 1)
+#   { legacy_build_id => $str }      -> LegacyBuildIdBased    (tag 2)
+# The deployment hash needs deployment_name, build_id, use_worker_versioning,
+# and default_versioning_behavior (a 0/1/2 proto enum value). Public so the
+# marshalling test can inspect the packed tag/body directly.
+sub pack_versioning_union ($keep, $spec) {
+    if (defined $spec->{deployment}) {
+        return _pack_versioning_deployment($keep, $spec->{deployment});
+    }
+    if (defined $spec->{legacy_build_id}) {
+        return _pack_versioning_legacy($keep, $spec->{legacy_build_id});
+    }
+    return _pack_versioning_none($keep, $spec->{build_id});
 }
 
 # TemporalCoreSlotSupplier as FixedSize{num_slots}.
@@ -146,7 +209,13 @@ sub build ($keep, %options) {
         _throw_argument("unknown WorkerOptions field '$field'")
             unless $KNOWN_FIELD{$field};
     }
+    # versioning_build_id is the None{build_id} default; it is satisfied when
+    # either a DeploymentBased or LegacyBuildIdBased alternative is supplied
+    # instead (pack_versioning_union picks the right one).
+    my $has_versioning_alt = defined $options{versioning_deployment}
+        || defined $options{versioning_legacy_build_id};
     for my $field (@FIELDS) {
+        next if $field eq 'versioning_build_id' && $has_versioning_alt;
         _throw_argument("missing WorkerOptions field '$field'")
             unless exists $options{$field};
     }
@@ -155,7 +224,11 @@ sub build ($keep, %options) {
     my $buf = '';
     $buf .= _pack_byte_array_ref($keep, $options{namespace});             # 0
     $buf .= _pack_byte_array_ref($keep, $options{task_queue});            # 16
-    $buf .= _pack_versioning_none($keep, $options{versioning_build_id}); # 32
+    $buf .= pack_versioning_union($keep, {                               # 32
+        build_id        => $options{versioning_build_id},
+        deployment      => $options{versioning_deployment},
+        legacy_build_id => $options{versioning_legacy_build_id},
+    });
     $buf .= _pack_byte_array_ref($keep, $options{identity_override});    # 80
     $buf .= pack('L x4', $options{max_cached_workflows});                # 96 (u32 + pad)
     $buf .= _pack_fixed_size_slot_supplier($options{$_})                 # 104 (4 x 48)

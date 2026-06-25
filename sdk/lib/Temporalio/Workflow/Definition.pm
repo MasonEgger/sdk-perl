@@ -84,6 +84,40 @@ class Temporalio::Workflow::Definition {
         return;
     }
 
+    # default_versioning_behavior string -> proto VersioningBehavior enum
+    # value (verified against the proto descriptor + sdk-ruby common_enums.rb):
+    # unspecified=0, pinned=1, auto_upgrade=2.
+    my %_VERSIONING_BEHAVIOR = (
+        unspecified  => 0,
+        pinned       => 1,
+        auto_upgrade => 2,
+    );
+
+    # :VersioningBehavior('pinned') — declares the per-workflow versioning
+    # behavior (spec §29.1), reported to core in the activation completion. The
+    # attribute may sit on any method of the class (conventionally :Run); it
+    # registers per-package, so a second one or an unknown token raises at the
+    # subclass's compile time.
+    sub VersioningBehavior :ATTR(CODE,BEGIN) {
+        my ($pkg, $sym, $ref, $attr, $data, $phase) = @_;
+        my @items = ref($data) eq 'ARRAY' ? @$data : ();
+        my $behavior = $items[0];
+        if (!defined $behavior || !exists $_VERSIONING_BEHAVIOR{$behavior}) {
+            Temporalio::Exception::Argument->throw(
+                message => ":VersioningBehavior requires one of "
+                    . join(', ', sort keys %_VERSIONING_BEHAVIOR)
+                    . (defined $behavior ? " (got '$behavior')" : ''),
+            );
+        }
+        if (exists $_DEFS{$pkg}{versioning_behavior}) {
+            Temporalio::Exception::Argument->throw(
+                message => "Multiple :VersioningBehavior attributes found on $pkg",
+            );
+        }
+        $_DEFS{$pkg}{versioning_behavior} = $behavior;
+        return;
+    }
+
     # :Init — the constructor hook that runs in workflow context just before
     # :Run (spec section 10.1; mirrors Python's workflow.init).
     sub Init :ATTR(CODE,BEGIN) {
@@ -146,6 +180,18 @@ class Temporalio::Workflow::Definition {
     # undef when the class has no :Run method.
     sub _workflow_type ($class) {
         return ($_DEFS{$class} // {})->{run_type};
+    }
+
+    # Class method: the per-workflow versioning behavior string (spec §29.1),
+    # 'unspecified' when no :VersioningBehavior attribute is present.
+    sub _versioning_behavior ($class) {
+        return ($_DEFS{$class} // {})->{versioning_behavior} // 'unspecified';
+    }
+
+    # Class method: the proto VersioningBehavior enum value (0/1/2) for this
+    # class's behavior — what core expects in the activation completion.
+    sub _versioning_behavior_value ($class) {
+        return $_VERSIONING_BEHAVIOR{ $class->_versioning_behavior };
     }
 }
 

@@ -8,6 +8,7 @@ no warnings 'experimental::class';
 use Future ();
 use Future::AsyncAwait;
 
+use Digest::MD5 ();
 use FFI::Platypus::Buffer ();
 use Scalar::Util ();
 use Temporalio::Core::ByteArray ();
@@ -45,6 +46,13 @@ class Temporalio::Worker {
     # worker.rb (lines 447-465) + the FixedSize tuner default of 100
     # (tuner.rb 266-269). Time fields are seconds Perl-side, packed as millis.
     field $build_id                            :param = undef;
+    # Worker versioning (spec §29.1). deployment_options selects the
+    # deployment-based strategy (primary); build_id + use_worker_versioning
+    # select the deprecated legacy build-id strategy. The two are mutually
+    # exclusive (validated in ADJUST). When neither versioning path is on, the
+    # None{build_id} default carries build_id as a plain per-process identity.
+    field $deployment_options                  :param = undef;
+    field $use_worker_versioning               :param = 0;
     field $identity_override                   :param = undef;
     field $max_cached_workflows                :param = 1000;
     field $max_concurrent_workflow_tasks       :param = 100;
@@ -96,6 +104,34 @@ class Temporalio::Worker {
             message => 'Temporalio::Worker->new requires a non-empty task_queue')
             unless defined $task_queue && length $task_queue;
 
+        # Worker versioning (spec §29.1): exactly one strategy reaches core.
+        # deployment_options (deployment-based) is mutually exclusive with the
+        # legacy build_id/use_worker_versioning pair.
+        if (defined $deployment_options) {
+            Temporalio::Exception::Argument->throw(
+                message => 'deployment_options must be a '
+                    . 'Temporalio::Worker::DeploymentOptions')
+                unless ref $deployment_options
+                    && $deployment_options->isa(
+                        'Temporalio::Worker::DeploymentOptions');
+            Temporalio::Exception::Argument->throw(
+                message => 'deployment_options is mutually exclusive with '
+                    . 'use_worker_versioning')
+                if $use_worker_versioning;
+            Temporalio::Exception::Argument->throw(
+                message => 'deployment_options is mutually exclusive with '
+                    . 'build_id')
+                if defined $build_id;
+        }
+
+        # build_id default (spec §29.1 resolved WH-5): MD5 of the sorted %INC
+        # contents — a stable per-process worker identity. Computed only when
+        # the caller did not supply a build_id (and deployment versioning, which
+        # carries its own build_id, is not in use).
+        if (!defined $build_id && !defined $deployment_options) {
+            $build_id = _default_build_id();
+        }
+
         $activity_registry = Temporalio::Worker::ActivityRegistry->new(
             activities => $activities);
         # Workflow registration (spec 8.6): resolve each class name to its
@@ -117,6 +153,18 @@ class Temporalio::Worker {
         $all_interceptors = [ @{ $client_list // [] }, @$interceptors ];
     }
 
+    # MD5 hex of the sorted, NUL-joined "<module>\0<path>" pairs from %INC — a
+    # stable per-process build identity (spec §29.1 WH-5; bytes need not match
+    # other SDKs). File-scope sub so ADJUST can call it.
+    sub _default_build_id () {
+        my $md5 = Digest::MD5->new;
+        for my $module (sort keys %INC) {
+            $md5->add($module, "\0", ($INC{$module} // ''), "\0");
+        }
+        return $md5->hexdigest;
+    }
+
+    method build_id           { $build_id }
     method client             { $client }
     method task_queue         { $task_queue }
     method workflows          { $workflows }
@@ -145,13 +193,39 @@ class Temporalio::Worker {
     # identity_override of undef means "use the client identity" (the bridge
     # falls back to the client's identity when the override is NULL, matching
     # sdk-ruby worker.rb identity_override: @options.identity).
+    # _versioning_strategy() -> the versioning keys for WorkerOptions::build
+    # (spec §29.1). Exactly one strategy is selected (resolution
+    # deployment → legacy → none-carrying-build_id):
+    #   deployment_options  -> versioning_deployment (DeploymentBased, tag 1)
+    #   use_worker_versioning -> versioning_legacy_build_id (Legacy, tag 2)
+    #   otherwise           -> versioning_build_id (None{build_id}, tag 0)
+    method _versioning_strategy () {
+        if (defined $deployment_options) {
+            my $version = $deployment_options->version;
+            return (
+                versioning_deployment => {
+                    deployment_name => $version->deployment_name,
+                    build_id        => $version->build_id,
+                    use_worker_versioning =>
+                        $deployment_options->use_worker_versioning,
+                    default_versioning_behavior =>
+                        $deployment_options->default_versioning_behavior_value,
+                },
+            );
+        }
+        if ($use_worker_versioning) {
+            return (versioning_legacy_build_id => $build_id);
+        }
+        return (versioning_build_id => $build_id);
+    }
+
     method _build_worker_options ($keep) {
         return Temporalio::Core::FFI::WorkerOptions::build($keep,
             namespace            => $client->namespace,
             task_queue           => $task_queue,
-            # versioning None{build_id}; an undef build_id packs as an empty
-            # ByteArrayRef (spec 8.1 — deployment/legacy versioning is Phase 6+).
-            versioning_build_id  => $build_id,
+            # One of None{build_id} / DeploymentBased / LegacyBuildIdBased per
+            # the configured versioning strategy (spec §29.1).
+            $self->_versioning_strategy,
             identity_override    => $identity_override,
             max_cached_workflows => $max_cached_workflows,
 
@@ -366,10 +440,26 @@ class Temporalio::Worker {
             # Eager activity dispatch (spec section 23.2): the workflow-side flag
             # that suppresses do_not_eagerly_execute on scheduled activities.
             disable_eager_activity_execution => $disable_eager_activity_execution,
+            # Worker versioning (spec §29.1): the per-workflow
+            # :VersioningBehavior may only be reported when the worker runs in
+            # versioned mode; core rejects a versioning_behavior otherwise
+            # ("versioning behavior cannot be specified without deployment
+            # options being set with versioned mode").
+            report_versioning_behavior => $self->_in_versioned_mode,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_workflow_activation($completion_bytes);
             },
         );
+    }
+
+    # _in_versioned_mode() — true when this worker reports per-workflow
+    # versioning behavior to core (spec §29.1): deployment-based with
+    # use_worker_versioning on, or the legacy build-id strategy.
+    method _in_versioned_mode () {
+        return 1 if defined $deployment_options
+            && $deployment_options->use_worker_versioning;
+        return 1 if $use_worker_versioning;
+        return 0;
     }
 
     # Issue worker_poll_activity_task over the callback bridge ('worker_poll'

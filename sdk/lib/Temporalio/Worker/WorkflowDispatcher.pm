@@ -37,6 +37,12 @@ class Temporalio::Worker::WorkflowDispatcher {
     # handed to each Runner so scheduled activities set do_not_eagerly_execute.
     field $disable_eager_activity_execution :param = 0;
 
+    # Worker versioning (spec §29.1): true only when the worker runs in
+    # versioned mode, so each Runner may report the per-workflow
+    # :VersioningBehavior in its completion. Core rejects a versioning_behavior
+    # from a non-versioned worker, so this defaults off.
+    field $report_versioning_behavior :param = 0;
+
     # A coderef ($completion_bytes) -> Future: sends the serialized
     # WorkflowActivationCompletion to core (worker_complete_workflow_activation
     # over the callback bridge). Injectable so unit tests capture completions
@@ -158,6 +164,7 @@ class Temporalio::Worker::WorkflowDispatcher {
             task_queue        => $task_queue,
             namespace         => $namespace,
             disable_eager_activity_execution => $disable_eager_activity_execution,
+            report_versioning_behavior => $report_versioning_behavior,
         );
         $runners{$run_id} = $runner;
         return $runner;

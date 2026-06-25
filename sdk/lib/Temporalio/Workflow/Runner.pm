@@ -91,6 +91,12 @@ class Temporalio::Workflow::Runner {
     # TASK (the server retries); when true, it fails the WORKFLOW.
     field $nondeterminism_as_workflow_fail :param = 0;
 
+    # Worker versioning (spec §29.1): true when the worker runs in versioned
+    # mode, so a successful completion may carry the per-workflow
+    # VersioningBehavior (field 7). Core rejects a versioning_behavior from a
+    # non-versioned worker, so this defaults off.
+    field $report_versioning_behavior :param = 0;
+
     field $instance;                 # the workflow Definition instance
     field $workflow_type;            # resolved run type name
     field @commands;                 # outbound WorkflowCommand buffer
@@ -2791,9 +2797,21 @@ class Temporalio::Workflow::Runner {
 
         my $completion_class = Temporalio::Core::Proto::resolve(
             'coresdk.workflow_completion.WorkflowActivationCompletion');
+        my %success = (commands => \@out);
+        # Per-workflow versioning behavior (spec §29.1): report the value from
+        # the workflow class's :VersioningBehavior attribute in
+        # WorkflowSuccess.versioning_behavior (field 7) — but ONLY in versioned
+        # mode. Core rejects a versioning_behavior from a non-versioned worker
+        # ("versioning behavior cannot be specified without deployment options
+        # being set with versioned mode").
+        if ($report_versioning_behavior
+            && $workflow_class->can('_versioning_behavior_value')) {
+            $success{versioning_behavior} =
+                $workflow_class->_versioning_behavior_value;
+        }
         return $completion_class->new({
             run_id     => $run_id,
-            successful => { commands => \@out },
+            successful => \%success,
         });
     }
 

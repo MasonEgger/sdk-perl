@@ -377,9 +377,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P10.4.3 Verify: cargo test && prove -lj4 t
 
 ### P10.5 Worker versioning (spec §29.1)
-- [ ] P10.5.1 RED: sdk/t/unit/worker_versioning.t + sdk/t/integration/deployment_versioning.t (T-wkrver-1..9; 6-9 = override/ramp/legacy, gated/skip)
-- [ ] P10.5.2 GREEN: DeploymentOptions/DeploymentVersion + Worker kwargs + WorkerOptions versioning packers + :VersioningBehavior attribute + MD5-%INC build_id
-- [ ] P10.5.3 Verify: prove -lj4 t
+- [x] P10.5.1 RED: sdk/t/unit/worker_versioning.t + sdk/t/integration/deployment_versioning.t (T-wkrver-1..9; 6-9 = override/ramp/legacy, gated/skip)
+- [x] P10.5.2 GREEN: DeploymentOptions/DeploymentVersion + Worker kwargs + WorkerOptions versioning packers + :VersioningBehavior attribute + MD5-%INC build_id
+- [x] P10.5.3 Verify: prove -lj4 t
 
 ### P10.6 Slot suppliers / worker tuner (spec §29.2)
 - [ ] P10.6.1 RED: sdk/t/unit/tuner.t + cargo test + integration (T-tuner-1..7)

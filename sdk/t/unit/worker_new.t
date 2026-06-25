@@ -100,19 +100,24 @@ T2->subtest('default kwargs -> WorkerOptions echo field-for-field (spec 8.1)' =>
     my $ptr  = $worker->_build_worker_options($keep);
     my $echoed = echo_options($ptr);
 
+    # build_id default (spec §29.1 WH-5): with no build_id kwarg the worker
+    # synthesizes the None{build_id} as an MD5 hex of the sorted %INC — a
+    # 32-char lowercase hex string (the exact bytes depend on which modules are
+    # loaded). Assert the shape, then drop it before the field-for-field match.
+    T2->like(delete $echoed->{'versioning_strategy.none.build_id'},
+        qr/^[0-9a-f]{32}$/,
+        'default build_id is an MD5 hex of %INC (spec §29.1 WH-5)');
+
     # Defaults verified against sdk-ruby worker.rb (lines 447-465) and the
     # FixedSize tuner default of 100 (tuner.rb 266-269): max_cached_workflows
     # 1000, all slots 100, sticky 10s, heartbeat 60/30s, graceful 0, poller
     # simple_maximum 5, nonsticky_to_sticky_poll_ratio 0.2; versioning
-    # None{build_id=''}; workflows + remote activities enabled, local +
+    # None{build_id=MD5(%INC)}; workflows + remote activities enabled, local +
     # nexus disabled (spec 8.1).
     T2->is($echoed, {
         'namespace'                          => 'ns-a',
         'task_queue'                         => 'tq-a',
         'versioning_strategy.tag'            => 'None',
-        # An undef build_id packs as a NULL ByteArrayRef (the shim echoes
-        # <null>), not an empty string — versioning is None either way.
-        'versioning_strategy.none.build_id'  => '<null>',
         'identity_override'                  => '<null>',
         'max_cached_workflows'               => '1000',
         'tuner.workflow_slot_supplier'       => 'FixedSize(100)',
