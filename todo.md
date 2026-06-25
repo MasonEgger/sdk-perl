@@ -350,6 +350,11 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 
 ## Phase 10 — Runtime, observability & worker hardening
 
+### P10.0 Integration-test shutdown hardening
+- [x] P10.0.1 RED: sdk/t/unit/worker_shutdown_tolerance.t — _shutdown_error_is_tolerable classifies transport-teardown bridge failures (ConnectionReset/BrokenPipe/connection closed/transport error) as tolerable, all else not
+- [x] P10.0.2 GREEN: Worker.pm _finalize_and_free swallows tolerable shutdown-time transport errors (still frees worker, returns clean) + rethrows real errors; Test::Worker::shutdown retrieves run-future outcome so a failed future is never abandoned; audit all 16 t/integration/*.t ordered teardown (already consistent)
+- [x] P10.0.3 Verify: full prove -lj4 t 5x consecutive all exit 0; signals_queries.t 10x standalone all exit 0; forced concurrent contention triggers transport WARN yet every run exits 0
+
 ### P10.1 Interceptor framework (spec §27)
 - [x] P10.1.1 RED: sdk/t/unit/interceptors.t + replay fixtures (T-icpt-1..10)
 - [x] P10.1.2 GREEN: Client + Worker interceptor base classes + Input classes + chain build/install + interceptors => [] args

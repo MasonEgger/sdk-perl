@@ -53,6 +53,16 @@ class Temporalio::Test::Worker {
             $run_future, $loop->timeout_future(after => $timeout)));
         die "worker run did not drain within ${timeout}s\n"
             unless $run_future->is_ready;
+        # Retrieve the run future's outcome so it is never abandoned: an
+        # un-retrieved failed Future warns (and dirties the process exit) at
+        # global destruction. A genuine shutdown failure is re-raised so the
+        # test sees it; expected shutdown-time transport teardown is already
+        # swallowed inside the worker's finalize (Worker.pm P10.0), so reaching
+        # here with a failure means a real error.
+        if ($run_future->is_failed) {
+            die 'worker run loop failed during shutdown: '
+                . (($run_future->failure)[0] // '');
+        }
         return;
     }
 }

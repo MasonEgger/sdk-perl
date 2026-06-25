@@ -467,11 +467,35 @@ class Temporalio::Worker {
         return unless defined $worker_ptr;
         my $runtime = $self->_runtime;
         my $ptr     = $worker_ptr;
-        await Temporalio::Core::Callback->issue_async(
+
+        # core's Worker::shutdown (driven by worker_finalize_shutdown) issues a
+        # shutdown_worker RPC. If the server connection is reset/closed while
+        # that RPC is in flight — expected during ordered teardown — the bridge
+        # rejects with a transport-shaped Exception::Bridge. Tolerate ONLY that
+        # (P10.0): the worker is being torn down regardless, so we must still
+        # free it and return cleanly rather than reject `run` and dirty the
+        # process exit. Any other failure is a real bug and is rethrown.
+        my $finalize = Temporalio::Core::Callback->issue_async(
             $runtime, worker => sub ($user_data, $trampoline) {
                 Temporalio::Core::FFI::worker_finalize_shutdown(
                     $ptr, $user_data, $trampoline);
             });
+        my $err;
+        {
+            local $@;
+            eval { await $finalize; 1 } or $err = $@;
+        }
+        if (defined $err
+            && !Temporalio::Worker::_shutdown_error_is_tolerable($err))
+        {
+            # Free before rethrowing so a real finalize failure still releases
+            # the native worker (DESTROY-safety, no leak).
+            Temporalio::Core::FFI::worker_free($ptr);
+            $worker_ptr  = undef;
+            $worker_keep = undef;
+            die $err;
+        }
+
         Temporalio::Core::FFI::worker_free($ptr);
         $worker_ptr  = undef;
         $worker_keep = undef;
@@ -506,6 +530,39 @@ class Temporalio::Worker {
         $is_shutdown = 1;
         return $runtime ? $runtime->loop->new_future->done : Future->done;
     }
+}
+
+# Shutdown-time transport tolerance (P10.0): sdk-core's worker_finalize_shutdown
+# drives a shutdown_worker RPC to the server. If the server connection is reset
+# or closed while that RPC is in flight — the common case during ordered test
+# teardown, and harmless because the worker is going away regardless — the
+# bridge surfaces a Temporalio::Exception::Bridge whose message is the tonic
+# transport error (hyper ConnectionReset / broken pipe / connection closed).
+# Core itself only WARNs on this; propagating it would reject the `run` future
+# and dirty the process exit for every consumer. We swallow ONLY these
+# teardown-shaped transport failures and still free the worker; any other bridge
+# error (a real shutdown bug) is rethrown. Patterns kept deliberately narrow.
+my @TOLERABLE_SHUTDOWN_PATTERNS = (
+    qr/transport error/i,
+    qr/connection\s*reset/i,
+    qr/connection\s*closed/i,
+    qr/connection\s*refused/i,
+    qr/broken\s*pipe/i,
+    qr/\bConnectionReset\b/,
+    qr/\bBrokenPipe\b/,
+);
+
+# Declared at package scope with the fully-qualified glob: a bare `sub` in a
+# file that uses `feature 'class'` would land in main::, not the class package
+# (same reason the constructor wrapper below assigns *Temporalio::Worker::new).
+sub Temporalio::Worker::_shutdown_error_is_tolerable ($err) {
+    return 0 unless Scalar::Util::blessed($err);
+    return 0 unless $err->isa('Temporalio::Exception::Bridge');
+    my $message = $err->can('message') ? ($err->message // '') : '';
+    for my $pat (@TOLERABLE_SHUTDOWN_PATTERNS) {
+        return 1 if $message =~ $pat;
+    }
+    return 0;
 }
 
 # Wrap the generated constructor so an unrecognised kwarg surfaces as

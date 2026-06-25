@@ -1560,6 +1560,35 @@ slice natively. Attribute pattern :NexusService/:SyncOperation/
 
 ## Phase 10 — Runtime, observability & worker hardening
 
+### Step P10.0: Integration-test shutdown hardening
+
+**NOTE**: A hardening fix, not a new feature. `worker_finalize_shutdown`
+drives a `shutdown_worker` RPC to the server. When the dev server resets or
+closes the connection while that RPC is in flight (common during ordered test
+teardown under `-j4` contention), the bridge rejected the `run` future with a
+transport-shaped `Exception::Bridge`. core only WARNs on this, but the rejected
+future dirtied the process exit (`prove`: "Dubious, test returned 1"). The flake
+hit `signals_queries.t` ~1 in 3 runs. Fix at the SDK layer so every consumer is
+protected, not just the tests.
+
+```text
+1. RED: sdk/t/unit/worker_shutdown_tolerance.t — a classifier
+   (_shutdown_error_is_tolerable) returns true ONLY for transport-teardown
+   bridge failures (ConnectionReset / BrokenPipe / connection closed / transport
+   error) and false for any unrelated bridge error, non-Bridge exception, or
+   undef/plain-string input.
+2. GREEN: Worker.pm _finalize_and_free swallows a tolerable shutdown-time
+   transport error (still frees the native worker, returns cleanly) and rethrows
+   anything else; Test::Worker::shutdown retrieves the run future's outcome so a
+   failed future is never abandoned at global destruction. Audit all 16
+   t/integration/*.t for the ordered teardown (drain worker -> close client ->
+   stop server -> shutdown runtime); already consistent across the suite.
+3. Verify (intermittent flake): full `prove -lj4 t` 5x consecutive all exit 0;
+   signals_queries.t 10x standalone all exit 0; forced concurrent contention
+   triggers the transport WARN (ConnectionReset + BrokenPipe variants) yet every
+   run exits 0.
+```
+
 ### Step P10.1: Interceptor framework (spec §27)
 
 **NOTE**: §27 — four surfaces (client outbound, worker activity/workflow
