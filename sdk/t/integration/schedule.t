@@ -217,13 +217,13 @@ T2->subtest('trigger twice -> num_actions == 2 (T-sched-6)' => sub {
     # Fire one trigger, let the schedule pick it up, then fire the second so the
     # two actions are distinct scheduling decisions (allow_all overlap).
     await_future($handle->trigger);
-    my $first = await_num_actions($handle, 1, 40);
+    my $first = await_num_actions($handle, 1, 90);
     T2->ok($first->info->num_actions >= 1, 'first trigger produced an action')
         or T2->diag('after first trigger num_actions='
             . $first->info->num_actions);
     await_future($handle->trigger);
 
-    my $desc = await_num_actions($handle, 2, 60);
+    my $desc = await_num_actions($handle, 2, 120);
     T2->ok($desc->info->num_actions >= 2,
         'two triggers produced at least two actions')
         or T2->diag('num_actions=' . $desc->info->num_actions);

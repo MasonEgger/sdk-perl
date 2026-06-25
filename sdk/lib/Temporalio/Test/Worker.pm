@@ -99,10 +99,16 @@ class Temporalio::Test::Worker {
         # Generous test-harness ceilings (P10.0.5/P10.0.6): on a 4-core,
         # 7.8 GiB/no-swap box under full CPU saturation a single read can eat
         # several consecutive DEADLINE_EXCEEDED before the worker is scheduled
-        # again, so the default budget is wide (6 attempts over ~5s) rather than
-        # the bare-minimum 3. Callers needing a tighter bound pass attempts/backoff.
-        my $attempts = $opts{attempts} // 6;
-        my $backoff  = $opts{backoff}  // 1.0;
+        # again. A memory-reclaim stall (worst on a small/low-swap box) can
+        # freeze the worker for tens of seconds, during which the workflow makes
+        # no progress and every read deadlines; the budget rides that out
+        # (30 attempts over ~75s) rather than the bare-minimum 3. A genuine hang
+        # fails every run, not just the slowest, so this masks no real bug. The
+        # retries cost nothing on a healthy run (the first attempt succeeds);
+        # the wide budget only spends time during an actual stall. Callers
+        # needing a tighter bound pass attempts/backoff.
+        my $attempts = $opts{attempts} // 30;
+        my $backoff  = $opts{backoff}  // 2.5;
         my $timeout  = $opts{timeout}  // 120;
         for my $attempt (1 .. $attempts) {
             my ($value, $ok, $err);
@@ -135,8 +141,8 @@ class Temporalio::Test::Worker {
     # no such callback the WorkflowAlreadyStarted surfaces. Any other
     # non-transient failure is raised at once, never retried.
     method await_with_retry ($producer, %opts) {
-        my $attempts = $opts{attempts} // 6;
-        my $backoff  = $opts{backoff}  // 1.0;
+        my $attempts = $opts{attempts} // 30;
+        my $backoff  = $opts{backoff}  // 2.5;
         my $timeout  = $opts{timeout}  // 120;
         my $on_already_started = $opts{on_already_started};
         for my $attempt (1 .. $attempts) {

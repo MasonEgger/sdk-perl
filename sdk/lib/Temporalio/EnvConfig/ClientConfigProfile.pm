@@ -105,7 +105,11 @@ class Temporalio::EnvConfig::ClientConfigProfile {
     # (inline TOML content).
     sub _source_to_options ($source) {
         return () unless defined $source;
-        return (path => $source) if -f $source && -r _;
+        # Inline TOML content contains newlines; only a single-line scalar can be
+        # a real path, so guard the filesystem probe to avoid a bogus stat (and
+        # its "filename containing newline" warning) on config bodies.
+        return (path => $source)
+            if $source !~ /\n/ && -f $source && -r _;
         return (data => $source);
     }
 
