@@ -27,6 +27,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Activity::FunctionDefinition;
 
@@ -52,11 +53,13 @@ sub exception_from ($code) {
     return $err;
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $one_activity = sub {
     [

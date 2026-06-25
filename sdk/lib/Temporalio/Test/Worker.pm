@@ -9,6 +9,7 @@ no warnings 'experimental::class';
 use Future ();
 use Scalar::Util ();
 use Temporalio::Exception::RpcTimeout ();
+use Temporalio::Exception::WorkflowAlreadyStarted ();
 
 class Temporalio::Test::Worker {
     # The worker under test and the IO::Async loop its runtime drives.
@@ -47,14 +48,26 @@ class Temporalio::Test::Worker {
     }
 
     # _is_transient_load_error($err) -> bool. True for the transient gRPC-layer
-    # failures a loaded box raises mid-call when it starves the worker: a clean
-    # DEADLINE_EXCEEDED (Temporalio::Exception::RpcTimeout), an UNAVAILABLE
-    # (gRPC 14), or the RpcError catch-all whose message is a transport hiccup
-    # (h2/http2 protocol error, connection reset, broken pipe, bare transport
-    # error). These are all the SAME load artifact and safe to re-issue on an
-    # idempotent read. Deliberately NARROW: NOT_FOUND / ALREADY_EXISTS /
-    # FAILED_PRECONDITION (QueryRejected) / PERMISSION_DENIED / UNAUTHENTICATED /
-    # INVALID_ARGUMENT are real, non-transient outcomes and must surface at once.
+    # failures a loaded box raises around a server call when it starves the
+    # worker — the ONE shared classifier for connect + idempotent read + teardown
+    # retries (P10.0.5, P10.0.6). It matches:
+    #   * a clean DEADLINE_EXCEEDED (Temporalio::Exception::RpcTimeout);
+    #   * an UNAVAILABLE (gRPC 14);
+    #   * an RpcError whose message is a mid-call transport hiccup (h2/http2
+    #     protocol error, connection reset, broken pipe, bare transport error);
+    #   * the dev-server CONNECT race (P10.0.6): an ephemeral server that has
+    #     started but not yet bound/accepted makes the bridge surface
+    #     "Connection failed: ...ConnectionRefused..." / "tcp connect error" /
+    #     "connection refused" / "Failed connecting to test server" /
+    #     "TonicTransportError". The just-started server only needs a moment to
+    #     listen, so a resilient connect retries these.
+    # All of these are the SAME load/race artifact and safe to re-issue on an
+    # idempotent read or a connect. Deliberately NARROW: NOT_FOUND /
+    # ALREADY_EXISTS / FAILED_PRECONDITION (QueryRejected) / PERMISSION_DENIED /
+    # UNAUTHENTICATED / INVALID_ARGUMENT are real, non-transient outcomes and
+    # must surface at once. A TLS-mismatch connect failure ("Connection failed:
+    # ...handshake...") is a real misconfiguration, NOT a race — it carries none
+    # of the connect-refused tokens below, so it correctly does not match.
     sub _is_transient_load_error ($err) {
         return 0 unless Scalar::Util::blessed($err);
         return 1 if $err->isa('Temporalio::Exception::RpcTimeout');
@@ -65,6 +78,9 @@ class Temporalio::Test::Worker {
         return 1 if $msg =~ /
             \b h2 \b | http2 | transport \s+ error
             | connection \s+ reset | broken \s+ pipe | connection \s+ closed
+            | connection \s* refused | connectionrefused
+            | tcp \s+ connect \s+ error | failed \s+ connecting \s+ to
+            | tonictransport
         /xi;
         return 0;
     }
@@ -80,8 +96,13 @@ class Temporalio::Test::Worker {
     # failure is raised immediately, never retried, so this never masks a real
     # error; a persistent transient failure surfaces after the last attempt.
     method await_idempotent ($producer, %opts) {
-        my $attempts = $opts{attempts} // 3;
-        my $backoff  = $opts{backoff}  // 0.5;
+        # Generous test-harness ceilings (P10.0.5/P10.0.6): on a 4-core,
+        # 7.8 GiB/no-swap box under full CPU saturation a single read can eat
+        # several consecutive DEADLINE_EXCEEDED before the worker is scheduled
+        # again, so the default budget is wide (6 attempts over ~5s) rather than
+        # the bare-minimum 3. Callers needing a tighter bound pass attempts/backoff.
+        my $attempts = $opts{attempts} // 6;
+        my $backoff  = $opts{backoff}  // 1.0;
         my $timeout  = $opts{timeout}  // 120;
         for my $attempt (1 .. $attempts) {
             my ($value, $ok, $err);
@@ -97,6 +118,74 @@ class Temporalio::Test::Worker {
         }
         # Unreachable: the loop either returns or dies on the last attempt.
         return;
+    }
+
+    # await_with_retry($producer, %opts) -> the resolved value. The sibling of
+    # await_idempotent for the NON-idempotent harness calls — start_workflow,
+    # signal, terminate — which on a starved box can eat a clean DEADLINE_EXCEEDED
+    # ("Timeout expired") whose RPC may or may not have reached the server
+    # (P10.0.6 run7/run9). $producer returns a FRESH Future per call. A transient
+    # load failure (the SAME _is_transient_load_error classifier as connect/read)
+    # is retried up to %opts{attempts} times with a %opts{backoff} pause. The one
+    # hazard of retrying a non-idempotent call — the prior attempt actually
+    # landed — is handled by %opts{on_already_started}: if a retry raises
+    # WorkflowAlreadyStarted (the first attempt DID reach the server), that
+    # callback is invoked and its return value is the result (e.g. re-fetch the
+    # existing handle), so a partially-applied start still resolves cleanly. With
+    # no such callback the WorkflowAlreadyStarted surfaces. Any other
+    # non-transient failure is raised at once, never retried.
+    method await_with_retry ($producer, %opts) {
+        my $attempts = $opts{attempts} // 6;
+        my $backoff  = $opts{backoff}  // 1.0;
+        my $timeout  = $opts{timeout}  // 120;
+        my $on_already_started = $opts{on_already_started};
+        for my $attempt (1 .. $attempts) {
+            my ($value, $ok, $err);
+            {
+                local $@;
+                $ok = eval { $value = $self->await_result($producer->(), $timeout); 1 };
+                $err = $@;
+            }
+            return $value if $ok;
+
+            # A retry of a non-idempotent start whose prior attempt actually
+            # reached the server: treat WorkflowAlreadyStarted as success.
+            if ($attempt > 1
+                && Scalar::Util::blessed($err)
+                && $err->isa('Temporalio::Exception::WorkflowAlreadyStarted')
+                && $on_already_started)
+            {
+                return $on_already_started->();
+            }
+
+            die $err
+                if !_is_transient_load_error($err) || $attempt == $attempts;
+            $loop->await($loop->delay_future(after => $backoff)) if $backoff > 0;
+        }
+        # Unreachable: the loop either returns or dies on the last attempt.
+        return;
+    }
+
+    # start_workflow_with_retry($client, $type, $args, %start_opts) -> handle.
+    # The common case of await_with_retry: start a workflow whose id is unique
+    # per call, so a retry that hits WorkflowAlreadyStarted just re-fetches the
+    # existing handle. Centralizes the on_already_started fallback so the dozens
+    # of integration start sites need no bespoke callback. %start_opts carries the
+    # workflow `id` and the usual start options (task_queue, etc.). The retry-
+    # control keys (attempts, backoff, timeout) are peeled off here and routed to
+    # await_with_retry rather than forwarded to start_workflow (which rejects
+    # unknown options).
+    method start_workflow_with_retry ($client, $type, $args, %start_opts) {
+        my %retry_opts;
+        for my $k (qw(attempts backoff timeout)) {
+            $retry_opts{$k} = delete $start_opts{$k} if exists $start_opts{$k};
+        }
+        my $id = $start_opts{id};
+        return $self->await_with_retry(
+            sub { $client->start_workflow($type, $args, %start_opts) },
+            on_already_started => sub { $client->get_workflow_handle($id) },
+            %retry_opts,
+        );
     }
 
     # shutdown($timeout=60): initiate worker shutdown so the poll loops drain on
@@ -200,6 +289,37 @@ any real, non-transient error (C<NOT_FOUND>, C<QueryRejected>, etc.) surfaces
 immediately, and a persistent transient failure surfaces after the last attempt.
 B<Use for idempotent operations only>: never C<start_workflow>
 (C<WorkflowAlreadyStarted>) or C<signal> (double-delivery).
+
+=head2 await_with_retry
+
+    my $handle = $tw->await_with_retry(
+        sub { $client->start_workflow('Wf', [], id => $id, task_queue => $tq) },
+        on_already_started => sub { $client->workflow_handle($id) },
+    );
+    $tw->await_with_retry(sub { $handle->signal('setName', ['Ada']) });
+
+The non-idempotent sibling of C<await_idempotent>, for C<start_workflow>,
+C<signal>, and C<terminate>, which on a CPU-saturated test box can eat a clean
+C<DEADLINE_EXCEEDED> (C<Temporalio::Exception::RpcTimeout>) whose RPC may or may
+not have reached the server. The same transient classifier is retried up to
+C<attempts> times (default 6) with a C<backoff> pause (default 1.0s). The hazard
+of retrying a non-idempotent call — the prior attempt actually landed — is
+covered by the optional C<on_already_started> callback: if a retry raises
+C<Temporalio::Exception::WorkflowAlreadyStarted>, that callback runs and its
+return value becomes the result (e.g. re-fetch the existing handle). Without the
+callback, C<WorkflowAlreadyStarted> surfaces. Any other non-transient failure is
+raised immediately.
+
+=head2 start_workflow_with_retry
+
+    my $handle = $tw->start_workflow_with_retry(
+        $client, 'MyWorkflow', [@args], id => $id, task_queue => $tq);
+
+The common application of C<await_with_retry>: start a workflow whose C<id>
+(passed in the start options) is unique per call, retrying a transient timeout
+and re-fetching the handle if a retry hits C<WorkflowAlreadyStarted>. Returns
+the workflow handle. Centralizes the C<on_already_started> fallback so
+integration start sites need no bespoke callback.
 
 =head2 shutdown
 

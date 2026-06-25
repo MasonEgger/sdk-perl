@@ -29,6 +29,7 @@ require FFI::Platypus::Buffer;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 
 my $loop    = IO::Async::Loop->new;
 my $runtime = Temporalio::Runtime->new(loop => $loop);
@@ -58,11 +59,13 @@ sub exception_from ($code) {
 my $client;
 
 T2->subtest('connect succeeds with expected namespace + identity (T-cli-connect-1)' => sub {
-    $client = await_future(Temporalio::Client->connect(
-        $server->target,
-        namespace => 'default',
-        runtime   => $runtime,
-    ));
+    $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+        Temporalio::Client->connect(
+            $server->target,
+            namespace => 'default',
+            runtime   => $runtime,
+        );
+    });
     T2->isa_ok($client, 'Temporalio::Client');
     T2->is($client->namespace, 'default', 'namespace is default');
     T2->is($client->identity, Temporalio::Client->default_identity,

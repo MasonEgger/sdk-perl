@@ -30,6 +30,7 @@ require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Test::Worker;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Activity::FunctionDefinition;
 require Temporalio::Exception::Timeout;
@@ -63,11 +64,13 @@ sub unique_id ($prefix) {
     return "perl-sdk-eager-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $task_queue = 'perl-sdk-eager-' . $$ . '-' . int(rand(1_000_000));
 
@@ -94,13 +97,13 @@ T2->subtest('request_eager_start workflow completes; eagerly_started reported (T
     );
     my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-    my $handle = $tw->await_result($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'E2EGreeting',
         ['Alice'],
         id                  => unique_id('e2e'),
         task_queue          => $task_queue,
         request_eager_start => 1,
-    ));
+    );
 
     T2->ok(defined $handle->eagerly_started,
         'eagerly_started is a defined boolean off the start response');
@@ -136,12 +139,12 @@ T2->subtest('no_remote_activities -> activity times out SCHEDULE_TO_START (T-eag
     );
     my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-    my $handle = $tw->await_result($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'EagerActivityWorkflow',
         ['Bob'],
         id         => unique_id('noremote'),
         task_queue => $no_remote_tq,
-    ));
+    );
 
     my $err = exception_from(sub { $tw->await_idempotent(sub { $handle->result }) });
     T2->ok(

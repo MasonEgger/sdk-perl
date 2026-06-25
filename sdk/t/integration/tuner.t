@@ -29,6 +29,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Worker::Tuner;
 require Temporalio::Worker::SlotSupplier::FixedSize;
@@ -66,11 +67,13 @@ sub unique ($prefix) {
     return "perl-sdk-tuner-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 # A counting custom slot supplier. reserve_slot grants a fresh permit id
 # immediately (the worker drives the async-reserve completion); try_reserve_slot
@@ -129,12 +132,13 @@ T2->subtest('T-tuner-5 custom supplier drives a worker; callbacks on main thread
     );
     my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-    my $handle = $tw->await_result($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'Constant',
         ['Tuner'],
         id         => unique('wf'),
         task_queue => $task_queue,
-    ), 60);
+        timeout => 60,
+    );
     my $result = $tw->await_idempotent(sub { $handle->result });
     T2->is($result, 'Hello, Tuner!', 'workflow completed with the custom tuner');
 
@@ -188,12 +192,13 @@ T2->subtest('T-tuner-6 try_reserve undef defers to a poll-reserve' => sub {
     );
     my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-    my $handle = $tw->await_result($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'Constant',
         ['Defer'],
         id         => unique('wf'),
         task_queue => $task_queue,
-    ), 60);
+        timeout => 60,
+    );
     my $result = $tw->await_idempotent(sub { $handle->result });
     T2->is($result, 'Hello, Defer!',
         'workflow completes even though try_reserve always defers');

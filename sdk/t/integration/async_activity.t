@@ -31,6 +31,7 @@ require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Test::Worker;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Activity::FunctionDefinition;
 require Temporalio::Exception::Application;
@@ -59,11 +60,13 @@ sub unique_id ($prefix) {
     return "perl-sdk-asyncact-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $task_queue = 'perl-sdk-asyncact-' . $$ . '-' . int(rand(1_000_000));
 
@@ -95,12 +98,12 @@ my $worker = Temporalio::Worker->new(
 my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
 T2->subtest('complete_async -> out-of-band completion end-to-end (T-asyncact-7)' => sub {
-    my $handle = $tw->await_result($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'AsyncActivityWorkflow',
         [],
         id         => unique_id('e2e'),
         task_queue => $task_queue,
-    ));
+    );
 
     # Wait for the activity to register its task token (it returns immediately
     # after declaring complete_async; the workflow stays pending).

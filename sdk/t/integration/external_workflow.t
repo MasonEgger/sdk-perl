@@ -28,6 +28,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Test::Worker;
 
@@ -52,12 +53,10 @@ sub unique_id ($prefix) {
     return "perl-sdk-ext-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = do {
-    my $f = Temporalio::Client->connect(
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
         $server->target, namespace => 'default', runtime => $runtime);
-    $loop->await($f);
-    $f->get;
-};
+});
 
 my $task_queue = 'perl-sdk-ext-' . $$ . '-' . int(rand(1_000_000));
 
@@ -78,20 +77,20 @@ T2->subtest('driver signals then cancels a target by id (T-ext-10a)' => sub {
 
     # Start the target first so the driver's external handle resolves to a live
     # workflow.
-    my $target = await_with_worker($client->start_workflow(
+    my $target = $tw->start_workflow_with_retry($client,
         'ExtTarget',
         [],
         id         => $target_id,
         task_queue => $task_queue,
-    ));
+    );
 
     # The driver signals then cancels the target by id.
-    my $driver = await_with_worker($client->start_workflow(
+    my $driver = $tw->start_workflow_with_retry($client,
         'ExtDriver',
         ['signal_cancel', $target_id],
         id         => unique_id('driver'),
         task_queue => $task_queue,
-    ));
+    );
     my $driver_result = await_with_worker($driver->result, 60);
     T2->is($driver_result, 'done',
         'driver signalled and cancelled the target through the external handle');
@@ -110,12 +109,12 @@ T2->subtest('driver signals then cancels a target by id (T-ext-10a)' => sub {
 });
 
 T2->subtest('signalling a non-existent id surfaces as Application (T-ext-10b)' => sub {
-    my $driver = await_with_worker($client->start_workflow(
+    my $driver = $tw->start_workflow_with_retry($client,
         'ExtDriver',
         ['missing', unique_id('ghost')],
         id         => unique_id('driver-missing'),
         task_queue => $task_queue,
-    ));
+    );
     my $err = exception_from(sub { await_with_worker($driver->result, 60) });
     T2->ok(Scalar::Util::blessed($err),
         'signalling a non-existent workflow fails the driver')

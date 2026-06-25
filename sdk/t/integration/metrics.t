@@ -28,6 +28,7 @@ require Temporalio::Runtime::MetricMeter;
 require Temporalio::Runtime::TelemetryConfig;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Test::Worker;
 require Temporalio::Activity::FunctionDefinition;
@@ -78,8 +79,10 @@ sub unique_id ($prefix) {
     return "perl-sdk-metrics-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target, namespace => 'default', runtime => $runtime));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target, namespace => 'default', runtime => $runtime);
+});
 
 my $task_queue = 'perl-sdk-metrics-' . $$ . '-' . int(rand(1_000_000));
 
@@ -98,12 +101,13 @@ my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
 # Run a workflow so core does real work and emits internal metrics through the
 # custom meter (T-meter-10).
-my $handle = $tw->await_result($client->start_workflow(
+my $handle = $tw->start_workflow_with_retry($client,
     'E2EGreeting',
     ['Metrics'],
     id         => unique_id('greeting'),
     task_queue => $task_queue,
-), 60);
+    timeout => 60,
+);
 my $result = $tw->await_idempotent(sub { $handle->result });
 T2->is($result, 'Hello, Metrics!', 'workflow ran under the custom meter');
 

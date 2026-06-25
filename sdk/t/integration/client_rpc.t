@@ -29,6 +29,7 @@ require FFI::Platypus::Buffer;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Core::Proto;
 
 Temporalio::Core::Proto->load;
@@ -62,11 +63,13 @@ sub exception_from ($code) {
     return $err;
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 T2->subtest('raw _rpc_call round-trips DescribeNamespace protos' => sub {
     my $response = await_future($client->_rpc_call(

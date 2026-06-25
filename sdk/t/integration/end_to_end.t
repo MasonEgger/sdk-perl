@@ -29,6 +29,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Test::Worker;
 require Temporalio::Activity::FunctionDefinition;
@@ -67,11 +68,13 @@ sub unique_id ($prefix) {
     return "perl-sdk-e2e-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $task_queue = 'perl-sdk-e2e-' . $$ . '-' . int(rand(1_000_000));
 
@@ -112,35 +115,35 @@ sub await_with_worker ($future, $timeout = 120) {
 }
 
 T2->subtest('greeting workflow calls an activity and returns its result (T-cli-result-1)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'E2EGreeting',
         ['Alice'],
         id         => unique_id('greeting'),
         task_queue => $task_queue,
-    ));
+    );
     my $result = await_with_worker($handle->result, 60);
     T2->is($result, 'Hello, Alice!',
         'greeting workflow returned the activity result');
 });
 
 T2->subtest('timer workflow sleeps and completes (timer path end-to-end)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'E2ESleeper',
         [1],
         id         => unique_id('sleeper'),
         task_queue => $task_queue,
-    ));
+    );
     my $result = await_with_worker($handle->result, 60);
     T2->is($result, 'awake', 'sleeper workflow progressed past its timer');
 });
 
 T2->subtest('activity failure propagates as WorkflowFailure -> Activity -> Application (T-wf-15b end-to-end)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'E2EFailer',
         [],
         id         => unique_id('failer'),
         task_queue => $task_queue,
-    ));
+    );
     my $err = exception_from(sub { await_with_worker($handle->result, 60) });
     T2->ok(
         Scalar::Util::blessed($err)

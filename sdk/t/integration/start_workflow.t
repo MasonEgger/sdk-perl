@@ -28,6 +28,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Core::Proto;
 
 Temporalio::Core::Proto->load;
@@ -55,11 +56,13 @@ sub exception_from ($code) {
     return $err;
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 # A unique id per run so reruns against a persistent server don't collide.
 my $wf_id = 'perl-sdk-start-' . $$ . '-' . int(rand(1_000_000));

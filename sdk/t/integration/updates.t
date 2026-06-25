@@ -30,6 +30,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Test::Worker;
 require Temporalio::Exception::Argument;
@@ -63,11 +64,13 @@ sub unique_id ($prefix) {
     return "perl-sdk-upd-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $task_queue = 'perl-sdk-upd-' . $$ . '-' . int(rand(1_000_000));
 
@@ -85,12 +88,12 @@ sub await_with_worker ($future, $timeout = 120) {
 }
 
 sub start_counter ($prefix) {
-    return await_with_worker($client->start_workflow(
+    return $tw->start_workflow_with_retry($client,
         'UpdatableCounter',
         [],
         id         => unique_id($prefix),
         task_queue => $task_queue,
-    ));
+    );
 }
 
 T2->subtest('execute_update returns the decoded result (T-cli-update-1)' => sub {

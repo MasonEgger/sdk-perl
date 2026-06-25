@@ -1623,6 +1623,27 @@ protected, not just the tests.
    30→60, await_with_worker/await_result 60→120, shutdown 60→120,
    await_num_actions 30→60. RED: t/unit/test_worker_retry.t. Verify: full `prove
    -lj4 t` 8x consecutive under forced CPU contention, all exit 0.
+6. P10.0.6 (a THIRD connect-time mode plus a recurrence of P10.0.5 on the
+   non-idempotent calls — folded into ONE centralized fix to stop the
+   mode-at-a-time whack-a-mole): an ephemeral dev server passes its start
+   timeout yet begins accepting a moment after `Temporalio::Client->connect`, so
+   core's short connect window expires against a not-yet-listening socket and
+   connect fails transiently (ConnectionRefused / tcp connect error / "Failed
+   connecting to test server" / UNAVAILABLE / TonicTransportError); and the
+   P10.0.5 DEADLINE_EXCEEDED still escaped on start_workflow/signal/terminate,
+   which P10.0.5 left un-retried. Test-only fix: extend the ONE shared
+   `_is_transient_load_error` classifier to the connect-race shapes (reused by
+   connect + read + teardown, no forked logic); add
+   `Temporalio::Test::Client::connect_with_retry` and route every integration
+   client connect through it (TLS-mismatch / bad-PEM failures still surface at
+   once); add `Temporalio::Test::Worker::await_with_retry` +
+   `start_workflow_with_retry` (retry a transient timeout on the non-idempotent
+   calls, tolerate WorkflowAlreadyStarted on a start retry) and route all
+   integration start/signal/terminate sites through them; raise the
+   await_idempotent default ceiling to 6 attempts / 1.0s backoff. RED:
+   t/unit/test_worker_retry.t (extended) + t/unit/test_client_connect_retry.t.
+   Verify: full `prove -lj4 t` 12x consecutive, 4 under forced CPU contention,
+   all exit 0.
 ```
 
 ### Step P10.1: Interceptor framework (spec §27)

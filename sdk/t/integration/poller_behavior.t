@@ -27,6 +27,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Worker::PollerBehavior::SimpleMaximum;
 require Temporalio::Worker::PollerBehavior::Autoscaling;
@@ -63,11 +64,13 @@ sub unique ($prefix) {
     return "perl-sdk-poller-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 T2->subtest('T-poller-5 autoscaling pollers drive a worker to completion' => sub {
     my $task_queue = unique('autoscale');
@@ -87,12 +90,13 @@ T2->subtest('T-poller-5 autoscaling pollers drive a worker to completion' => sub
     );
     my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-    my $handle = $tw->await_result($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'Constant',
         ['Poller'],
         id         => unique('wf'),
         task_queue => $task_queue,
-    ), 60);
+        timeout => 60,
+    );
     my $result = $tw->await_idempotent(sub { $handle->result });
     T2->is($result, 'Hello, Poller!',
         'workflow completed with autoscaling workflow pollers');

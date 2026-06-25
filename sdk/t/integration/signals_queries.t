@@ -30,6 +30,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Test::Worker;
 require Temporalio::Exception::QueryRejected;
@@ -71,11 +72,13 @@ sub unique_id ($prefix) {
     return "perl-sdk-sigq-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $task_queue = 'perl-sdk-sigq-' . $$ . '-' . int(rand(1_000_000));
 
@@ -105,12 +108,21 @@ sub await_idempotent ($producer) {
 }
 
 T2->subtest('signal drives a Perl :Signal handler; query reads :Query state (T-cli-signal-1, T-cli-query-1)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
-        'SignalQueryGreeter',
-        [],
-        id         => unique_id('greet'),
-        task_queue => $task_queue,
-    ));
+    # start_workflow / signal are NON-idempotent: on a CPU-saturated box a clean
+    # DEADLINE_EXCEEDED can be raised whose RPC may have reached the server, so
+    # route them through await_with_retry (P10.0.6 run7/run9). A start retry that
+    # hits WorkflowAlreadyStarted means the first attempt landed — re-fetch the
+    # handle. A signal retry on a clean timeout is safe here: the workflow merely
+    # sets the name idempotently and the test asserts the post-signal state.
+    my $greet_id = unique_id('greet');
+    my $handle = $tw->await_with_retry(
+        sub {
+            $client->start_workflow(
+                'SignalQueryGreeter', [],
+                id => $greet_id, task_queue => $task_queue);
+        },
+        on_already_started => sub { $client->get_workflow_handle($greet_id) },
+    );
 
     # Before the signal: the query observes the empty initial name.
     my $before = await_idempotent(sub { $handle->query('currentName') });
@@ -118,7 +130,7 @@ T2->subtest('signal drives a Perl :Signal handler; query reads :Query state (T-c
 
     # Send the signal; the worker's :Signal handler sets the name and the
     # wait_condition resumes the parked :Run.
-    await_with_worker($handle->signal('setName', ['Ada']));
+    $tw->await_with_retry(sub { $handle->signal('setName', ['Ada']) });
 
     # The query now observes the signalled name (T-cli-query-1), proving the
     # signal was processed by the Perl worker (T-cli-signal-1). Poll briefly: a
@@ -138,17 +150,22 @@ T2->subtest('signal drives a Perl :Signal handler; query reads :Query state (T-c
 });
 
 T2->subtest('query against a terminated workflow with reject_condition raises QueryRejected (T-cli-query-2)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
-        'SignalQueryGreeter',
-        [],
-        id         => unique_id('reject'),
-        task_queue => $task_queue,
-    ));
+    my $reject_id = unique_id('reject');
+    my $handle = $tw->await_with_retry(
+        sub {
+            $client->start_workflow(
+                'SignalQueryGreeter', [],
+                id => $reject_id, task_queue => $task_queue);
+        },
+        on_already_started => sub { $client->get_workflow_handle($reject_id) },
+    );
 
     # Terminate the run (never signalled, so it is parked on wait_condition),
     # then query with reject_condition NOT_OPEN — the server rejects because the
-    # workflow is no longer open.
-    await_with_worker($handle->terminate(reason => 'terminated for reject test'));
+    # workflow is no longer open. Terminate is idempotent enough to retry on a
+    # clean timeout (re-terminating an already-terminated run is a no-op).
+    $tw->await_with_retry(
+        sub { $handle->terminate(reason => 'terminated for reject test') });
 
     my $err = exception_from(sub {
         await_idempotent(sub {

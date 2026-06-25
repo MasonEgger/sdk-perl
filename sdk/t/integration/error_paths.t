@@ -39,6 +39,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Test::Worker;
 require Temporalio::Exception::Application;
@@ -77,11 +78,13 @@ sub unique_id ($prefix) {
     return "perl-sdk-error-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $task_queue = 'perl-sdk-error-' . $$ . '-' . int(rand(1_000_000));
 
@@ -105,12 +108,12 @@ sub await_with_worker ($future, $timeout = 120) {
 # Application carrying that type. Verified against sdk-python client/_workflow.py
 # (WorkflowExecutionFailed -> WorkflowFailureError, cause from failure proto).
 T2->subtest('failed workflow -> WorkflowFailure wrapping Application(type) (T-cli-result-2)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'AppFailer',
         [],
         id         => unique_id('appfail'),
         task_queue => $task_queue,
-    ));
+    );
 
     my $result;
     my $err = exception_from(sub { $result = await_with_worker($handle->result, 60) });
@@ -139,24 +142,24 @@ T2->subtest('failed workflow -> WorkflowFailure wrapping Application(type) (T-cl
 T2->subtest('continue-as-new follow_runs both ways (T-cli-result-4)' => sub {
     # follow_runs => 1 (default): result follows the run chain to the final
     # WorkflowExecutionCompleted and returns its value.
-    my $followed = await_with_worker($client->start_workflow(
+    my $followed = $tw->start_workflow_with_retry($client,
         'CanCounter',
         [ 0, 2 ],
         id         => unique_id('can-follow'),
         task_queue => $task_queue,
-    ));
+    );
     my $value = await_with_worker($followed->result, 60);
     T2->is($value, 2,
         'follow_runs => 1 follows the CAN chain to the final run value');
 
     # follow_runs => 0: the first run is a ContinuedAsNew, so result raises
     # WorkflowContinuedAsNew carrying the new run id rather than following.
-    my $stopped = await_with_worker($client->start_workflow(
+    my $stopped = $tw->start_workflow_with_retry($client,
         'CanCounter',
         [ 0, 2 ],
         id         => unique_id('can-stop'),
         task_queue => $task_queue,
-    ));
+    );
     my $err = exception_from(
         sub { await_with_worker($stopped->result(follow_runs => 0), 60) });
     T2->ok(
@@ -186,12 +189,12 @@ T2->subtest('continue-as-new follow_runs both ways (T-cli-result-4)' => sub {
 # to the real RPC — the call core would have retried past any transient
 # UNAVAILABLE — and assert the result still resolves to the real value.
 T2->subtest('transient UNAVAILABLE during result long-poll is retried (T-cli-result-5)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'CanCounter',
         [ 2, 2 ],    # target already reached -> completes on the first run
         id         => unique_id('retry'),
         task_queue => $task_queue,
-    ));
+    );
 
     my $poll_seen      = 0;
     my $poll_retry_off = 0;

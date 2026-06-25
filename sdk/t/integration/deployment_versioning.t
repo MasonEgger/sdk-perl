@@ -31,6 +31,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Worker::DeploymentVersion;
 require Temporalio::Worker::DeploymentOptions;
@@ -69,11 +70,13 @@ sub unique ($prefix) {
     return "perl-sdk-ver-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 T2->subtest('T-wkrver-4 routing: a deployment-versioned worker routes + reports behavior' => sub {
     # use_worker_versioning => 0: the worker advertises a deployment version
@@ -98,12 +101,13 @@ T2->subtest('T-wkrver-4 routing: a deployment-versioned worker routes + reports 
     );
     my $tw = Temporalio::Test::Worker->new(worker => $worker, loop => $loop);
 
-    my $handle = $tw->await_result($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'VersionedGreeter',
         ['Alice'],
         id         => unique('wf'),
         task_queue => $task_queue,
-    ), 60);
+        timeout => 60,
+    );
     my $result = $tw->await_idempotent(sub { $handle->result });
     T2->is($result, 'Hello, Alice!',
         'deployment-versioned workflow completed (behavior reported, routed)');

@@ -48,6 +48,7 @@ require Future::AsyncAwait;
 require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Test::Worker;
 require Temporalio::Nexus;
@@ -69,8 +70,10 @@ sub await_future ($future, $timeout = 60) {
 }
 
 my $address = $ENV{TEMPORAL_ADDRESS} // 'localhost:7233';
-my $client  = await_future(Temporalio::Client->connect(
-    runtime => $runtime, target_host => $address, namespace => 'default'));
+my $client  = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        runtime => $runtime, target_host => $address, namespace => 'default');
+});
 
 # Single worker hosting BOTH the caller workflow and the Nexus service (spec
 # section 26.5: "execute_operation against My::NexusService on the same worker").

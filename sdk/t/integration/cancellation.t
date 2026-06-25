@@ -36,6 +36,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Test::Worker;
 require Temporalio::Activity;
@@ -75,11 +76,13 @@ sub unique_id ($prefix) {
     return "perl-sdk-cancel-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $task_queue = 'perl-sdk-cancel-' . $$ . '-' . int(rand(1_000_000));
 
@@ -134,12 +137,12 @@ sub assert_cancelled ($handle, $label) {
 }
 
 T2->subtest('client cancel propagates to the workflow; it ends Cancelled (T-cli-cancel-1 / T-wf-12)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'CancelChainWorkflow',
         [],
         id         => unique_id('chain'),
         task_queue => $task_queue,
-    ));
+    );
 
     # Let the workflow start and park on its timer.
     await_future($loop->delay_future(after => 1.5));
@@ -152,12 +155,12 @@ T2->subtest('client cancel propagates to the workflow; it ends Cancelled (T-cli-
 });
 
 T2->subtest('abandon-typed activity is left running; workflow still ends Cancelled (T-act-9 abandon)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'AbandonCancelWorkflow',
         [],
         id         => unique_id('abandon'),
         task_queue => $task_queue,
-    ));
+    );
 
     # Let the workflow start the abandon activity and park on its timer.
     await_future($loop->delay_future(after => 1.5));

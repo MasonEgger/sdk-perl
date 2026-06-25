@@ -27,6 +27,7 @@ require IO::Async::Loop;
 require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Test::Worker;
 
@@ -58,11 +59,13 @@ sub unique_id ($prefix) {
     return "perl-sdk-child-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $task_queue = 'perl-sdk-child-' . $$ . '-' . int(rand(1_000_000));
 
@@ -81,36 +84,36 @@ sub await_with_worker ($future, $timeout = 120) {
 }
 
 T2->subtest('parent execute_child_workflow returns the child value (T-child-13a)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'E2EParent',
         ['execute', 'Alice'],
         id         => unique_id('execute'),
         task_queue => $task_queue,
-    ));
+    );
     my $result = await_with_worker($handle->result, 60);
     T2->is($result, 'Hello, Alice!',
         'parent returned the child workflow result');
 });
 
 T2->subtest('parent signals a started child via the handle (T-child-13b)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'E2EParent',
         ['signal', 'ping'],
         id         => unique_id('signal'),
         task_queue => $task_queue,
-    ));
+    );
     my $result = await_with_worker($handle->result, 60);
     T2->is($result, 'poked: ping',
         'the child observed the signal sent through the child handle');
 });
 
 T2->subtest('failing child surfaces as ChildWorkflow (T-child-13c)' => sub {
-    my $handle = await_with_worker($client->start_workflow(
+    my $handle = $tw->start_workflow_with_retry($client,
         'E2EParent',
         ['execute', 'fail'],
         id         => unique_id('fail'),
         task_queue => $task_queue,
-    ));
+    );
     my $err = exception_from(sub { await_with_worker($handle->result, 60) });
     # The parent workflow fails; its failure wraps the ChildWorkflow failure,
     # whose cause is the child's Application error.

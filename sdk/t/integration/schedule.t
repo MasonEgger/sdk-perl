@@ -32,6 +32,7 @@ require Temporalio::Runtime;
 require Temporalio::Test::DevServer;
 require Temporalio::Test::Worker;
 require Temporalio::Client;
+require Temporalio::Test::Client;
 require Temporalio::Worker;
 require Temporalio::Core::Proto;
 require Temporalio::Schedule;
@@ -61,11 +62,13 @@ sub unique_id ($prefix) {
     return "perl-sdk-sched-$prefix-" . $$ . '-' . int(rand(1_000_000));
 }
 
-my $client = await_future(Temporalio::Client->connect(
-    $server->target,
-    namespace => 'default',
-    runtime   => $runtime,
-));
+my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
+    Temporalio::Client->connect(
+        $server->target,
+        namespace => 'default',
+        runtime   => $runtime,
+    );
+});
 
 my $task_queue = 'perl-sdk-sched-' . $$ . '-' . int(rand(1_000_000));
 
