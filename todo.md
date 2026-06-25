@@ -399,9 +399,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P10.8.3 Verify: prove -lj4 t — **Phase 10 worker-hardening green**
 
 ### P10.9 Client extras — reset + http_proxy (spec §30)
-- [ ] P10.9.1 RED: sdk/t/unit/reset.t + http_proxy.t + integration (T-reset-1..5, T-proxy-1..5)
-- [ ] P10.9.2 GREEN: WorkflowHandle->reset + Client->reset_workflow; HttpConnectProxyConfig + ClientHttpConnectProxyOptions FFI record + wire Client.pm:589
-- [ ] P10.9.3 Verify: prove -lj4 t
+- [x] P10.9.1 RED: sdk/t/unit/reset.t + http_proxy.t + integration (T-reset-1..5, T-proxy-1..5)
+- [x] P10.9.2 GREEN: WorkflowHandle->reset + Client->reset_workflow; HttpConnectProxyConfig + ClientHttpConnectProxyOptions FFI record + wire Client.pm:589
+- [x] P10.9.3 Verify: prove -lj4 t
 
 ### P10.10 Client environment configuration (spec §31)
 - [ ] P10.10.1 RED: sdk/t/unit/envconfig.t (options-struct build, FFI-JSON parse, fail→Argument, to_connect_config; T-envcfg-1..9) + integration (T-envcfg-int-1)

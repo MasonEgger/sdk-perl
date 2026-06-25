@@ -160,6 +160,24 @@ package Temporalio::Core::FFI::ClientKeepAliveOptions {
     );
 }
 
+package Temporalio::Core::FFI::ClientHttpConnectProxyOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreClientHttpConnectProxyOptions (header :128-132):
+    #   { TemporalCoreByteArrayRef target_host; username; password; }
+    # Three ByteArrayRef members flattened to (data, size) pairs; the C
+    # username/password map 1:1 to the Perl basic_auth_user/basic_auth_pass
+    # (spec section 30.2, Ruby's two-field auth). Every member is 8-aligned on
+    # x86-64, so the record layout has no interior padding.
+    record_layout_1(
+        opaque => 'target_host_data',
+        size_t => 'target_host_size',
+        opaque => 'username_data',
+        size_t => 'username_size',
+        opaque => 'password_data',
+        size_t => 'password_size',
+    );
+}
+
 package Temporalio::Core::FFI::ConnectionOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreConnectionOptions (client.rs / header): seven

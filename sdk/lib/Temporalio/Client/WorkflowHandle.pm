@@ -216,6 +216,90 @@ class Temporalio::Client::WorkflowHandle {
         return;
     }
 
+    # temporal.api.enums.v1 reapply enums (enums/v1/reset.proto). No reference
+    # SDK ships a high-level reset helper; these mirror the proto enum values
+    # directly (the proto is the oracle, spec section 30.1).
+    my %RESET_REAPPLY_TYPE = (
+        signal       => 1,    # RESET_REAPPLY_TYPE_SIGNAL
+        none         => 2,    # RESET_REAPPLY_TYPE_NONE
+        all_eligible => 3,    # RESET_REAPPLY_TYPE_ALL_ELIGIBLE
+    );
+    my %RESET_REAPPLY_EXCLUDE_TYPE = (
+        signal => 1,          # RESET_REAPPLY_EXCLUDE_TYPE_SIGNAL
+        update => 2,          # RESET_REAPPLY_EXCLUDE_TYPE_UPDATE
+        nexus  => 3,          # RESET_REAPPLY_EXCLUDE_TYPE_NEXUS
+    );
+
+    sub _reapply_enum ($name, $value, $table) {
+        return $value if $value =~ /\A[0-9]+\z/;    # already a proto number
+        my $num = $table->{$value};
+        Temporalio::Exception::Argument->throw(
+            message => "invalid $name '$value' (expected one of "
+                     . join(', ', sort keys %$table) . ')')
+            unless defined $num;
+        return $num;
+    }
+
+    # _build_reset_request(%kwargs) — builds a ResetWorkflowExecutionRequest
+    # (spec section 30.1) without issuing any RPC, so it is unit-testable.
+    # workflow_task_finish_event_id is required; a missing id or a bad reapply
+    # enum string raises Argument before any RPC. request_id defaults to a fresh
+    # UUID. reset_reapply_type (deprecated proto field) maps signal|none|
+    # all_eligible; reset_reapply_exclude_types maps signal|update|nexus.
+    method _build_reset_request (%kwargs) {
+        my $finish_event_id = $kwargs{workflow_task_finish_event_id};
+        Temporalio::Exception::Argument->throw(
+            message => 'reset requires a workflow_task_finish_event_id'
+                     . ' (the WORKFLOW_TASK_COMPLETED/TIMED_OUT/FAILED/STARTED'
+                     . ' event to reset to)')
+            unless defined $finish_event_id && $finish_event_id =~ /\A[0-9]+\z/;
+
+        my %fields = (
+            namespace          => $client->namespace,
+            workflow_execution => $self->_execution_message,
+            reason             => $kwargs{reason} // '',
+            workflow_task_finish_event_id => $finish_event_id,
+            request_id         => $kwargs{request_id}
+                              // Temporalio::Client::_new_uuid(),
+            identity           => $client->identity,
+        );
+
+        if (defined(my $type = $kwargs{reset_reapply_type})) {
+            $fields{reset_reapply_type} =
+                _reapply_enum('reset_reapply_type', $type,
+                    \%RESET_REAPPLY_TYPE);
+        }
+
+        my $request = _resolve(
+            'temporal.api.workflowservice.v1.ResetWorkflowExecutionRequest')
+            ->new(\%fields);
+
+        # A repeated enum value cannot be passed through new() — the generated
+        # constructor type-checks every field as a scalar (a Protobuf-dist quirk
+        # where new() validates repeated enums as singular). The set_ accessor
+        # stores a repeated value verbatim, so apply the mapped exclude list
+        # after construction.
+        if (defined(my $exclude = $kwargs{reset_reapply_exclude_types})) {
+            $request->set_reset_reapply_exclude_types([
+                map { _reapply_enum('reset_reapply_exclude_types', $_,
+                        \%RESET_REAPPLY_EXCLUDE_TYPE) } @$exclude
+            ]);
+        }
+
+        return $request;
+    }
+
+    # reset(%kwargs) — async (spec section 30.1): a thin, clearly-forked
+    # convenience helper (no reference SDK ships one) that funnels a
+    # ResetWorkflowExecutionRequest through the client RPC path and returns the
+    # new run id. The current run is terminated and a new run started.
+    async method reset (%kwargs) {
+        my $request = $self->_build_reset_request(%kwargs);
+        my $response =
+            await $client->_rpc_call('ResetWorkflowExecution', $request);
+        return $response->run_id;
+    }
+
     # signal($name, \@args, ...) — async (spec section 7.6 / sdk-python _impl.py
     # signal_workflow 474-504).
     async method signal ($name, $args = [], %opts) {
@@ -550,6 +634,29 @@ C<details> through the data converter. C<signal> and C<query> send the named
 signal/query with converter-encoded arguments; a server-rejected query
 raises L<Temporalio::Exception::QueryRejected>. C<fetch_history_events>
 returns an async iterator over the workflow's history events.
+
+=head2 reset
+
+    my $new_run_id = await $handle->reset(
+        workflow_task_finish_event_id => $event_id,   # required
+        reason                        => '',
+        reset_reapply_type            => 'signal',    # signal|none|all_eligible
+        reset_reapply_exclude_types   => ['signal'],  # signal|update|nexus
+        request_id                    => undef,        # default: fresh UUID
+    );
+
+Async (spec section 30.1). A thin, clearly-forked convenience helper (no
+reference SDK ships one) that builds a C<ResetWorkflowExecutionRequest> and
+funnels it through the client RPC path, returning the new run id. The current
+run is terminated and a new run started.
+C<workflow_task_finish_event_id> is required (the
+C<WORKFLOW_TASK_COMPLETED>/C<TIMED_OUT>/C<FAILED>/C<STARTED> event id to reset
+to); a missing id or a bad C<reset_reapply_type> /
+C<reset_reapply_exclude_types> enum string raises
+L<Temporalio::Exception::Argument> before any RPC. C<reset_reapply_type> (the
+deprecated proto field) maps C<signal>/C<none>/C<all_eligible>;
+C<reset_reapply_exclude_types> maps C<signal>/C<update>/C<nexus>. Server errors
+map via spec section 7.5.
 
 =head2 execute_update / start_update
 

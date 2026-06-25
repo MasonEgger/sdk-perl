@@ -15,6 +15,7 @@ use Temporalio::Core::Callback ();
 use Temporalio::Core::FFI ();
 use Temporalio::Client::AsyncActivityHandle ();
 use Temporalio::Client::Connection ();
+use Temporalio::Client::HttpConnectProxyConfig ();
 use Temporalio::Client::KeepAliveConfig ();
 use Temporalio::Client::RetryConfig ();
 use Temporalio::Client::TlsConfig ();
@@ -114,6 +115,22 @@ class Temporalio::Client {
             run_id                 => $opts{run_id},
             first_execution_run_id => $opts{first_execution_run_id},
         );
+    }
+
+    # _build_reset_workflow_request($id, $run_id, %kwargs) — builds the same
+    # ResetWorkflowExecutionRequest as the handle helper, via a transient
+    # handle, without issuing any RPC (unit-testable). Spec section 30.1.
+    method _build_reset_workflow_request ($workflow_id, $run_id, %kwargs) {
+        my $handle = $self->get_workflow_handle($workflow_id, run_id => $run_id);
+        return $handle->_build_reset_request(%kwargs);
+    }
+
+    # reset_workflow($id, $run_id, %kwargs) — async (spec section 30.1): the
+    # client-level entry point for the reset helper; delegates to a handle.
+    # Returns the new run id.
+    async method reset_workflow ($workflow_id, $run_id, %kwargs) {
+        my $handle = $self->get_workflow_handle($workflow_id, run_id => $run_id);
+        return await $handle->reset(%kwargs);
     }
 
     # async_activity_handle(%kw) — keyword-union factory (spec section 22.1) for
@@ -755,6 +772,7 @@ class Temporalio::Client {
                           // Temporalio::Converter::Data->new;
         my $interceptors   = delete $options{interceptors} // [];
         my $lazy           = delete $options{lazy} // 0;
+        my $http_proxy     = delete $options{http_connect_proxy};
 
         if (my @unknown = sort keys %options) {
             Temporalio::Exception::Argument->throw(
@@ -777,6 +795,19 @@ class Temporalio::Client {
             // Temporalio::Client::RetryConfig->new;
         my $keep_alive_config = _coerce_config(
             keep_alive => $keep_alive, 'Temporalio::Client::KeepAliveConfig');
+        # http_connect_proxy: undef/0 -> no proxy; a hashref -> config (its
+        # ADJUST enforces target_host + the auth xor); an instance passes
+        # through. A bare truthy value (e.g. http_connect_proxy => 1) has no
+        # target_host, so reject it with an Argument before any RPC (spec 30.2)
+        # rather than letting `new` die on the missing required field.
+        if (defined $http_proxy && !ref $http_proxy) {
+            Temporalio::Exception::Argument->throw(
+                message => 'http_connect_proxy requires a target_host (pass a'
+                         . ' hashref { target_host => "host:port", ... } or a'
+                         . ' Temporalio::Client::HttpConnectProxyConfig)');
+        }
+        my $http_proxy_config = _coerce_config(http_connect_proxy => $http_proxy,
+            'Temporalio::Client::HttpConnectProxyConfig');
 
         # The bridge parses target_url as a URL; the scheme encodes the TLS
         # choice exactly as the reference SDKs do (sdk-python service.py).
@@ -829,7 +860,10 @@ class Temporalio::Client {
                 ? Temporalio::Core::FFI::keep_record(
                       \@keep, $keep_alive_config->to_ffi(\@keep))
                 : undef,
-            http_connect_proxy_options       => undef,
+            http_connect_proxy_options       => $http_proxy_config
+                ? Temporalio::Core::FFI::keep_record(
+                      \@keep, $http_proxy_config->to_ffi(\@keep))
+                : undef,
             grpc_override_callback           => undef,
             grpc_override_callback_user_data => undef,
             dns_load_balancing_options       => undef,
@@ -1036,6 +1070,16 @@ Async. Returns a L<Future> resolving to a L<Temporalio::Client::WorkflowExecutio
 =head2 namespace
 
 Accessor returning the C<namespace> value.
+
+=head2 reset_workflow
+
+    my $new_run_id = await $client->reset_workflow($workflow_id, $run_id, %kwargs);
+
+Async. Resets a workflow execution to an earlier workflow task and returns
+the new run id (spec section 30.1). A thin convenience over the raw
+C<ResetWorkflowExecution> RPC; delegates to
+L<Temporalio::Client::WorkflowHandle/reset>. C<workflow_task_finish_event_id>
+is required; see C<reset> for the accepted kwargs.
 
 =head2 runtime
 
