@@ -24,12 +24,21 @@ use Temporalio::Exception::Runtime ();
 use Temporalio::Exception::WorkflowAlreadyStarted ();
 use Temporalio::Exception::WorkflowNotFound ();
 use Temporalio::Runtime::LogForwardingConfig ();
+use Temporalio::Runtime::MetricMeter ();
 
 # Process-wide monotonic 64-bit callback id (spec section 4.5).
 my $NEXT_CALLBACK_ID = 1;
 
 # Entries popped per queue_drain call; the drain loop calls until 0.
 my $DRAIN_CAP = 256;
+
+# Aggregated meter records pulled per meter_drain_records call (spec section
+# 28.2); the drain loop calls until 0.
+my $METER_RECORD_CAP = 256;
+
+# sizeof(TemporalioPerlBridgeMeterRecord): the record-drain buffer's stride.
+my $METER_RECORD_SIZE = Temporalio::Core::FFI::ffi()
+    ->sizeof('record(Temporalio::Core::FFI::MeterRecord)');
 
 # sizeof(TemporalioPerlBridgeEntry): the drain buffer's per-slot stride.
 my $ENTRY_SIZE = Temporalio::Core::FFI::ffi()
@@ -317,6 +326,63 @@ class Temporalio::Core::Callback {
                     'opaque' => 'record(Temporalio::Core::FFI::CallbackEntry)*',
                     $entry_ptr);
                 $self->_complete($runtime, $entry, $entry_ptr);
+            }
+        }
+
+        # Service the custom-meter channels (spec section 28.2) on the same
+        # main-thread wakeup: first the marshalled create/free requests parked
+        # by off-core-thread callbacks (run the Perl method, post the result so
+        # the blocked core thread proceeds), then the aggregated record buckets.
+        if (defined Temporalio::Runtime::MetricMeter->active) {
+            _service_meter_requests();
+            _drain_meter_records();
+        }
+        return;
+    }
+
+    # Run every parked meter create/free request (spec section 28.2). The shim
+    # allocated each handle id and returned it to core synchronously; the
+    # request carries the id plus the create payload. meter_next_request pops
+    # the next request (an 8-byte tag slot, the request pointer as the return),
+    # the drain runs the Perl method (binding the id), then meter_free_request
+    # frees the request box. The shim never blocks waiting on this.
+    sub _service_meter_requests () {
+        my $ffi = Temporalio::Core::FFI::ffi();
+        # A 1-byte slot the shim writes the request tag into.
+        my $tag_slot = "\0";
+        my ($tag_ptr) = FFI::Platypus::Buffer::scalar_to_buffer($tag_slot);
+        while (1) {
+            my $request_ptr =
+                Temporalio::Core::FFI::meter_next_request($tag_ptr);
+            last unless defined $request_ptr && $request_ptr;
+            my $tag = unpack 'C', $tag_slot;
+            Temporalio::Runtime::MetricMeter->_run_request($tag, $request_ptr);
+            Temporalio::Core::FFI::meter_free_request($request_ptr);
+        }
+        return;
+    }
+
+    # Pull the shim's aggregated record buckets (spec section 28.2) and apply
+    # each to the active meter. The shim sums record_* on core threads; this
+    # drains snapshots on the main thread, never dropping a record.
+    sub _drain_meter_records () {
+        my $ffi    = Temporalio::Core::FFI::ffi();
+        my $buffer = "\0" x ($METER_RECORD_SIZE * $METER_RECORD_CAP);
+        my ($buffer_ptr) = FFI::Platypus::Buffer::scalar_to_buffer($buffer);
+        while ((my $count = Temporalio::Core::FFI::meter_drain_records(
+                    $buffer_ptr, $METER_RECORD_CAP)) > 0) {
+            for my $slot (0 .. $count - 1) {
+                my $record_ptr = $buffer_ptr + $slot * $METER_RECORD_SIZE;
+                my $record = $ffi->cast(
+                    'opaque' => 'record(Temporalio::Core::FFI::MeterRecord)*',
+                    $record_ptr);
+                Temporalio::Runtime::MetricMeter->_apply_record({
+                    metric_id     => scalar $record->metric_id,
+                    attributes_id => scalar $record->attributes_id,
+                    record_kind   => scalar $record->record_kind,
+                    value         => scalar $record->value,
+                    count         => scalar $record->count,
+                });
             }
         }
         return;

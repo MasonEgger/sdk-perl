@@ -415,6 +415,736 @@ pub unsafe extern "C" fn temporalio_perl_bridge_forwarded_log_free(
     }
 }
 
+// --- Custom metric meters (spec section 28.2) -------------------------------
+//
+// Core's `MetricsOptions.custom_meter` is a `TemporalCoreCustomMetricMeter`,
+// eight function pointers core invokes for every metric create and record. The
+// callbacks fire on ARBITRARY core threads with synchronous returns (header
+// :436-440), which collides with the "never touch Perl off the main thread"
+// rule. The resolution (spec section 28.2, hybrid):
+//
+//   * `metric_record_integer/float/duration` AGGREGATE in this shim — pure
+//     Rust, applied on the core thread with zero Perl contact. Records are
+//     bucketed by (metric id, attribute-set id) into a Rust table; the Perl
+//     meter pulls a snapshot on the main-thread drain (re-implementing the
+//     buffer the C header lacks, never dropping a record).
+//   * `metric_new`/`attributes_new`/`metric_free`/`attributes_free`/
+//     `meter_free` are MAIN-THREAD-MARSHALLED — they are rare and must run a
+//     Perl method. The trampoline parks a request, signals the fd, and blocks
+//     the core thread on a condvar until the Perl drain runs the method and
+//     posts the result back.
+//
+// Reentrancy spike (spec section 28.2, M3): the header does not exclude the
+// CALLING thread, so core can invoke `metric_new` synchronously while the main
+// thread is already inside a bridge FFI call (metric creation during worker
+// construction). If the marshalling path blocked on a condvar that only the
+// main-thread drain can satisfy, that would self-deadlock. The trampoline
+// therefore records the registering (main) thread id and, when a marshalled
+// callback fires ON that thread, runs the Perl request INLINE via a reentrant
+// callback supplied by Perl (no fd signal, no condvar). The aggregation path
+// is pure Rust and never at risk.
+
+/// Handle ids are non-zero so a returned `*const c_void` is never null (core
+/// treats a null metric/attributes handle as "disabled"). Zero is the sentinel
+/// for "Perl returned undef / disabled".
+fn id_to_handle(id: u64) -> *const c_void {
+    id as *const c_void
+}
+
+fn handle_to_id(h: *const c_void) -> u64 {
+    h as u64
+}
+
+/// Which marshalled meter request the drain must run. The Perl side switches on
+/// this tag; the body fields carry the request's payload (see `MeterRequest`).
+pub const TEMPORALIO_PERL_BRIDGE_METER_REQ_METRIC_NEW: u8 = 1;
+pub const TEMPORALIO_PERL_BRIDGE_METER_REQ_ATTRIBUTES_NEW: u8 = 2;
+pub const TEMPORALIO_PERL_BRIDGE_METER_REQ_METRIC_FREE: u8 = 3;
+pub const TEMPORALIO_PERL_BRIDGE_METER_REQ_ATTRIBUTES_FREE: u8 = 4;
+pub const TEMPORALIO_PERL_BRIDGE_METER_REQ_METER_FREE: u8 = 5;
+
+/// One decoded attribute, value tagged by `value_type` (1=String, 2=Int,
+/// 3=Float, 4=Bool — `TemporalCoreMetricAttributeValueType`). Owned `String`
+/// copies so the request outlives the core-borrowed attribute array.
+#[derive(Clone)]
+struct MeterAttribute {
+    key: String,
+    value_type: i32,
+    string_value: String,
+    int_value: i64,
+    float_value: f64,
+    bool_value: bool,
+}
+
+/// A parked create/free request the main-thread drain runs. For create requests
+/// (`metric_new`/`attributes_new`) the shim has already allocated `new_id` (the
+/// handle returned to core); the drain runs the Perl method and binds `new_id`
+/// to the resulting Perl object. For free requests `free_id` is the handle to
+/// release.
+struct MeterRequest {
+    tag: u8,
+    /// Shim-allocated handle id for create requests (0 for free requests).
+    new_id: u64,
+    // metric_new
+    name: String,
+    description: String,
+    unit: String,
+    kind: i32,
+    // attributes_new
+    append_from_id: u64,
+    attributes: Vec<MeterAttribute>,
+    // metric_free / attributes_free
+    free_id: u64,
+}
+
+/// One bucketed record snapshot the Perl meter pulls on drain: which metric and
+/// attribute set, the record kind (1=integer, 2=float, 3=duration), and the
+/// summed value. Floats and integers share `value` (f64) — integer/duration
+/// records sum as i64 but are widened for the single snapshot shape, which is
+/// exact for the magnitudes metrics produce.
+#[repr(C)]
+pub struct TemporalioPerlBridgeMeterRecord {
+    pub metric_id: u64,
+    pub attributes_id: u64,
+    /// 1 = integer, 2 = float, 3 = duration (ms).
+    pub record_kind: u8,
+    pub value: f64,
+    /// Number of record calls folded into `value` (for histogram/gauge the
+    /// Perl meter may want the count; counters only need the sum).
+    pub count: u64,
+}
+
+unsafe impl Send for TemporalioPerlBridgeMeterRecord {}
+
+/// The process-global custom-meter registry. One per runtime carrying a custom
+/// meter; the "only one custom meter" rule is enforced Perl-side (extended
+/// T-rt-4) and by the compare-and-set on `active`.
+///
+/// Resolved reentrancy design (spec section 28.2 spike, M3). The meter
+/// callbacks fire on arbitrary core threads — including, for `metric_new` /
+/// `attributes_new` during worker construction, the MAIN thread while it is
+/// already inside a bridge FFI call. Neither blocking on a main-thread drain
+/// (self-deadlock) nor calling Perl synchronously from the trampoline (nested
+/// FFI-closure re-entry corrupts libffi's state on repeated calls) is safe. The
+/// shim therefore NEVER blocks and NEVER calls Perl from a callback: it
+/// allocates the handle id ITSELF, parks a create/free request on a queue, and
+/// returns the id immediately. The main-thread drain later runs the Perl
+/// `create_metric`/`new_attributes`/free, binding the id to the Perl object.
+/// Records arriving before the bind aggregate under the id and apply once the
+/// bind lands (never dropped). This is thread-agnostic: the same path is
+/// correct on the main thread, a Tokio thread, or reentrantly.
+struct MeterRegistry {
+    /// Signals the runtime's wakeup fd when a request is parked so the
+    /// IO::Async drain runs. Borrowed; never freed here.
+    queue: *const TemporalioPerlBridgeQueue,
+    /// Monotonic handle-id source (metrics and attribute sets share the space;
+    /// ids are opaque to core, never null so a returned handle is never null).
+    next_id: std::sync::atomic::AtomicU64,
+    /// Parked create/free requests, drained on the main thread (FIFO).
+    requests: std::sync::Mutex<std::collections::VecDeque<MeterRequest>>,
+    /// Aggregation table: (metric id, attributes id) -> (kind, sum, count).
+    /// Pure Rust; written on core threads, drained on the main thread.
+    records: std::sync::Mutex<std::collections::HashMap<(u64, u64), (u8, f64, u64)>>,
+}
+
+unsafe impl Send for MeterRegistry {}
+unsafe impl Sync for MeterRegistry {}
+
+static METER_REGISTRY: AtomicPtr<MeterRegistry> = AtomicPtr::new(ptr::null_mut());
+static METER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+impl MeterRegistry {
+    /// Allocate a fresh non-null handle id.
+    fn alloc_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Park a create/free request and wake the drain. Never blocks, never calls
+    /// Perl. For create requests the caller has already filled `new_id`.
+    fn park(&self, req: MeterRequest) {
+        {
+            let mut q = self.requests.lock().unwrap();
+            q.push_back(req);
+        }
+        self.signal();
+    }
+
+    fn signal(&self) {
+        if self.queue.is_null() {
+            return;
+        }
+        // SAFETY: queue is a live borrow for the registry's lifetime.
+        unsafe { (*self.queue).signal() };
+    }
+
+    /// Fold one record into the aggregation table on the calling core thread.
+    fn record(&self, metric_id: u64, attributes_id: u64, record_kind: u8, value: f64) {
+        let mut table = self.records.lock().unwrap();
+        let entry = table
+            .entry((metric_id, attributes_id))
+            .or_insert((record_kind, 0.0, 0));
+        entry.0 = record_kind;
+        entry.1 += value;
+        entry.2 += 1;
+    }
+}
+
+fn meter_registry() -> Option<&'static MeterRegistry> {
+    let p = METER_REGISTRY.load(Ordering::Acquire);
+    if p.is_null() {
+        None
+    } else {
+        // SAFETY: a non-null registry pointer is a leaked Box live until
+        // unregister, which only the owning runtime calls after core is freed.
+        Some(unsafe { &*p })
+    }
+}
+
+/// Claim the process-global meter registry for `queue`. Returns true on
+/// success, false if a meter is already active (Perl raises Argument). The
+/// compare-and-set makes the claim race-free across concurrently constructed
+/// runtimes.
+///
+/// # Safety
+/// `queue` must be a live queue pointer for the registry's lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_register(
+    queue: *mut TemporalioPerlBridgeQueue,
+) -> bool {
+    if METER_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let registry = Box::new(MeterRegistry {
+        queue,
+        next_id: std::sync::atomic::AtomicU64::new(0),
+        requests: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        records: std::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+    METER_REGISTRY.store(Box::into_raw(registry), Ordering::Release);
+    true
+}
+
+/// Release the meter registry held by `queue` (no-op unless it is the active
+/// one). Called from `Runtime->shutdown` after the worker/runtime that drove
+/// the meter is gone, so no callback can still be in flight.
+///
+/// # Safety
+/// Must be called only after core has stopped invoking the meter callbacks.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_unregister(
+    queue: *mut TemporalioPerlBridgeQueue,
+) {
+    let p = METER_REGISTRY.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    if (*p).queue != queue {
+        return;
+    }
+    METER_REGISTRY.store(ptr::null_mut(), Ordering::Release);
+    drop(Box::from_raw(p));
+    METER_ACTIVE.store(false, Ordering::Release);
+}
+
+// The eight `TemporalCoreCustomMetricMeter` callbacks. The pointers are exposed
+// to Perl via the `*_callback_ptr` accessors below, packed into the meter
+// struct Perl hands to `MetricsOptions.custom_meter`.
+
+unsafe fn ref_to_string(r: &TemporalCoreByteArrayRef) -> String {
+    if r.data.is_null() || r.size == 0 {
+        String::new()
+    } else {
+        String::from_utf8_lossy(std::slice::from_raw_parts(r.data, r.size)).into_owned()
+    }
+}
+
+/// `metric_new`: allocate a handle id, park a create request for the main-thread
+/// drain (which runs the Perl `create_metric`), and return the id immediately.
+/// Never blocks, never calls Perl — safe on any thread including reentrantly on
+/// the main thread (spec section 28.2 spike resolution).
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_metric_new(
+    name: TemporalCoreByteArrayRef,
+    description: TemporalCoreByteArrayRef,
+    unit: TemporalCoreByteArrayRef,
+    kind: i32,
+) -> *const c_void {
+    let Some(reg) = meter_registry() else {
+        return ptr::null();
+    };
+    let id = reg.alloc_id();
+    reg.park(MeterRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_METER_REQ_METRIC_NEW,
+        new_id: id,
+        name: ref_to_string(&name),
+        description: ref_to_string(&description),
+        unit: ref_to_string(&unit),
+        kind,
+        append_from_id: 0,
+        attributes: Vec::new(),
+        free_id: 0,
+    });
+    id_to_handle(id)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_metric_free(metric: *const c_void) {
+    let Some(reg) = meter_registry() else { return };
+    reg.park(MeterRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_METER_REQ_METRIC_FREE,
+        new_id: 0,
+        name: String::new(),
+        description: String::new(),
+        unit: String::new(),
+        kind: 0,
+        append_from_id: 0,
+        attributes: Vec::new(),
+        free_id: handle_to_id(metric),
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_record_integer(
+    metric: *const c_void,
+    value: u64,
+    attributes: *const c_void,
+) {
+    let Some(reg) = meter_registry() else { return };
+    let metric_id = handle_to_id(metric);
+    if metric_id == 0 {
+        return; // disabled metric
+    }
+    reg.record(metric_id, handle_to_id(attributes), 1, value as f64);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_record_float(
+    metric: *const c_void,
+    value: f64,
+    attributes: *const c_void,
+) {
+    let Some(reg) = meter_registry() else { return };
+    let metric_id = handle_to_id(metric);
+    if metric_id == 0 {
+        return;
+    }
+    reg.record(metric_id, handle_to_id(attributes), 2, value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_record_duration(
+    metric: *const c_void,
+    value_ms: u64,
+    attributes: *const c_void,
+) {
+    let Some(reg) = meter_registry() else { return };
+    let metric_id = handle_to_id(metric);
+    if metric_id == 0 {
+        return;
+    }
+    reg.record(metric_id, handle_to_id(attributes), 3, value_ms as f64);
+}
+
+/// `attributes_new`: decode the borrowed attribute array into owned copies,
+/// allocate a handle id, park a create request, and return the id immediately
+/// (the main-thread drain runs the Perl `new_attributes`). `append_from` is a
+/// prior attributes handle (0/null = none). Never blocks, never calls Perl.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_attributes_new(
+    append_from: *const c_void,
+    attributes: *const TemporalCoreCustomMetricAttribute,
+    attributes_size: usize,
+) -> *const c_void {
+    let Some(reg) = meter_registry() else {
+        return ptr::null();
+    };
+    let mut decoded = Vec::with_capacity(attributes_size);
+    if !attributes.is_null() {
+        for i in 0..attributes_size {
+            let a = &*attributes.add(i);
+            let mut attr = MeterAttribute {
+                key: ref_to_string(&a.key),
+                value_type: a.value_type,
+                string_value: String::new(),
+                int_value: 0,
+                float_value: 0.0,
+                bool_value: false,
+            };
+            match a.value_type {
+                1 => {
+                    let s = &a.value.string_value;
+                    attr.string_value = if s.data.is_null() || s.size == 0 {
+                        String::new()
+                    } else {
+                        String::from_utf8_lossy(std::slice::from_raw_parts(s.data, s.size))
+                            .into_owned()
+                    };
+                }
+                2 => attr.int_value = a.value.int_value,
+                3 => attr.float_value = a.value.float_value,
+                4 => attr.bool_value = a.value.bool_value,
+                _ => {}
+            }
+            decoded.push(attr);
+        }
+    }
+    let id = reg.alloc_id();
+    reg.park(MeterRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_METER_REQ_ATTRIBUTES_NEW,
+        new_id: id,
+        name: String::new(),
+        description: String::new(),
+        unit: String::new(),
+        kind: 0,
+        append_from_id: handle_to_id(append_from),
+        attributes: decoded,
+        free_id: 0,
+    });
+    id_to_handle(id)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_attributes_free(attributes: *const c_void) {
+    let Some(reg) = meter_registry() else { return };
+    reg.park(MeterRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_METER_REQ_ATTRIBUTES_FREE,
+        new_id: 0,
+        name: String::new(),
+        description: String::new(),
+        unit: String::new(),
+        kind: 0,
+        append_from_id: 0,
+        attributes: Vec::new(),
+        free_id: handle_to_id(attributes),
+    });
+}
+
+/// `meter_free`: per the header the custom meter "is freed by a callback within
+/// itself". Parked so the Perl meter can release per-meter state on the drain.
+/// The `meter` argument is the core meter struct pointer (unused — Perl owns its
+/// own meter object via the registry).
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_meter_free(_meter: *const c_void) {
+    let Some(reg) = meter_registry() else { return };
+    reg.park(MeterRequest {
+        tag: TEMPORALIO_PERL_BRIDGE_METER_REQ_METER_FREE,
+        new_id: 0,
+        name: String::new(),
+        description: String::new(),
+        unit: String::new(),
+        kind: 0,
+        append_from_id: 0,
+        attributes: Vec::new(),
+        free_id: 0,
+    });
+}
+
+// --- main-thread drain of parked create/free requests -----------------------
+
+/// Pop the next parked create/free request into a heap box and return a raw
+/// pointer to it (null if the queue is empty). The Perl drain reads the
+/// request's fields via the `req_*` accessors, runs the Perl method, then frees
+/// the box with `temporalio_perl_bridge_meter_free_request`. Returns the tag via
+/// `*out_tag`.
+///
+/// # Safety
+/// `out_tag` must be a writable `u8` slot.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_next_request(out_tag: *mut u8) -> *const c_void {
+    let Some(reg) = meter_registry() else {
+        return ptr::null();
+    };
+    let req = {
+        let mut q = reg.requests.lock().unwrap();
+        q.pop_front()
+    };
+    match req {
+        None => ptr::null(),
+        Some(req) => {
+            if !out_tag.is_null() {
+                *out_tag = req.tag;
+            }
+            Box::into_raw(Box::new(req)).cast::<c_void>()
+        }
+    }
+}
+
+/// Free a request box returned by `temporalio_perl_bridge_meter_next_request`
+/// once the Perl drain has read its fields.
+///
+/// # Safety
+/// `request` must be a pointer from `meter_next_request`, not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_free_request(request: *const c_void) {
+    if !request.is_null() {
+        drop(Box::from_raw(request.cast::<MeterRequest>().cast_mut()));
+    }
+}
+
+// Request field accessors (read by the Perl drain).
+
+unsafe fn req_ref<'a>(request: *const c_void) -> &'a MeterRequest {
+    &*request.cast::<MeterRequest>()
+}
+
+/// The shim-allocated handle id for a create request (metric_new/attributes_new).
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_new_id(request: *const c_void) -> u64 {
+    req_ref(request).new_id
+}
+
+/// metric_new name (borrowed; valid only while the request is parked).
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_name(
+    request: *const c_void,
+) -> ForwardedLogByteArrayRef {
+    let s = &req_ref(request).name;
+    ForwardedLogByteArrayRef {
+        data: s.as_ptr(),
+        size: s.len(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_description(
+    request: *const c_void,
+) -> ForwardedLogByteArrayRef {
+    let s = &req_ref(request).description;
+    ForwardedLogByteArrayRef {
+        data: s.as_ptr(),
+        size: s.len(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_unit(
+    request: *const c_void,
+) -> ForwardedLogByteArrayRef {
+    let s = &req_ref(request).unit;
+    ForwardedLogByteArrayRef {
+        data: s.as_ptr(),
+        size: s.len(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_kind(request: *const c_void) -> i32 {
+    req_ref(request).kind
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_free_id(request: *const c_void) -> u64 {
+    req_ref(request).free_id
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_append_from_id(
+    request: *const c_void,
+) -> u64 {
+    req_ref(request).append_from_id
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_attr_count(request: *const c_void) -> usize {
+    req_ref(request).attributes.len()
+}
+
+/// attribute key at index `i` (borrowed).
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_attr_key(
+    request: *const c_void,
+    i: usize,
+) -> ForwardedLogByteArrayRef {
+    let attrs = &req_ref(request).attributes;
+    if i >= attrs.len() {
+        return ForwardedLogByteArrayRef {
+            data: ptr::null(),
+            size: 0,
+        };
+    }
+    let s = &attrs[i].key;
+    ForwardedLogByteArrayRef {
+        data: s.as_ptr(),
+        size: s.len(),
+    }
+}
+
+/// attribute value type at index `i` (1=String,2=Int,3=Float,4=Bool), 0 if out
+/// of range.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_attr_value_type(
+    request: *const c_void,
+    i: usize,
+) -> i32 {
+    let attrs = &req_ref(request).attributes;
+    if i >= attrs.len() {
+        return 0;
+    }
+    attrs[i].value_type
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_attr_string(
+    request: *const c_void,
+    i: usize,
+) -> ForwardedLogByteArrayRef {
+    let attrs = &req_ref(request).attributes;
+    if i >= attrs.len() {
+        return ForwardedLogByteArrayRef {
+            data: ptr::null(),
+            size: 0,
+        };
+    }
+    let s = &attrs[i].string_value;
+    ForwardedLogByteArrayRef {
+        data: s.as_ptr(),
+        size: s.len(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_attr_int(
+    request: *const c_void,
+    i: usize,
+) -> i64 {
+    let attrs = &req_ref(request).attributes;
+    if i >= attrs.len() {
+        return 0;
+    }
+    attrs[i].int_value
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_attr_float(
+    request: *const c_void,
+    i: usize,
+) -> f64 {
+    let attrs = &req_ref(request).attributes;
+    if i >= attrs.len() {
+        return 0.0;
+    }
+    attrs[i].float_value
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_req_attr_bool(
+    request: *const c_void,
+    i: usize,
+) -> bool {
+    let attrs = &req_ref(request).attributes;
+    if i >= attrs.len() {
+        return false;
+    }
+    attrs[i].bool_value
+}
+
+/// Drain the aggregation table into `out_buf` (up to `out_buf_capacity`
+/// records), clearing what is drained. Returns the count written. Call in a
+/// loop until it returns 0. The Perl meter applies each record to its own
+/// counters/histograms/gauges.
+///
+/// # Safety
+/// `out_buf` must point to at least `out_buf_capacity` writable record slots.
+#[no_mangle]
+pub unsafe extern "C" fn temporalio_perl_bridge_meter_drain_records(
+    out_buf: *mut TemporalioPerlBridgeMeterRecord,
+    out_buf_capacity: usize,
+) -> usize {
+    if out_buf.is_null() || out_buf_capacity == 0 {
+        return 0;
+    }
+    let Some(reg) = meter_registry() else {
+        return 0;
+    };
+    let mut table = reg.records.lock().unwrap();
+    let mut n = 0;
+    let keys: Vec<(u64, u64)> = table.keys().copied().take(out_buf_capacity).collect();
+    for key in keys {
+        let (record_kind, value, count) = table.remove(&key).unwrap();
+        out_buf.add(n).write(TemporalioPerlBridgeMeterRecord {
+            metric_id: key.0,
+            attributes_id: key.1,
+            record_kind,
+            value,
+            count,
+        });
+        n += 1;
+    }
+    n
+}
+
+// Pointer accessors for the eight meter callbacks, packed into the
+// `TemporalCoreCustomMetricMeter` struct Perl builds for `custom_meter`.
+
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_meter_metric_new_ptr() -> *mut c_void {
+    temporalio_perl_bridge_meter_metric_new as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_meter_metric_free_ptr() -> *mut c_void {
+    temporalio_perl_bridge_meter_metric_free as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_meter_record_integer_ptr() -> *mut c_void {
+    temporalio_perl_bridge_meter_record_integer as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_meter_record_float_ptr() -> *mut c_void {
+    temporalio_perl_bridge_meter_record_float as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_meter_record_duration_ptr() -> *mut c_void {
+    temporalio_perl_bridge_meter_record_duration as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_meter_attributes_new_ptr() -> *mut c_void {
+    temporalio_perl_bridge_meter_attributes_new as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_meter_attributes_free_ptr() -> *mut c_void {
+    temporalio_perl_bridge_meter_attributes_free as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn temporalio_perl_bridge_meter_meter_free_ptr() -> *mut c_void {
+    temporalio_perl_bridge_meter_meter_free as *mut c_void
+}
+
+// The custom-metric attribute types core passes to `attributes_new`. Mirrors
+// `TemporalCoreCustomMetricAttribute*` from temporal-sdk-core-c-bridge.h (the
+// shim parses them; cbindgen excludes them so the header carries no conflicting
+// definition).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TemporalCoreCustomMetricAttributeValueString {
+    pub data: *const u8,
+    pub size: usize,
+}
+
+#[repr(C)]
+pub union TemporalCoreCustomMetricAttributeValue {
+    pub string_value: TemporalCoreCustomMetricAttributeValueString,
+    pub int_value: i64,
+    pub float_value: f64,
+    pub bool_value: bool,
+}
+
+#[repr(C)]
+pub struct TemporalCoreCustomMetricAttribute {
+    pub key: TemporalCoreByteArrayRef,
+    pub value: TemporalCoreCustomMetricAttributeValue,
+    pub value_type: i32,
+}
+
 /// Allocate a queue signalling `signal_fd` (eventfd, or pipe write-end as
 /// the portable fallback — detected via fstat). The fd must be non-blocking;
 /// the queue borrows it and never closes it.
@@ -1428,6 +2158,26 @@ mod tests {
             "temporalio_perl_bridge_forwarded_log_free",
             "temporalio_perl_bridge_forwarding_register",
             "temporalio_perl_bridge_forwarding_unregister",
+            // Custom metric meter (spec section 28.2).
+            "temporalio_perl_bridge_meter_register",
+            "temporalio_perl_bridge_meter_unregister",
+            "temporalio_perl_bridge_meter_metric_new_ptr",
+            "temporalio_perl_bridge_meter_metric_free_ptr",
+            "temporalio_perl_bridge_meter_record_integer_ptr",
+            "temporalio_perl_bridge_meter_record_float_ptr",
+            "temporalio_perl_bridge_meter_record_duration_ptr",
+            "temporalio_perl_bridge_meter_attributes_new_ptr",
+            "temporalio_perl_bridge_meter_attributes_free_ptr",
+            "temporalio_perl_bridge_meter_meter_free_ptr",
+            "temporalio_perl_bridge_meter_next_request",
+            "temporalio_perl_bridge_meter_free_request",
+            "temporalio_perl_bridge_meter_drain_records",
+            "temporalio_perl_bridge_meter_req_name",
+            "temporalio_perl_bridge_meter_req_kind",
+            "temporalio_perl_bridge_meter_req_new_id",
+            "temporalio_perl_bridge_meter_req_free_id",
+            "temporalio_perl_bridge_meter_req_attr_count",
+            "TemporalioPerlBridgeMeterRecord",
         ] {
             assert!(header.contains(sym), "header missing {sym}");
         }
@@ -1949,5 +2699,301 @@ storage_drivers=[]
         let log_ptr = (&*log as *const TestForwardedLog).cast::<TemporalCoreForwardedLog>();
         // Must not crash; nothing is queued.
         unsafe { temporalio_perl_bridge_forwarded_log_callback(0, log_ptr) };
+    }
+
+    // ---- P10.4 / spec section 28.2: custom metric meters -------------------
+    //
+    // The meter registry is a single process-global, so the meter tests
+    // serialize on this lock (cargo runs tests on multiple threads).
+    static METER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn register_test_meter(q: *mut TemporalioPerlBridgeQueue) -> bool {
+        unsafe { temporalio_perl_bridge_meter_register(q) }
+    }
+
+    unsafe fn unregister_and_free(q: *mut TemporalioPerlBridgeQueue, r: i32, w: i32) {
+        temporalio_perl_bridge_meter_unregister(q);
+        temporalio_perl_bridge_queue_free(q);
+        libc::close(r);
+        libc::close(w);
+    }
+
+    fn zeroed_meter_records(n: usize) -> Vec<TemporalioPerlBridgeMeterRecord> {
+        (0..n)
+            .map(|_| TemporalioPerlBridgeMeterRecord {
+                metric_id: 0,
+                attributes_id: 0,
+                record_kind: 0,
+                value: 0.0,
+                count: 0,
+            })
+            .collect()
+    }
+
+    fn baref_str(s: &str) -> TemporalCoreByteArrayRef {
+        TemporalCoreByteArrayRef { data: s.as_ptr(), size: s.len() }
+    }
+
+    // Spike resolution (spec section 28.2, M3): metric_new never blocks and
+    // never calls Perl — it allocates a handle id and PARKS a create request
+    // for the main-thread drain, returning the id immediately. This is correct
+    // on any thread (including reentrantly on the main thread), avoiding both
+    // self-deadlock and nested FFI re-entry.
+    #[test]
+    fn t_meter_metric_new_parks_request_returns_id_nonblocking() {
+        let _guard = METER_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(register_test_meter(q));
+        let h1 = unsafe {
+            temporalio_perl_bridge_meter_metric_new(
+                baref_str("temporal_requests"),
+                baref_str(""),
+                baref_str("requests"),
+                1,
+            )
+        };
+        let h2 = unsafe {
+            temporalio_perl_bridge_meter_metric_new(
+                baref_str("other"),
+                baref_str(""),
+                baref_str(""),
+                5,
+            )
+        };
+        // Distinct, non-null handle ids returned without any drain having run.
+        assert!(handle_to_id(h1) != 0 && handle_to_id(h2) != 0);
+        assert_ne!(handle_to_id(h1), handle_to_id(h2));
+        // Two create requests are parked for the drain; pop and inspect them.
+        let mut tag = 0u8;
+        let req = unsafe { temporalio_perl_bridge_meter_next_request(&mut tag) };
+        assert_eq!(tag, TEMPORALIO_PERL_BRIDGE_METER_REQ_METRIC_NEW);
+        assert_eq!(unsafe { temporalio_perl_bridge_meter_req_new_id(req) }, handle_to_id(h1));
+        let name = unsafe { temporalio_perl_bridge_meter_req_name(req) };
+        let s = unsafe {
+            std::str::from_utf8(std::slice::from_raw_parts(name.data, name.size)).unwrap()
+        };
+        assert_eq!(s, "temporal_requests");
+        assert_eq!(unsafe { temporalio_perl_bridge_meter_req_kind(req) }, 1);
+        unsafe { temporalio_perl_bridge_meter_free_request(req) };
+        // Second request.
+        let req2 = unsafe { temporalio_perl_bridge_meter_next_request(&mut tag) };
+        assert!(!req2.is_null());
+        assert_eq!(unsafe { temporalio_perl_bridge_meter_req_new_id(req2) }, handle_to_id(h2));
+        unsafe { temporalio_perl_bridge_meter_free_request(req2) };
+        // Queue now empty.
+        assert!(unsafe { temporalio_perl_bridge_meter_next_request(&mut tag) }.is_null());
+        unsafe { unregister_and_free(q, r, w) };
+    }
+
+    // T-meter-7: 8 threads each record 1000 integer values on the same metric;
+    // the shim aggregation sums them EXACTLY, with zero Perl contact (records
+    // are pure Rust — no request is ever parked by record_*).
+    #[test]
+    fn t_meter_7_eight_thread_record_aggregates_exactly_no_perl_call() {
+        let _guard = METER_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(register_test_meter(q));
+        let metric_addr = id_to_handle(7) as usize;
+        let attrs_addr = id_to_handle(3) as usize;
+        let mut handles = Vec::new();
+        for _ in 0..8u64 {
+            handles.push(std::thread::spawn(move || {
+                let metric = metric_addr as *const c_void;
+                let attrs = attrs_addr as *const c_void;
+                for _ in 0..1000u64 {
+                    unsafe {
+                        temporalio_perl_bridge_meter_record_integer(metric, 1, attrs);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // record_* never parks a request (pure Rust, off-main-thread safe).
+        let mut tag = 0u8;
+        assert!(unsafe { temporalio_perl_bridge_meter_next_request(&mut tag) }.is_null());
+        // Drain the aggregation: one bucket (7,3) summing to 8000, count 8000.
+        let mut buf = zeroed_meter_records(16);
+        let n = unsafe {
+            temporalio_perl_bridge_meter_drain_records(buf.as_mut_ptr(), buf.len())
+        };
+        assert_eq!(n, 1, "one aggregation bucket");
+        assert_eq!(buf[0].metric_id, 7);
+        assert_eq!(buf[0].attributes_id, 3);
+        assert_eq!(buf[0].record_kind, 1);
+        assert_eq!(buf[0].value, 8000.0, "8 threads x 1000 x 1 summed exactly");
+        assert_eq!(buf[0].count, 8000);
+        // A second drain is empty (records cleared).
+        let n2 = unsafe {
+            temporalio_perl_bridge_meter_drain_records(buf.as_mut_ptr(), buf.len())
+        };
+        assert_eq!(n2, 0);
+        unsafe { unregister_and_free(q, r, w) };
+    }
+
+    // record kinds x value types fold into distinct buckets per record_kind.
+    #[test]
+    fn t_meter_record_kinds_bucket_by_kind() {
+        let _guard = METER_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(register_test_meter(q));
+        let a = id_to_handle(0); // null attrs
+        unsafe {
+            temporalio_perl_bridge_meter_record_integer(id_to_handle(1), 5, a);
+            temporalio_perl_bridge_meter_record_float(id_to_handle(2), 2.5, a);
+            temporalio_perl_bridge_meter_record_duration(id_to_handle(3), 100, a);
+        }
+        let mut buf = zeroed_meter_records(8);
+        let n = unsafe {
+            temporalio_perl_bridge_meter_drain_records(buf.as_mut_ptr(), buf.len())
+        };
+        assert_eq!(n, 3, "three distinct metric buckets");
+        let mut by_kind: std::collections::HashMap<u8, f64> = std::collections::HashMap::new();
+        for rec in &buf[..n] {
+            by_kind.insert(rec.record_kind, rec.value);
+        }
+        assert_eq!(by_kind[&1], 5.0);
+        assert_eq!(by_kind[&2], 2.5);
+        assert_eq!(by_kind[&3], 100.0);
+        unsafe { unregister_and_free(q, r, w) };
+    }
+
+    // A null/zero metric handle (Perl will return undef from create_metric)
+    // drops the record — nothing aggregates under id 0.
+    #[test]
+    fn t_meter_null_metric_drops_record() {
+        let _guard = METER_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(register_test_meter(q));
+        unsafe {
+            temporalio_perl_bridge_meter_record_integer(ptr::null(), 9, ptr::null());
+        }
+        let mut buf = zeroed_meter_records(4);
+        let n = unsafe {
+            temporalio_perl_bridge_meter_drain_records(buf.as_mut_ptr(), buf.len())
+        };
+        assert_eq!(n, 0, "a disabled (null) metric records nothing");
+        unsafe { unregister_and_free(q, r, w) };
+    }
+
+    // attributes_new decodes the borrowed attribute array into owned copies the
+    // drain reads (string/int/float/bool, incl. value types).
+    #[test]
+    fn t_meter_attributes_new_decodes_value_types() {
+        let _guard = METER_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(register_test_meter(q));
+        let (val_s, key_s, key_i, key_f, key_b) =
+            ("node-1", "host", "count", "ratio", "ok");
+        let attrs = [
+            TemporalCoreCustomMetricAttribute {
+                key: baref_str(key_s),
+                value: TemporalCoreCustomMetricAttributeValue {
+                    string_value: TemporalCoreCustomMetricAttributeValueString {
+                        data: val_s.as_ptr(),
+                        size: val_s.len(),
+                    },
+                },
+                value_type: 1,
+            },
+            TemporalCoreCustomMetricAttribute {
+                key: baref_str(key_i),
+                value: TemporalCoreCustomMetricAttributeValue { int_value: 42 },
+                value_type: 2,
+            },
+            TemporalCoreCustomMetricAttribute {
+                key: baref_str(key_f),
+                value: TemporalCoreCustomMetricAttributeValue { float_value: 0.5 },
+                value_type: 3,
+            },
+            TemporalCoreCustomMetricAttribute {
+                key: baref_str(key_b),
+                value: TemporalCoreCustomMetricAttributeValue { bool_value: true },
+                value_type: 4,
+            },
+        ];
+        let h = unsafe {
+            temporalio_perl_bridge_meter_attributes_new(ptr::null(), attrs.as_ptr(), attrs.len())
+        };
+        assert!(handle_to_id(h) != 0);
+        // Pop the parked request and verify the decoded attributes.
+        let mut tag = 0u8;
+        let req = unsafe { temporalio_perl_bridge_meter_next_request(&mut tag) };
+        assert_eq!(tag, TEMPORALIO_PERL_BRIDGE_METER_REQ_ATTRIBUTES_NEW);
+        assert_eq!(unsafe { temporalio_perl_bridge_meter_req_attr_count(req) }, 4);
+        assert_eq!(unsafe { temporalio_perl_bridge_meter_req_attr_value_type(req, 0) }, 1);
+        let sv = unsafe { temporalio_perl_bridge_meter_req_attr_string(req, 0) };
+        let s = unsafe {
+            std::str::from_utf8(std::slice::from_raw_parts(sv.data, sv.size)).unwrap()
+        };
+        assert_eq!(s, "node-1");
+        assert_eq!(unsafe { temporalio_perl_bridge_meter_req_attr_int(req, 1) }, 42);
+        assert_eq!(unsafe { temporalio_perl_bridge_meter_req_attr_float(req, 2) }, 0.5);
+        assert!(unsafe { temporalio_perl_bridge_meter_req_attr_bool(req, 3) });
+        unsafe { temporalio_perl_bridge_meter_free_request(req) };
+        unsafe { unregister_and_free(q, r, w) };
+    }
+
+    // A second runtime requesting a meter while one is active is refused (Perl
+    // turns false into Argument); unregister frees the slot.
+    #[test]
+    fn t_meter_register_is_single_owner() {
+        let _guard = METER_TEST_LOCK.lock().unwrap();
+        let (r1, w1) = nonblocking_pipe();
+        let (r2, w2) = nonblocking_pipe();
+        let q1 = temporalio_perl_bridge_queue_new(w1);
+        let q2 = temporalio_perl_bridge_queue_new(w2);
+        assert!(register_test_meter(q1));
+        assert!(!register_test_meter(q2), "second meter refused while one active");
+        unsafe { temporalio_perl_bridge_meter_unregister(q2) }; // non-owner no-op
+        assert!(!register_test_meter(q2), "still held by q1");
+        unsafe { temporalio_perl_bridge_meter_unregister(q1) };
+        assert!(register_test_meter(q2), "free after q1 unregisters");
+        unsafe {
+            temporalio_perl_bridge_meter_unregister(q2);
+            temporalio_perl_bridge_queue_free(q1);
+            temporalio_perl_bridge_queue_free(q2);
+            libc::close(r1);
+            libc::close(w1);
+            libc::close(r2);
+            libc::close(w2);
+        }
+    }
+
+    // Off-main-thread metric_new: identical path (park + return id, no block),
+    // proving the design is thread-agnostic. The worker thread gets its id and
+    // the request is queued for the drain.
+    #[test]
+    fn t_meter_off_thread_metric_new_parks_too() {
+        let _guard = METER_TEST_LOCK.lock().unwrap();
+        let (r, w) = nonblocking_pipe();
+        let q = temporalio_perl_bridge_queue_new(w);
+        assert!(register_test_meter(q));
+        let worker = std::thread::spawn(move || {
+            let name = "off_thread_metric";
+            let h = unsafe {
+                temporalio_perl_bridge_meter_metric_new(
+                    TemporalCoreByteArrayRef { data: name.as_ptr(), size: name.len() },
+                    TemporalCoreByteArrayRef { data: ptr::null(), size: 0 },
+                    TemporalCoreByteArrayRef { data: ptr::null(), size: 0 },
+                    1,
+                )
+            };
+            handle_to_id(h)
+        });
+        let id = worker.join().unwrap();
+        assert!(id != 0, "off-thread metric_new returns a handle id");
+        let mut tag = 0u8;
+        let req = unsafe { temporalio_perl_bridge_meter_next_request(&mut tag) };
+        assert_eq!(tag, TEMPORALIO_PERL_BRIDGE_METER_REQ_METRIC_NEW);
+        assert_eq!(unsafe { temporalio_perl_bridge_meter_req_new_id(req) }, id);
+        unsafe { temporalio_perl_bridge_meter_free_request(req) };
+        unsafe { unregister_and_free(q, r, w) };
     }
 }

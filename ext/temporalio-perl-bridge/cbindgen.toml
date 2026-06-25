@@ -17,7 +17,8 @@ after_includes = """
 typedef struct TemporalCoreByteArray TemporalCoreByteArray;
 typedef struct TemporalCoreConnection TemporalCoreConnection;
 typedef struct TemporalCoreEphemeralServer TemporalCoreEphemeralServer;
-typedef struct TemporalCoreWorkerOptions TemporalCoreWorkerOptions;"""
+typedef struct TemporalCoreWorkerOptions TemporalCoreWorkerOptions;
+typedef struct TemporalCoreCustomMetricAttribute TemporalCoreCustomMetricAttribute;"""
 
 [export]
 exclude = [
@@ -44,4 +45,9 @@ exclude = [
   "TemporalCorePollerBehaviorAutoscaling",
   "TemporalCorePollerBehavior",
   "TemporalCoreWorkerOptions",
+  # Custom-metric attribute types (spec section 28.2) — defined by the core
+  # bridge header; the shim only parses them, so the header must not redefine.
+  "TemporalCoreCustomMetricAttributeValueString",
+  "TemporalCoreCustomMetricAttributeValue",
+  "TemporalCoreCustomMetricAttribute",
 ]

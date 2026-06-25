@@ -372,9 +372,9 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P10.3.3 Verify: cargo test && prove -lj4 t
 
 ### P10.4 Custom metric meters (spec §28.2)
-- [ ] P10.4.1 RED: cargo test (8-thread aggregate) + sdk/t/unit/metric_meter.t + sdk/t/integration/metrics.t (T-meter-1..10)
-- [ ] P10.4.2 GREEN: Runtime/MetricMeter + TelemetryConfig custom_meter to_ffi + shim 8-callback set (aggregate record_*, marshal create/free)
-- [ ] P10.4.3 Verify: cargo test && prove -lj4 t
+- [x] P10.4.1 RED: cargo test (8-thread aggregate) + sdk/t/unit/metric_meter.t + sdk/t/integration/metrics.t (T-meter-1..10)
+- [x] P10.4.2 GREEN: Runtime/MetricMeter + TelemetryConfig custom_meter to_ffi + shim 8-callback set (aggregate record_*, marshal create/free)
+- [x] P10.4.3 Verify: cargo test && prove -lj4 t
 
 ### P10.5 Worker versioning (spec §29.1)
 - [ ] P10.5.1 RED: sdk/t/unit/worker_versioning.t + sdk/t/integration/deployment_versioning.t (T-wkrver-1..9; 6-9 = override/ramp/legacy, gated/skip)

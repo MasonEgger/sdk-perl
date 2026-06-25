@@ -299,6 +299,40 @@ package Temporalio::Core::FFI::MetricsOptions {
     );
 }
 
+package Temporalio::Core::FFI::CustomMetricMeter {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreCustomMetricMeter (spec section 28.2): eight function
+    # pointers core invokes for every metric create/record. We fill each with a
+    # shim trampoline pointer (the shim aggregates records and main-thread-
+    # marshals create/free). Held BY POINTER as MetricsOptions.custom_meter.
+    record_layout_1(
+        opaque => 'metric_new',
+        opaque => 'metric_free',
+        opaque => 'metric_record_integer',
+        opaque => 'metric_record_float',
+        opaque => 'metric_record_duration',
+        opaque => 'attributes_new',
+        opaque => 'attributes_free',
+        opaque => 'meter_free',
+    );
+}
+
+package Temporalio::Core::FFI::MeterRecord {
+    use FFI::Platypus::Record;
+    # struct TemporalioPerlBridgeMeterRecord (temporalio-perl-bridge.h): one
+    # drained aggregation bucket. record_layout_1 inserts the same padding as
+    # the C repr(C) layout (metric_id 0, attributes_id 8, record_kind 16 + 7
+    # pad, value 24, count 32, sizeof 40) so casting buffer + i * sizeof views
+    # slot i. Only ever handled BY POINTER into the record-drain buffer.
+    record_layout_1(
+        uint64 => 'metric_id',
+        uint64 => 'attributes_id',
+        uint8  => 'record_kind',
+        double => 'value',
+        uint64 => 'count',
+    );
+}
+
 package Temporalio::Core::FFI::TelemetryOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreTelemetryOptions
@@ -393,6 +427,7 @@ $ffi->type('record(Temporalio::Core::FFI::LoggingOptions)'       => 'TemporalCor
 $ffi->type('record(Temporalio::Core::FFI::OpenTelemetryOptions)' => 'TemporalCoreOpenTelemetryOptions');
 $ffi->type('record(Temporalio::Core::FFI::PrometheusOptions)'    => 'TemporalCorePrometheusOptions');
 $ffi->type('record(Temporalio::Core::FFI::MetricsOptions)'       => 'TemporalCoreMetricsOptions');
+$ffi->type('record(Temporalio::Core::FFI::CustomMetricMeter)'    => 'TemporalCoreCustomMetricMeter');
 $ffi->type('record(Temporalio::Core::FFI::TelemetryOptions)'     => 'TemporalCoreTelemetryOptions');
 $ffi->type('record(Temporalio::Core::FFI::RuntimeOptions)'       => 'TemporalCoreRuntimeOptions');
 $ffi->type('record(Temporalio::Core::FFI::RuntimeOrFail)'        => 'TemporalCoreRuntimeOrFail');
@@ -618,6 +653,74 @@ my @phase0_attach = (
       [] => 'opaque' ],
     [ temporalio_perl_bridge_forwarded_log_free => 'forwarded_log_free',
       [ 'opaque' ] => 'void' ],
+    # Custom metric meters (spec section 28.2). Like log forwarding, the eight
+    # TemporalCoreCustomMetricMeter callbacks route via a process-global
+    # registry (only one runtime may carry a custom meter). meter_register
+    # claims it for a queue (false if a second meter is active -> Argument).
+    # The eight *_ptr accessors return the callback addresses Perl packs into
+    # the TemporalCoreCustomMetricMeter. The shim aggregates record_* in pure
+    # Rust; meter_drain_records pulls accumulated buckets on the main-thread
+    # drain. metric_new/attributes_new/*_free NEVER block and NEVER call Perl
+    # from the callback (the spike resolution: nested FFI re-entry would corrupt
+    # libffi on repeated calls, and blocking on a main-thread drain would
+    # self-deadlock): the shim allocates the handle id itself, returns it
+    # immediately, and parks a request the drain runs. meter_next_request pops
+    # the next parked request (read its fields via req_*), and
+    # meter_free_request frees it after the drain runs the Perl method.
+    [ temporalio_perl_bridge_meter_register => 'meter_register',
+      [ 'TemporalioPerlBridgeQueue' ] => 'bool' ],
+    [ temporalio_perl_bridge_meter_unregister => 'meter_unregister',
+      [ 'TemporalioPerlBridgeQueue' ] => 'void' ],
+    [ temporalio_perl_bridge_meter_metric_new_ptr => 'meter_metric_new_ptr',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_meter_metric_free_ptr => 'meter_metric_free_ptr',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_meter_record_integer_ptr => 'meter_record_integer_ptr',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_meter_record_float_ptr => 'meter_record_float_ptr',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_meter_record_duration_ptr => 'meter_record_duration_ptr',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_meter_attributes_new_ptr => 'meter_attributes_new_ptr',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_meter_attributes_free_ptr => 'meter_attributes_free_ptr',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_meter_meter_free_ptr => 'meter_meter_free_ptr',
+      [] => 'opaque' ],
+    [ temporalio_perl_bridge_meter_next_request => 'meter_next_request',
+      [ 'opaque' ] => 'opaque' ],
+    [ temporalio_perl_bridge_meter_free_request => 'meter_free_request',
+      [ 'opaque' ] => 'void' ],
+    [ temporalio_perl_bridge_meter_drain_records => 'meter_drain_records',
+      [ 'opaque', 'size_t' ] => 'size_t' ],
+    [ temporalio_perl_bridge_meter_req_new_id => 'meter_req_new_id',
+      [ 'opaque' ] => 'uint64' ],
+    [ temporalio_perl_bridge_meter_req_name => 'meter_req_name',
+      [ 'opaque' ] => 'TemporalCoreByteArrayRef' ],
+    [ temporalio_perl_bridge_meter_req_description => 'meter_req_description',
+      [ 'opaque' ] => 'TemporalCoreByteArrayRef' ],
+    [ temporalio_perl_bridge_meter_req_unit => 'meter_req_unit',
+      [ 'opaque' ] => 'TemporalCoreByteArrayRef' ],
+    [ temporalio_perl_bridge_meter_req_kind => 'meter_req_kind',
+      [ 'opaque' ] => 'sint32' ],
+    [ temporalio_perl_bridge_meter_req_free_id => 'meter_req_free_id',
+      [ 'opaque' ] => 'uint64' ],
+    [ temporalio_perl_bridge_meter_req_append_from_id => 'meter_req_append_from_id',
+      [ 'opaque' ] => 'uint64' ],
+    [ temporalio_perl_bridge_meter_req_attr_count => 'meter_req_attr_count',
+      [ 'opaque' ] => 'size_t' ],
+    [ temporalio_perl_bridge_meter_req_attr_key => 'meter_req_attr_key',
+      [ 'opaque', 'size_t' ] => 'TemporalCoreByteArrayRef' ],
+    [ temporalio_perl_bridge_meter_req_attr_value_type => 'meter_req_attr_value_type',
+      [ 'opaque', 'size_t' ] => 'sint32' ],
+    [ temporalio_perl_bridge_meter_req_attr_string => 'meter_req_attr_string',
+      [ 'opaque', 'size_t' ] => 'TemporalCoreByteArrayRef' ],
+    [ temporalio_perl_bridge_meter_req_attr_int => 'meter_req_attr_int',
+      [ 'opaque', 'size_t' ] => 'sint64' ],
+    [ temporalio_perl_bridge_meter_req_attr_float => 'meter_req_attr_float',
+      [ 'opaque', 'size_t' ] => 'double' ],
+    [ temporalio_perl_bridge_meter_req_attr_bool => 'meter_req_attr_bool',
+      [ 'opaque', 'size_t' ] => 'bool' ],
     # WorkerOptions marshalling spike (plan P0.10): the shim parses a
     # TemporalCoreWorkerOptions built Perl-side and echoes every field as a
     # NUL-terminated "field=value" summary string (cast it to 'string', then
@@ -647,6 +750,34 @@ sub forwarded_log_accessor_ptrs () {
     return @_forwarded_log_accessor_ptr{
         qw(target message timestamp_millis fields_json)
     };
+}
+
+# Custom metric meter (spec section 28.2) helpers.
+
+# The eight TemporalCoreCustomMetricMeter callback pointers, in struct order.
+# Memoized: the addresses are stable for the process lifetime.
+my @_meter_callback_ptr;
+sub meter_callback_ptrs () {
+    @_meter_callback_ptr = (
+        meter_metric_new_ptr(),
+        meter_metric_free_ptr(),
+        meter_record_integer_ptr(),
+        meter_record_float_ptr(),
+        meter_record_duration_ptr(),
+        meter_attributes_new_ptr(),
+        meter_attributes_free_ptr(),
+        meter_meter_free_ptr(),
+    ) unless @_meter_callback_ptr;
+    return @_meter_callback_ptr;
+}
+
+# Read a TemporalCoreByteArrayRef returned by value (the meter req_* accessors)
+# into a Perl string; a NULL data pointer yields the empty string.
+sub byte_array_ref_to_scalar ($ref) {
+    my $data = $ref->data;
+    my $size = $ref->size;
+    return '' unless defined $data && $size;
+    return FFI::Platypus::Buffer::buffer_to_scalar($data, $size);
 }
 
 # Attach eagerly at load time and die loudly on any failure so a version

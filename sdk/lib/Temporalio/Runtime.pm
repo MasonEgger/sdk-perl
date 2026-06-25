@@ -14,6 +14,7 @@ use Temporalio::Core::FFI ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::Runtime ();
 use Temporalio::Runtime::LogForwardingConfig ();
+use Temporalio::Runtime::MetricMeter ();
 use Temporalio::Runtime::TelemetryConfig ();
 
 class Temporalio::Runtime {
@@ -26,6 +27,8 @@ class Temporalio::Runtime {
     field $callback;       # Temporalio::Core::Callback (owns the wakeup fd)
     field $watch_handle;   # IO::Async::Handle registered on $loop
     field $forwards_logs = 0;   # true if this runtime owns the log-forward registry
+    field $custom_meter = 0;    # true if this runtime owns the meter registry
+    field $telemetry_keep;      # records core retains by pointer past runtime_new
     field $is_shutdown = 0;
 
     # The lazily-created process default (spec section 4.2). Shutdown of the
@@ -50,9 +53,25 @@ class Temporalio::Runtime {
             );
         }
 
+        # Custom metric meter (spec section 28.2) is likewise process-global:
+        # only one runtime may carry a custom meter (the C bridge's "only one
+        # of opentelemetry/prometheus/custom_meter"). Refuse a second up front.
+        my $meter = $telemetry->custom_meter;
+        if (defined $meter
+            && defined Temporalio::Runtime::MetricMeter->active) {
+            Temporalio::Exception::Argument->throw(
+                message => 'a custom metric meter is already active on another'
+                         . ' runtime (only one runtime may carry one at a time)',
+            );
+        }
+
         # Build the TemporalCoreRuntimeOptions record tree. @keep pins every
         # nested record and backing buffer until runtime_new returns (the
-        # bridge copies what it needs during the call).
+        # bridge copies what it needs during the call). EXCEPTION: a custom
+        # metric meter's TemporalCoreCustomMetricMeter struct is RETAINED by
+        # core for the runtime's lifetime (header: "freed by a callback within
+        # itself"), so when a meter is configured @keep must outlive
+        # runtime_new — it is moved into $telemetry_keep below.
         my @keep;
         my $telemetry_ptr = Temporalio::Core::FFI::keep_record(
             \@keep, $telemetry->to_ffi(\@keep));
@@ -81,6 +100,13 @@ class Temporalio::Runtime {
             Temporalio::Exception::Runtime->throw(message => $message);
         }
 
+        # Core retains the custom-meter struct by pointer for the runtime's
+        # lifetime, so keep @keep (which pins the TemporalCoreCustomMetricMeter
+        # record) alive until shutdown when a meter is configured. Without this
+        # the meter struct is freed right after runtime_new and core later
+        # dereferences a dangling pointer (a nondeterministic crash).
+        $telemetry_keep = \@keep if defined $meter;
+
         # Wakeup fd (eventfd vs pipe is hidden inside the Callback stub) and
         # the shim completion queue that signals it.
         $callback  = Temporalio::Core::Callback->new;
@@ -107,6 +133,34 @@ class Temporalio::Runtime {
             }
             Temporalio::Runtime::LogForwardingConfig->_set_active($forwarding);
             $forwards_logs = 1;
+        }
+
+        # If a custom meter is configured, claim the process-global meter
+        # registry for this queue (spec section 28.2). The shim allocates handle
+        # ids and parks create/free requests the drain runs; record_* aggregate
+        # in pure Rust. No blocking, no off-main-thread Perl, no nested FFI
+        # re-entry (the spike resolution).
+        if (defined $meter) {
+            unless (Temporalio::Core::FFI::meter_register($queue_ptr)) {
+                if ($forwards_logs) {
+                    Temporalio::Core::FFI::forwarding_unregister($queue_ptr);
+                    Temporalio::Runtime::LogForwardingConfig->_clear_active;
+                    $forwards_logs = 0;
+                }
+                Temporalio::Core::FFI::queue_free($queue_ptr);
+                $queue_ptr = undef;
+                $callback->close;
+                $callback = undef;
+                Temporalio::Core::FFI::runtime_free($core_ptr);
+                $core_ptr = undef;
+                Temporalio::Exception::Argument->throw(
+                    message => 'a custom metric meter is already active on'
+                             . ' another runtime (only one runtime may carry'
+                             . ' one at a time)',
+                );
+            }
+            Temporalio::Runtime::MetricMeter->_set_active($meter);
+            $custom_meter = 1;
         }
 
         # Register the read end with the loop: when the shim signals the fd,
@@ -174,12 +228,26 @@ class Temporalio::Runtime {
             Temporalio::Runtime::LogForwardingConfig->_clear_active;
             $forwards_logs = 0;
         }
+        # 1c. Release the custom-meter registry (spec section 28.2) before the
+        # queue is freed, so the shim stops routing meter callbacks to it, then
+        # clear the active meter and drop the reentrant closure. The core
+        # runtime is freed below; no callback can fire after that.
+        if ($custom_meter) {
+            Temporalio::Core::FFI::meter_unregister($queue_ptr)
+                if defined $queue_ptr;
+            Temporalio::Runtime::MetricMeter->_clear_active;
+            $custom_meter = 0;
+        }
         # 2. Free the shim callback queue (drops undrained entries).
         Temporalio::Core::FFI::queue_free($queue_ptr) if defined $queue_ptr;
         $queue_ptr = undef;
-        # 3. Free the core runtime (flushes telemetry on drop).
+        # 3. Free the core runtime (flushes telemetry on drop, and invokes the
+        # custom meter's meter_free callback if one was configured).
         Temporalio::Core::FFI::runtime_free($core_ptr) if defined $core_ptr;
         $core_ptr = undef;
+        # Now core is gone and can no longer dereference the retained meter
+        # struct: release the kept records.
+        $telemetry_keep = undef;
         # The queue borrows the wakeup fd and never closes it; close the
         # Perl-owned ends now that nothing can signal.
         $callback->close if defined $callback;

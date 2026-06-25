@@ -12,6 +12,7 @@ typedef struct TemporalCoreByteArray TemporalCoreByteArray;
 typedef struct TemporalCoreConnection TemporalCoreConnection;
 typedef struct TemporalCoreEphemeralServer TemporalCoreEphemeralServer;
 typedef struct TemporalCoreWorkerOptions TemporalCoreWorkerOptions;
+typedef struct TemporalCoreCustomMetricAttribute TemporalCoreCustomMetricAttribute;
 
 /**
  * `kind` discriminator values, 1..6 in spec section 3 trampoline order, plus
@@ -32,6 +33,20 @@ typedef struct TemporalCoreWorkerOptions TemporalCoreWorkerOptions;
 #define TEMPORALIO_PERL_BRIDGE_KIND_EPHEMERAL_SERVER_SHUTDOWN 6
 
 #define TEMPORALIO_PERL_BRIDGE_KIND_FORWARDED_LOG 7
+
+/**
+ * Which marshalled meter request the drain must run. The Perl side switches on
+ * this tag; the body fields carry the request's payload (see `MeterRequest`).
+ */
+#define TEMPORALIO_PERL_BRIDGE_METER_REQ_METRIC_NEW 1
+
+#define TEMPORALIO_PERL_BRIDGE_METER_REQ_ATTRIBUTES_NEW 2
+
+#define TEMPORALIO_PERL_BRIDGE_METER_REQ_METRIC_FREE 3
+
+#define TEMPORALIO_PERL_BRIDGE_METER_REQ_ATTRIBUTES_FREE 4
+
+#define TEMPORALIO_PERL_BRIDGE_METER_REQ_METER_FREE 5
 
 /**
  * Thread-safe completion queue: an unbounded `SegQueue` plus the signal fd.
@@ -97,6 +112,37 @@ typedef struct TemporalioPerlBridgeEntry {
   uint64_t log_timestamp_ms;
 } TemporalioPerlBridgeEntry;
 
+/**
+ * A borrowed byte slice as returned by core's forwarded-log accessors,
+ * matching `TemporalCoreByteArrayRef` (data may be null/zero-length).
+ */
+typedef struct ForwardedLogByteArrayRef {
+  const uint8_t *data;
+  size_t size;
+} ForwardedLogByteArrayRef;
+
+/**
+ * One bucketed record snapshot the Perl meter pulls on drain: which metric and
+ * attribute set, the record kind (1=integer, 2=float, 3=duration), and the
+ * summed value. Floats and integers share `value` (f64) — integer/duration
+ * records sum as i64 but are widened for the single snapshot shape, which is
+ * exact for the magnitudes metrics produce.
+ */
+typedef struct TemporalioPerlBridgeMeterRecord {
+  uint64_t metric_id;
+  uint64_t attributes_id;
+  /**
+   * 1 = integer, 2 = float, 3 = duration (ms).
+   */
+  uint8_t record_kind;
+  double value;
+  /**
+   * Number of record calls folded into `value` (for histogram/gauge the
+   * Perl meter may want the count; counters only need the sum).
+   */
+  uint64_t count;
+} TemporalioPerlBridgeMeterRecord;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -157,6 +203,164 @@ void *temporalio_perl_bridge_forwarded_log_callback_ptr(void);
  * `temporalio_perl_bridge_queue_drain`, not yet freed.
  */
 void temporalio_perl_bridge_forwarded_log_free(struct TemporalioPerlBridgeEntry *entry);
+
+/**
+ * Claim the process-global meter registry for `queue`. Returns true on
+ * success, false if a meter is already active (Perl raises Argument). The
+ * compare-and-set makes the claim race-free across concurrently constructed
+ * runtimes.
+ *
+ * # Safety
+ * `queue` must be a live queue pointer for the registry's lifetime.
+ */
+bool temporalio_perl_bridge_meter_register(struct TemporalioPerlBridgeQueue *queue);
+
+/**
+ * Release the meter registry held by `queue` (no-op unless it is the active
+ * one). Called from `Runtime->shutdown` after the worker/runtime that drove
+ * the meter is gone, so no callback can still be in flight.
+ *
+ * # Safety
+ * Must be called only after core has stopped invoking the meter callbacks.
+ */
+void temporalio_perl_bridge_meter_unregister(struct TemporalioPerlBridgeQueue *queue);
+
+/**
+ * `metric_new`: allocate a handle id, park a create request for the main-thread
+ * drain (which runs the Perl `create_metric`), and return the id immediately.
+ * Never blocks, never calls Perl — safe on any thread including reentrantly on
+ * the main thread (spec section 28.2 spike resolution).
+ */
+const void *temporalio_perl_bridge_meter_metric_new(TemporalCoreByteArrayRef name,
+                                                    TemporalCoreByteArrayRef description,
+                                                    TemporalCoreByteArrayRef unit,
+                                                    int32_t kind);
+
+void temporalio_perl_bridge_meter_metric_free(const void *metric);
+
+void temporalio_perl_bridge_meter_record_integer(const void *metric,
+                                                 uint64_t value,
+                                                 const void *attributes);
+
+void temporalio_perl_bridge_meter_record_float(const void *metric,
+                                               double value,
+                                               const void *attributes);
+
+void temporalio_perl_bridge_meter_record_duration(const void *metric,
+                                                  uint64_t value_ms,
+                                                  const void *attributes);
+
+/**
+ * `attributes_new`: decode the borrowed attribute array into owned copies,
+ * allocate a handle id, park a create request, and return the id immediately
+ * (the main-thread drain runs the Perl `new_attributes`). `append_from` is a
+ * prior attributes handle (0/null = none). Never blocks, never calls Perl.
+ */
+const void *temporalio_perl_bridge_meter_attributes_new(const void *append_from,
+                                                        const TemporalCoreCustomMetricAttribute *attributes,
+                                                        size_t attributes_size);
+
+void temporalio_perl_bridge_meter_attributes_free(const void *attributes);
+
+/**
+ * `meter_free`: per the header the custom meter "is freed by a callback within
+ * itself". Parked so the Perl meter can release per-meter state on the drain.
+ * The `meter` argument is the core meter struct pointer (unused — Perl owns its
+ * own meter object via the registry).
+ */
+void temporalio_perl_bridge_meter_meter_free(const void *_meter);
+
+/**
+ * Pop the next parked create/free request into a heap box and return a raw
+ * pointer to it (null if the queue is empty). The Perl drain reads the
+ * request's fields via the `req_*` accessors, runs the Perl method, then frees
+ * the box with `temporalio_perl_bridge_meter_free_request`. Returns the tag via
+ * `*out_tag`.
+ *
+ * # Safety
+ * `out_tag` must be a writable `u8` slot.
+ */
+const void *temporalio_perl_bridge_meter_next_request(uint8_t *out_tag);
+
+/**
+ * Free a request box returned by `temporalio_perl_bridge_meter_next_request`
+ * once the Perl drain has read its fields.
+ *
+ * # Safety
+ * `request` must be a pointer from `meter_next_request`, not yet freed.
+ */
+void temporalio_perl_bridge_meter_free_request(const void *request);
+
+/**
+ * The shim-allocated handle id for a create request (metric_new/attributes_new).
+ */
+uint64_t temporalio_perl_bridge_meter_req_new_id(const void *request);
+
+/**
+ * metric_new name (borrowed; valid only while the request is parked).
+ */
+struct ForwardedLogByteArrayRef temporalio_perl_bridge_meter_req_name(const void *request);
+
+struct ForwardedLogByteArrayRef temporalio_perl_bridge_meter_req_description(const void *request);
+
+struct ForwardedLogByteArrayRef temporalio_perl_bridge_meter_req_unit(const void *request);
+
+int32_t temporalio_perl_bridge_meter_req_kind(const void *request);
+
+uint64_t temporalio_perl_bridge_meter_req_free_id(const void *request);
+
+uint64_t temporalio_perl_bridge_meter_req_append_from_id(const void *request);
+
+size_t temporalio_perl_bridge_meter_req_attr_count(const void *request);
+
+/**
+ * attribute key at index `i` (borrowed).
+ */
+struct ForwardedLogByteArrayRef temporalio_perl_bridge_meter_req_attr_key(const void *request,
+                                                                          size_t i);
+
+/**
+ * attribute value type at index `i` (1=String,2=Int,3=Float,4=Bool), 0 if out
+ * of range.
+ */
+int32_t temporalio_perl_bridge_meter_req_attr_value_type(const void *request, size_t i);
+
+struct ForwardedLogByteArrayRef temporalio_perl_bridge_meter_req_attr_string(const void *request,
+                                                                             size_t i);
+
+int64_t temporalio_perl_bridge_meter_req_attr_int(const void *request, size_t i);
+
+double temporalio_perl_bridge_meter_req_attr_float(const void *request, size_t i);
+
+bool temporalio_perl_bridge_meter_req_attr_bool(const void *request, size_t i);
+
+/**
+ * Drain the aggregation table into `out_buf` (up to `out_buf_capacity`
+ * records), clearing what is drained. Returns the count written. Call in a
+ * loop until it returns 0. The Perl meter applies each record to its own
+ * counters/histograms/gauges.
+ *
+ * # Safety
+ * `out_buf` must point to at least `out_buf_capacity` writable record slots.
+ */
+size_t temporalio_perl_bridge_meter_drain_records(struct TemporalioPerlBridgeMeterRecord *out_buf,
+                                                  size_t out_buf_capacity);
+
+void *temporalio_perl_bridge_meter_metric_new_ptr(void);
+
+void *temporalio_perl_bridge_meter_metric_free_ptr(void);
+
+void *temporalio_perl_bridge_meter_record_integer_ptr(void);
+
+void *temporalio_perl_bridge_meter_record_float_ptr(void);
+
+void *temporalio_perl_bridge_meter_record_duration_ptr(void);
+
+void *temporalio_perl_bridge_meter_attributes_new_ptr(void);
+
+void *temporalio_perl_bridge_meter_attributes_free_ptr(void);
+
+void *temporalio_perl_bridge_meter_meter_free_ptr(void);
 
 /**
  * Allocate a queue signalling `signal_fd` (eventfd, or pipe write-end as
