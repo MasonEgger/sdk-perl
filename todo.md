@@ -404,6 +404,6 @@ RED/GREEN/REFACTOR sub-steps complete. Spec test IDs in parentheses.
 - [x] P10.9.3 Verify: prove -lj4 t
 
 ### P10.10 Client environment configuration (spec §31)
-- [ ] P10.10.1 RED: sdk/t/unit/envconfig.t (options-struct build, FFI-JSON parse, fail→Argument, to_connect_config; T-envcfg-1..9) + integration (T-envcfg-int-1)
-- [ ] P10.10.2 GREEN: Temporalio/EnvConfig + EnvConfig/{ClientConfigTLS,ClientConfigProfile,ClientConfig} via the env-config FFI (load/_profile_load, parse JSON) — NOT a pure-Perl port; + pin check for the two symbols
-- [ ] P10.10.3 Verify: prove -lj4 t — **v0.2 SDK feature contracts complete**
+- [x] P10.10.1 RED: sdk/t/unit/envconfig.t (options-struct build, FFI-JSON parse, fail→Argument, to_connect_config; T-envcfg-1..9) + integration (T-envcfg-int-1)
+- [x] P10.10.2 GREEN: Temporalio/EnvConfig + EnvConfig/{ClientConfigTLS,ClientConfigProfile,ClientConfig} via the env-config FFI (load/_profile_load, parse JSON) — NOT a pure-Perl port; + pin check for the two symbols
+- [x] P10.10.3 Verify: prove -lj4 t — **v0.2 SDK feature contracts complete**

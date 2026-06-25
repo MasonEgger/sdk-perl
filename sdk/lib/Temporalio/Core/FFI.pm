@@ -394,6 +394,61 @@ package Temporalio::Core::FFI::WorkerOrFail {
     );
 }
 
+package Temporalio::Core::FFI::ClientEnvConfigLoadOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreClientEnvConfigLoadOptions (header :282-288):
+    #   { TemporalCoreByteArrayRef path; TemporalCoreByteArrayRef data;
+    #     bool config_file_strict; TemporalCoreByteArrayRef env_vars; }
+    # The two leading ByteArrayRef members flatten to (data, size) pairs; the
+    # bool sits between them and the trailing env_vars ref (a JSON object of
+    # TEMPORAL_* env vars). record_layout_1 inserts the same interior padding
+    # the C repr(C) layout has around the bool (8-aligned ByteArrayRef members).
+    record_layout_1(
+        opaque => 'path_data',
+        size_t => 'path_size',
+        opaque => 'data_data',
+        size_t => 'data_size',
+        bool   => 'config_file_strict',
+        opaque => 'env_vars_data',
+        size_t => 'env_vars_size',
+    );
+}
+
+package Temporalio::Core::FFI::ClientEnvConfigProfileLoadOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreClientEnvConfigProfileLoadOptions (header :298-312):
+    #   { TemporalCoreByteArrayRef profile; path; data; bool disable_file;
+    #     bool disable_env; bool config_file_strict;
+    #     TemporalCoreByteArrayRef env_vars; }
+    # Three leading ByteArrayRef members (profile/path/data) flatten to
+    # (data, size) pairs, then three consecutive bools, then env_vars.
+    record_layout_1(
+        opaque => 'profile_data',
+        size_t => 'profile_size',
+        opaque => 'path_data',
+        size_t => 'path_size',
+        opaque => 'data_data',
+        size_t => 'data_size',
+        bool   => 'disable_file',
+        bool   => 'disable_env',
+        bool   => 'config_file_strict',
+        opaque => 'env_vars_data',
+        size_t => 'env_vars_size',
+    );
+}
+
+package Temporalio::Core::FFI::ClientEnvConfigOrFail {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreClientEnvConfigOrFail / ...ProfileOrFail (header
+    # :274-281,:290-297): two const TemporalCoreByteArray* members, exactly one
+    # non-null. Returned BY VALUE from env_config_load / _profile_load; the
+    # layout is identical for both, so one record class serves both returns.
+    record_layout_1(
+        opaque => 'success',
+        opaque => 'fail',
+    );
+}
+
 package Temporalio::Core::FFI;
 
 our $VERSION = '0.1.0';
@@ -450,6 +505,9 @@ $ffi->type('record(Temporalio::Core::FFI::TelemetryOptions)'     => 'TemporalCor
 $ffi->type('record(Temporalio::Core::FFI::RuntimeOptions)'       => 'TemporalCoreRuntimeOptions');
 $ffi->type('record(Temporalio::Core::FFI::RuntimeOrFail)'        => 'TemporalCoreRuntimeOrFail');
 $ffi->type('record(Temporalio::Core::FFI::WorkerOrFail)'         => 'TemporalCoreWorkerOrFail');
+$ffi->type('record(Temporalio::Core::FFI::ClientEnvConfigLoadOptions)'        => 'TemporalCoreClientEnvConfigLoadOptions');
+$ffi->type('record(Temporalio::Core::FFI::ClientEnvConfigProfileLoadOptions)' => 'TemporalCoreClientEnvConfigProfileLoadOptions');
+$ffi->type('record(Temporalio::Core::FFI::ClientEnvConfigOrFail)'             => 'TemporalCoreClientEnvConfigOrFail');
 
 # --- Marshalling helpers for the by-pointer record trees -------------------
 #
@@ -794,6 +852,18 @@ my @phase0_attach = (
       [ 'opaque' ] => 'opaque' ],
     [ temporalio_perl_bridge_string_free => 'string_free',
       [ 'opaque' ] => 'void' ],
+    # Client environment configuration (spec section 31, header :918,925).
+    # Synchronous (no runtime / no callback): take an options struct by
+    # pointer and return the OrFail struct by value. Exactly one of
+    # success/fail is non-null; both are bridge-allocated TemporalCoreByteArray*
+    # the caller frees with byte_array_free (a NULL runtime is accepted for
+    # these — see env_config_load/profile_load in Temporalio::EnvConfig).
+    [ temporal_core_client_env_config_load => 'client_env_config_load',
+      [ 'record(Temporalio::Core::FFI::ClientEnvConfigLoadOptions)*' ]
+        => 'TemporalCoreClientEnvConfigOrFail' ],
+    [ temporal_core_client_env_config_profile_load => 'client_env_config_profile_load',
+      [ 'record(Temporalio::Core::FFI::ClientEnvConfigProfileLoadOptions)*' ]
+        => 'TemporalCoreClientEnvConfigOrFail' ],
 );
 
 # The four core forwarded-log accessor function pointers (spec section 28.1).
@@ -859,6 +929,21 @@ sub byte_array_ref_to_scalar ($ref) {
     my $size = $ref->size;
     return '' unless defined $data && $size;
     return FFI::Platypus::Buffer::buffer_to_scalar($data, $size);
+}
+
+# Pin check (spec section 31.5): the two env-config FFI symbols must be present
+# in the loaded core bridge. Bumping the sdk-rust tag re-runs this via the
+# envconfig unit test. Returns true; dies on a missing symbol (version skew).
+sub assert_env_config_symbols () {
+    for my $sym (qw(
+        temporal_core_client_env_config_load
+        temporal_core_client_env_config_profile_load
+    )) {
+        $ffi->find_symbol($sym)
+            or die "Temporalio::Core::FFI: env-config symbol '$sym' not found"
+                 . ' (version skew with the compiled core bridge?)';
+    }
+    return 1;
 }
 
 # Attach eagerly at load time and die loudly on any failure so a version
