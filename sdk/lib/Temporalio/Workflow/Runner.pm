@@ -1353,8 +1353,18 @@ class Temporalio::Workflow::Runner {
         my $progressed = 1;
         while ($progressed) {
             $progressed = 0;
-            my @still;
-            for my $cond (@conditions) {
+            # Iterate a SNAPSHOT of the pending entries, not @conditions itself
+            # (#3, #4): a satisfied predicate's continuation runs synchronously
+            # inside $future->done below and may register a FRESH wait_condition
+            # (pushing onto @conditions) or even re-enter _check_conditions. A
+            # snapshot keeps that mid-pass mutation from corrupting the loop
+            # cursor, so the iteration is deterministic regardless of what the
+            # continuation does to the live list. (wait_condition itself
+            # re-enters _check_conditions, which reassigns @conditions; aliasing
+            # a foreach over that live array across the reassignment is the
+            # re-entrancy hazard this snapshot closes.)
+            my @snapshot = @conditions;
+            for my $cond (@snapshot) {
                 my $future = $cond->{future};
                 next if $future->is_ready;   # resolved (e.g. timed out): drop.
                 if ($cond->{predicate}->()) {
@@ -1365,11 +1375,18 @@ class Temporalio::Workflow::Runner {
                     $future->done;
                     $progressed = 1;
                 }
-                else {
-                    push @still, $cond;
-                }
             }
-            @conditions = @still;
+            # Rebuild the pending list by DROPPING resolved entries from the
+            # LIVE @conditions, NOT by replacing it with a list built from the
+            # snapshot (the old `@conditions = @still`). A wait_condition the
+            # continuation re-registered DURING this pass (#3: the
+            # batch-sliding-window re-park; #4: the updatable-timer re-arm) lives
+            # in @conditions but not in any snapshot-derived list; replacing
+            # wholesale silently dropped it, wedging the body Running with no
+            # pending tasks and no terminal command. Filtering the live list
+            # keeps every still-pending entry, including those added mid-pass,
+            # and the outer while-loop then re-evaluates them on the next pass.
+            @conditions = grep { !$_->{future}->is_ready } @conditions;
         }
         return;
     }

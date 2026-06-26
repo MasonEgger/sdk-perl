@@ -13,10 +13,10 @@ leaves the suite green.
 - [x] B0.3 Verify suite stays green (doc-only); commit ROOT-CAUSE-MAP.md + session summary
 
 ## B1 C-COND: preserve continuation-registered conditions (#3, #4)
-- [ ] B1.1 RED: create repro_check_conditions.t (replay; CAN-boundary synchronous re-park) + #4 timer re-arm variant; fails for the documented reason first
-- [ ] B1.2 GREEN: _check_conditions merges conditions registered during the pass instead of `@conditions = @still`
-- [ ] B1.3 REFACTOR: re-entrancy-safe condition-list mutation; comment cites #3
-- [ ] B1.4 Verify: both replay repros pass; full `prove -lj4 t` green
+- [x] B1.1 RED: create repro_check_conditions.t (replay; CAN-boundary synchronous re-park) + #4 timer re-arm variant; fails for the documented reason first
+- [x] B1.2 GREEN: _check_conditions merges conditions registered during the pass instead of `@conditions = @still`
+- [x] B1.3 REFACTOR: re-entrancy-safe condition-list mutation; comment cites #3
+- [x] B1.4 Verify: both replay repros pass; full `prove -lj4 t` green
 
 ## B2 C-CANCEL-CMD: valid, de-duplicated cancel commands (#6, #7)
 - [ ] B2.1 RED: create repro_cancel_commands.t (single CancelWorkflowExecution) + repro_wait_any_race.t (replay asserts emitted command list, not in-process: no double-complete / no cancel of resolved seq); fail first
