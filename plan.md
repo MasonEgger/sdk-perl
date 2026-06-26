@@ -45,7 +45,7 @@ plan is `sdk-perl-issues-from-samples.md`.
 | C-COND: `_check_conditions` drops re-registered conditions | #3, #4 | `Workflow/Runner.pm` (~1351-1373) | replay | no |
 | C-CANCEL-CMD: cancel emits invalid / duplicate commands, double-complete SEGV | #6, #7 | `Workflow/Runner.pm`, `Workflow/Commands.pm` | replay | no |
 | C-CANCEL-LIVE: never-true wait_condition not throwable-Cancelled; client-cancel mid-update | #5, #8 | `Workflow/Runner.pm` (~2667), `Workflow/Future.pm` | integration | no |
-| C-FD: fork-pool child closes the bridge signal fd; cross-workflow signal stall | #1, #2 | `ext/temporalio-perl-bridge/src/lib.rs` (~1670), `Worker/ActivityDispatcher.pm` | integration | YES |
+| C-FD: fork-pool reaper steals sdk-core's dev-server child at `$server->shutdown` (SEGV) | #1, (#2 already healthy) | `sdk/lib/Temporalio/Test/DevServer.pm` (`shutdown`) | integration | no |
 | C-LOCALACT: `execute_local_activity` segfaults the worker | #9 | `Workflow/Runner.pm`, `Worker.pm`, shim TBD | integration | maybe |
 | C-NEXUS: worker hardcodes `enable_nexus => 0`, never polls Nexus tasks | #11 | `Worker.pm:424`, Nexus poller wiring | integration | maybe |
 | C-ICEPT: worker inbound interceptor chains built but never invoked | #10 | `Worker.pm` (build_*_inbound), dispatch path | unit + integration | no |
@@ -62,7 +62,7 @@ C-COND lands.
 - [ ] B1 C-COND: preserve continuation-registered conditions (#3, #4)
 - [ ] B2 C-CANCEL-CMD: valid, de-duplicated cancel command sequences (#6, #7)
 - [ ] B3 C-CANCEL-LIVE: throwable Cancelled + clean cancel-mid-update (#5, #8)
-- [ ] B4 C-FD: signal-fd CLOEXEC / fork-pool FD hygiene (#1, #2) [SHIM]
+- [ ] B4 C-FD: fork-pool/dev-server child-reaper ownership at teardown (#1; #2 regression guard)
 - [ ] B5 C-LOCALACT: fix execute_local_activity segfault (#9)
 - [ ] B6 C-NEXUS: enable Nexus serving + wire the task poller (#11)
 - [ ] B7 C-ICEPT: invoke worker inbound interceptor chains (#10)
@@ -195,39 +195,55 @@ paths, so use live integration tests.
 
 ---
 
-## Step B4: C-FD signal-fd CLOEXEC / fork-pool FD hygiene (#1, #2) [SHIM]
+## Step B4: C-FD fork-pool/dev-server child-reaper ownership at teardown (#1; #2 regression guard)
 
-**NOTE**: SHIM-TOUCHING. The shim allocates the completion-queue `signal_fd`
-(eventfd, or pipe write-end) at `ext/temporalio-perl-bridge/src/lib.rs` ~1670 and
-"borrows it and never closes it." A sync-activity fork-pool child doing normal FD
-hygiene closes that inherited fd, corrupting the parent worker loop ("signal fd N
-write failed: Bad file descriptor"). #2 (cross-workflow signal stall after the
-first grant) is the same fd. Fix is to keep the bridge fd out of the child:
-set FD_CLOEXEC / O_CLOEXEC on the eventfd and pipe fds (so exec/child cannot use
-them) and/or have the fork pool record and never close the bridge fd. Follow the
-CLAUDE.md memory guard + Alien rebuild.
+**NOTE (CORRECTED, NOT SHIM-TOUCHING).** The original signal-fd-CLOEXEC
+hypothesis for #1 (whether shim-side at lib.rs ~1670 or Perl-side in
+Callback.pm:257-271) was DISPROVEN by experiment. The verified root cause of the
+exit-139 SEGV is a child-process REAPER race, not an fd close:
+
+- A worker that registers a sync (`:Defn(...,'sync=1')`) activity runs it in an
+  `IO::Async::Function` fork pool. The first fork makes IO::Async install a
+  process-wide SIGCHLD reaper (`IO::Async::Loop::watch_process` -> a single
+  CHLD handler whose `_reap_children` does `waitpid(-1, WNOHANG)`). That handler
+  LINGERS past worker shutdown (the loop only detaches it via
+  `unwatch_process`; reaping a child through the SIGCHLD path never does).
+- An ephemeral `Temporalio::Test::DevServer` makes sdk-core spawn and reap its
+  own `temporal` CLI subprocess. At `$server->shutdown`, IO::Async's lingering
+  reaper wins the `waitpid(-1)` race and reaps core's CLI child before core's
+  own `waitpid`, so core SEGVs (exit 139 / signal 11).
+- PRODUCTION IS UNAFFECTED: a worker against an external server never runs the
+  ephemeral-server shutdown; skipping `$server->shutdown` also exits cleanly. A
+  naive `local $SIG{CHLD}='DEFAULT'` does NOT help (IO::Async installs the
+  handler below `%SIG`).
+
+Fix is TEST-INFRASTRUCTURE / teardown-ordering, in `Temporalio::Test::DevServer`.
+NO shim, NO Callback.pm, NO cargo/Alien rebuild. #2 (cross-workflow signal
+hand-off) is ALREADY HEALTHY on current v1 — its repro is kept as a regression
+guard, not a fail-first test.
 
 ```text
-1. RED: Create sdk/t/integration/repro_fd_signal.t and repro_external_signal.t
-   (SUBPROCESS-GUARDED per directive 4: FD corruption wedges the worker, so run the
-   worker+workflow in a child under a hard timeout and assert clean exit; confirm
-   both FAIL for the documented reason before GREEN):
-   - Assert a sync fork-pool activity that closes inherited FDs still returns a
-     result (no "signal fd write failed").
+1. RED: Create sdk/t/integration/repro_fd_signal.t and repro_external_signal.t,
+   both SUBPROCESS-GUARDED (reuse t/lib/SubprocessGuard.pm) — the #1 failure is a
+   SEGV that would crash prove otherwise:
+   - repro_fd_signal.t: a worker with a SYNC fork-pool activity + an ephemeral
+     dev server runs the full lifecycle INCLUDING $server->shutdown in the guard
+     child; assert the child exits 0. FAILS FIRST with signal 11 at
+     $server->shutdown for the documented reaper-race reason.
    - repro_external_signal.t: workflow A signals workflow B twice via
-     get_external_workflow_handle; assert both signals are delivered (today the
-     second stalls and trips the guard).
-2. GREEN (shim): set FD_CLOEXEC on the eventfd and O_CLOEXEC on the pipe fds where
-   the queue's signal_fd is created (~1670); rebuild per the memory guard
-   (CARGO_BUILD_JOBS=2, foreground, cargo test, regen cbindgen header, rebuild +
-   reinstall Alien::Temporalio::PerlBridge; nm -D to confirm symbols).
-3. GREEN (Perl, if still needed): in Worker/ActivityDispatcher.pm's fork-pool child
-   setup, record the bridge signal fd and exclude it from the child's FD-close
-   sweep.
-4. REFACTOR: document the bridge-fd ownership contract (only the runtime owns the
-   signal fd; children never touch it).
-5. Verify: both live repros pass un-gated; cargo test green; full `prove -lj4 t`
-   green; confirm the installed bridge exports the expected symbols.
+     get_external_workflow_handle; assert both delivered. Passes unmodified on
+     current v1 (regression guard; #2 was already healthy — not fabricated red).
+2/3. GREEN: in Temporalio::Test::DevServer->shutdown, suspend IO::Async's
+   lingering process-wide SIGCHLD reaper for the core-shutdown window so core
+   reaps its own CLI child: detach the loop's childwatch CHLD handler, reap any
+   still-watched (stopped) fork-pool worker ourselves to avoid a zombie, then run
+   the ephemeral_server_shutdown await. IO::Async lazily re-arms the handler on
+   the next watch_process.
+4. REFACTOR: document the reaper-ownership contract at both sites — the helper in
+   DevServer.pm (citing #1) and a cross-reference comment at the fork pool in
+   Activity/Pool.pm where the reaper is installed.
+5. Verify: repro_fd_signal.t passes un-gated; repro_external_signal.t passes;
+   full `prove -lj4 t` green.
 ```
 
 ---

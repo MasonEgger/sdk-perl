@@ -74,6 +74,13 @@ class Temporalio::Activity::Pool {
         @_ACTIVITY_MODULES       = @$activity_modules;
         $_REGISTRY               = $registry;
 
+        # Reaper-ownership note (#1): the first time this fork pool forks a
+        # worker, IO::Async installs ONE process-wide SIGCHLD handler whose
+        # waitpid(-1) reaps EVERY exited child, and it lingers after the pool's
+        # children are gone (the loop only detaches it via unwatch_process).
+        # That reaper would race sdk-core's ephemeral dev-server CLI subprocess
+        # at teardown; Temporalio::Test::DevServer->shutdown suspends it for the
+        # core-shutdown window so core reaps its own child. See that method.
         $function = IO::Async::Function->new(
             min_workers => 0,
             max_workers => $max_workers,

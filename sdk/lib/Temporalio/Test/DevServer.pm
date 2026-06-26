@@ -10,6 +10,8 @@ use File::Path ();
 use File::Spec ();
 use Future ();
 use Net::EmptyPort ();
+use POSIX ();
+use Scalar::Util ();
 use Temporalio::Core::Callback ();
 use Temporalio::Core::FFI ();
 use Temporalio::Exception::Argument ();
@@ -34,6 +36,54 @@ class Temporalio::Test::DevServer {
             message => "$what did not complete within ${timeout}s")
             unless $future->is_ready;
         return $future->get;    # rethrows Exception::Bridge on failure
+    }
+
+    # Suspend IO::Async's process-wide child reaper for a teardown window so
+    # sdk-core can reap its own ephemeral-server CLI subprocess (#1). Returns a
+    # restore coderef the caller invokes when the window closes.
+    #
+    # Background: the first time any child process is watched on an
+    # IO::Async::Loop (the sync-activity fork pool does this via
+    # IO::Async::Function -> watch_process), the loop installs ONE SIGCHLD
+    # handler whose _reap_children does waitpid(-1, WNOHANG) and so reaps EVERY
+    # exited child, including subprocesses IO::Async never spawned. The loop only
+    # detaches that handler through unwatch_process; reaping a child via the
+    # SIGCHLD path does not, so the handler LINGERS after the fork pool's
+    # children are gone. sdk-core's ephemeral dev server then races it for its
+    # own CLI child and loses (issue #1, SEGV / exit 139).
+    #
+    # We detach that lingering handler for the shutdown window. By the time a
+    # DevServer is torn down the worker (and so the fork pool) is already shut
+    # down, but IO::Async may still be WATCHING a stopped fork-pool worker that
+    # has not been reaped yet (IO::Async::Function->stop is asynchronous). To
+    # avoid stranding those as zombies once their reaper is gone, we reap each
+    # still-watched pid ourselves (non-blocking) and clear the watch table.
+    # After we detach, IO::Async lazily re-installs the handler on its next
+    # watch_process (it keys on an unset childwatch_sigid), so no manual re-arm
+    # is needed; the restore coderef is a no-op kept for a symmetric call site.
+    # The two loop fields (childwatches, childwatch_sigid) are IO::Async::Loop
+    # internals; repro_fd_signal.t pins this behavior.
+    sub _suspend_io_async_child_reaper ($loop) {
+        return sub { } unless Scalar::Util::blessed($loop)
+            && $loop->isa('IO::Async::Loop');
+
+        my $sigid = delete $loop->{childwatch_sigid};
+        return sub { } unless defined $sigid;
+
+        $loop->detach_signal('CHLD', $sigid);
+
+        # Reap any children IO::Async was still watching (stopped fork-pool
+        # workers) so the now-detached reaper does not strand them as zombies,
+        # then clear the watch table. Best-effort: a worker still mid-exit will
+        # be reaped at process exit instead.
+        my $childwatches = delete $loop->{childwatches};
+        $loop->{childwatches} = {};
+        for my $pid (keys %{ $childwatches // {} }) {
+            next if $pid == 0;
+            waitpid($pid, POSIX::WNOHANG());
+        }
+
+        return sub { };
     }
 
     # start(%options) — boot a dev server and block until it is serving.
@@ -161,6 +211,14 @@ class Temporalio::Test::DevServer {
                 Temporalio::Core::FFI::ephemeral_server_shutdown(
                     $handle, $user_data, $trampoline);
             });
+        # Child-reaper ownership during shutdown (#1). sdk-core's ephemeral
+        # server shut down here spawns and waitpid()s its own `temporal` CLI
+        # subprocess. If a sync-activity fork pool ran earlier in this process,
+        # IO::Async installed a process-wide SIGCHLD reaper whose waitpid(-1)
+        # would reap core's CLI child before core's own waitpid, SEGVing core.
+        # Suspend that reaper for the shutdown window so core reaps its own
+        # child; restore it after.
+        my $restore_reaper = _suspend_io_async_child_reaper($runtime->loop);
         my $err;
         {
             local $@;
@@ -170,6 +228,7 @@ class Temporalio::Test::DevServer {
                 1;
             } or $err = $@;
         }
+        $restore_reaper->();
         Temporalio::Core::FFI::ephemeral_server_free($handle);
         $handle = undef;
         if (defined $err) {

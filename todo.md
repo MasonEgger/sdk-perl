@@ -30,12 +30,12 @@ leaves the suite green.
 - [x] B3.3 REFACTOR: every internal await (timer/activity/condition/update/child) routes cancel through throwable-Cancelled; comment cites #5/#8
 - [x] B3.4 Verify: both live repros pass un-gated; re-run B1+B2 repros; full `prove -lj4 t` green
 
-## B4 C-FD: signal-fd CLOEXEC / fork-pool FD hygiene (#1, #2) [SHIM]
-- [ ] B4.1 RED: create repro_fd_signal.t (sync fork-pool activity returns) + repro_external_signal.t (two cross-workflow signals delivered); SUBPROCESS-GUARDED (FD corruption wedges the worker); fail first
-- [ ] B4.2 GREEN (shim): FD_CLOEXEC on eventfd + O_CLOEXEC on pipe fds at lib.rs ~1670; cargo test; regen cbindgen header; rebuild+reinstall Alien bridge (memory guard, nm -D)
-- [ ] B4.3 GREEN (Perl, if needed): ActivityDispatcher fork-pool child excludes the bridge signal fd from its FD-close sweep
-- [ ] B4.4 REFACTOR: document bridge-fd ownership (runtime owns it; children never touch it)
-- [ ] B4.5 Verify: both live repros pass un-gated; cargo test green; full `prove -lj4 t` green; bridge symbols present
+## B4 C-FD: fork-pool/dev-server child-reaper ownership at teardown (#1; #2 regression guard)
+- [x] B4.1 RED: create repro_fd_signal.t (sync fork-pool activity + ephemeral dev server, full lifecycle incl. $server->shutdown) + repro_external_signal.t (two cross-workflow signals delivered); SUBPROCESS-GUARDED; repro_fd_signal.t fails first with signal 11 (SEGV) at $server->shutdown; #2 already healthy (regression guard)
+- [x] B4.2 GREEN: Temporalio::Test::DevServer->shutdown suspends IO::Async's lingering process-wide SIGCHLD reaper for the core-shutdown window so sdk-core reaps its own ephemeral-server CLI child (test-teardown-side; NO shim/cargo change)
+- [x] B4.3 GREEN: reap any still-watched (stopped) fork-pool worker in the suspend helper to avoid a zombie after detaching the reaper
+- [x] B4.4 REFACTOR: document the reaper-ownership contract in DevServer.pm (helper cites #1) + cross-reference comment at the fork pool in Activity/Pool.pm
+- [x] B4.5 Verify: repro_fd_signal.t passes un-gated; repro_external_signal.t passes; full `prove -lj4 t` green
 
 ## B5 C-LOCALACT: fix execute_local_activity segfault (#9)
 - [ ] B5.1 RED: create repro_local_activity.t (plain local activity returns, no exit 139) + a timeout+retry variant; SUBPROCESS-GUARDED (SEGV exit 139); fail first
