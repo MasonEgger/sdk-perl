@@ -25,10 +25,10 @@ leaves the suite green.
 - [x] B2.4 Verify: both replay repros pass; full `prove -lj4 t` green; existing cancellation replays still pass
 
 ## B3 C-CANCEL-LIVE: throwable Cancelled + clean cancel-mid-update (#5, #8)
-- [ ] B3.1 RED: create repro_cancel_live.t (never-true wait_condition -> Cancelled) + repro_cancel_mid_update.t (SUBPROCESS-GUARDED ~30s; mid-:Update hangs ~183s today); fail first
-- [ ] B3.2 GREEN: wait_condition + update-await (Runner.pm ~2667) raise Temporalio::Exception::Cancelled via the Future-subclass pattern
-- [ ] B3.3 REFACTOR: every internal await (timer/activity/condition/update/child) routes cancel through throwable-Cancelled; comment cites #5/#8
-- [ ] B3.4 Verify: both live repros pass un-gated; re-run B1+B2 repros; full `prove -lj4 t` green
+- [x] B3.1 RED: create repro_cancel_live.t (never-true wait_condition -> Cancelled) + repro_cancel_mid_update.t (SUBPROCESS-GUARDED ~30s; mid-:Update hangs ~183s today); fail first
+- [x] B3.2 GREEN: wait_condition + update-await (Runner.pm ~2667) raise Temporalio::Exception::Cancelled via the Future-subclass pattern
+- [x] B3.3 REFACTOR: every internal await (timer/activity/condition/update/child) routes cancel through throwable-Cancelled; comment cites #5/#8
+- [x] B3.4 Verify: both live repros pass un-gated; re-run B1+B2 repros; full `prove -lj4 t` green
 
 ## B4 C-FD: signal-fd CLOEXEC / fork-pool FD hygiene (#1, #2) [SHIM]
 - [ ] B4.1 RED: create repro_fd_signal.t (sync fork-pool activity returns) + repro_external_signal.t (two cross-workflow signals delivered); SUBPROCESS-GUARDED (FD corruption wedges the worker); fail first

@@ -1321,9 +1321,26 @@ class Temporalio::Workflow::Runner {
     # asyncio.wait_for(fut, timeout) raising TimeoutError). When the predicate
     # wins first the timer is cancelled (emitting CancelTimer).
     method wait_condition ($predicate, %opts) {
-        my $future = Temporalio::Workflow::Future->new;
-
+        # The wait_condition awaitable is a _ConditionFuture whose ->cancel FAILS
+        # the future with a throwable Temporalio::Exception::Cancelled (#5, #8) —
+        # NOT Future's native cancelled state. A natively-cancelled CPAN Future
+        # would make the awaiting :Run (or in-flight :Update/:Signal handler)
+        # throw a bare "was cancelled" string, which escapes :Run as a plain die
+        # and fails the workflow task forever instead of routing to
+        # CancelWorkflowExecution. This mirrors _TimerFuture / _ActivityFuture and
+        # the references (sdk-ruby fiber.raise(CanceledError); sdk-python
+        # task-cancel -> CancelledError), where the cancellation is an EXCEPTION
+        # raised into the parked frame. _apply_cancel_workflow drives the cancel.
         my $timer;
+        my $future = Temporalio::Workflow::Runner::_ConditionFuture->_new_condition(
+            on_cancel => sub {
+                # Drop the (now soon-to-be-ready) wait timer if one was racing —
+                # emitting CancelTimer once. A no-op when the timer already fired
+                # or was cancelled by the pending-timer sweep.
+                $timer->cancel if defined $timer && !$timer->is_ready;
+            },
+        );
+
         if (defined $opts{timeout}) {
             $timer = $self->start_timer($opts{timeout});
             # If the timer fires (resolves done) before the predicate is
@@ -2165,6 +2182,27 @@ class Temporalio::Workflow::Runner {
                 ));
             }
         }
+        # wait_condition awaitables join the cancel chain (#5, #8). The :Run body
+        # parked on a never-true wait_condition — and any in-flight :Update /
+        # :Signal handler parked on its own wait_condition — must raise a
+        # throwable Temporalio::Exception::Cancelled, NOT a native Future cancel.
+        # Each entry's future is a _ConditionFuture whose ->cancel fails it
+        # Cancelled (and drops any racing wait timer); the awaiting frame then
+        # resumes synchronously and propagates Cancelled, so the :Run body unwinds
+        # to CancelWorkflowExecution and a mid-update handler settles cleanly
+        # rather than leaking a raw cancelled Future that hangs the workflow task.
+        # Snapshot first: a satisfied/cancelled entry is dropped from @conditions
+        # by the next _check_conditions pass, and the resuming continuation may
+        # mutate @conditions. Done BEFORE the main_run_future fallback so the body
+        # has already unwound by the time the fallback runs (it then no-ops).
+        for my $cond (@{[ @conditions ]}) {
+            my $future = $cond->{future};
+            next if !defined $future || $future->is_ready;
+            $future->cancel;
+        }
+        # Fallback: cancel the main run Future in case the body parked on
+        # something other than a tracked pending Future / wait_condition. A no-op
+        # once the body already unwound (Cancelled) above.
         if (defined $main_run_future && !$main_run_future->is_ready) {
             $main_run_future->cancel;
         }
@@ -3081,6 +3119,48 @@ package Temporalio::Workflow::Runner::_TimerFuture {
         }
         $self->fail(Temporalio::Exception::Cancelled->new(
             message => 'Timer cancelled',
+        ));
+        return $self;
+    }
+}
+
+# A Workflow::Future for wait_condition (spec section 10.2) whose ->cancel maps
+# to a Temporalio::Exception::Cancelled FAILURE (not Future's native cancelled
+# state), mirroring _TimerFuture (#5, #8). The :Run body — and any in-flight
+# :Update/:Signal handler — that parks on a never-true wait_condition is
+# cancelled by _apply_cancel_workflow driving each entry's ->cancel; this raises
+# a throwable Cancelled into the parked frame so the body unwinds to
+# CancelWorkflowExecution instead of surfacing a bare "was cancelled" string that
+# fails the workflow task forever. The on_cancel callback (supplied by
+# wait_condition) drops any racing wait-timeout timer (CancelTimer). The entry is
+# removed from @conditions by the next _check_conditions pass (which filters
+# ready futures), so the callback need not touch the list.
+package Temporalio::Workflow::Runner::_ConditionFuture {
+    use v5.38;
+    use warnings;
+
+    use parent -norequire, 'Temporalio::Workflow::Future';
+    use Temporalio::Exception::Cancelled ();
+
+    # _new_condition(on_cancel => $cb) -> a pending wait_condition future. The
+    # on_cancel callback runs exactly once, on the first ->cancel of a still-
+    # pending condition.
+    sub _new_condition ($class, %args) {
+        my $self = $class->new;
+        $self->{_cond_on_cancel} = $args{on_cancel};
+        return $self;
+    }
+
+    # cancel: run the stored callback (drop the racing wait timer) then fail the
+    # future with Cancelled so the awaiting frame raises a proper Temporal
+    # cancellation. A no-op once the future is ready (already resolved/cancelled).
+    sub cancel ($self) {
+        return $self if $self->is_ready;
+        if (my $cb = delete $self->{_cond_on_cancel}) {
+            $cb->();
+        }
+        $self->fail(Temporalio::Exception::Cancelled->new(
+            message => 'wait_condition cancelled',
         ));
         return $self;
     }
