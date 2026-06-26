@@ -19,10 +19,10 @@ leaves the suite green.
 - [x] B1.4 Verify: both replay repros pass; full `prove -lj4 t` green
 
 ## B2 C-CANCEL-CMD: valid, de-duplicated cancel commands (#6, #7)
-- [ ] B2.1 RED: create repro_cancel_commands.t (single CancelWorkflowExecution) + repro_wait_any_race.t (replay asserts emitted command list, not in-process: no double-complete / no cancel of resolved seq); fail first
-- [ ] B2.2 GREEN: emit at most one workflow-terminal command per activation; no RequestCancel for an already-resolved wait_any loser
-- [ ] B2.3 REFACTOR: centralize terminal-command guarding; comment cites #6/#7
-- [ ] B2.4 Verify: both replay repros pass; full `prove -lj4 t` green; existing cancellation replays still pass
+- [x] B2.1 RED: create repro_cancel_commands.t (single CancelWorkflowExecution) + repro_wait_any_race.t (replay asserts emitted command list, not in-process: no double-complete / no cancel of resolved seq); fail first
+- [x] B2.2 GREEN: emit at most one workflow-terminal command per activation; no RequestCancel for an already-resolved wait_any loser
+- [x] B2.3 REFACTOR: centralize terminal-command guarding; comment cites #6/#7
+- [x] B2.4 Verify: both replay repros pass; full `prove -lj4 t` green; existing cancellation replays still pass
 
 ## B3 C-CANCEL-LIVE: throwable Cancelled + clean cancel-mid-update (#5, #8)
 - [ ] B3.1 RED: create repro_cancel_live.t (never-true wait_condition -> Cancelled) + repro_cancel_mid_update.t (SUBPROCESS-GUARDED ~30s; mid-:Update hangs ~183s today); fail first

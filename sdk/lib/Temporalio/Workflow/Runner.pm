@@ -242,6 +242,19 @@ class Temporalio::Workflow::Runner {
     # (MUST-match sdk-python self._cancel_requested gating cancel_workflow_execution).
     field $cancel_requested = 0;
 
+    # "Terminal command already emitted" guard (B2 C-CANCEL-CMD, bugs #6/#7).
+    # RUN-scoped (persists across activations, unlike the per-activation @commands
+    # buffer): set the first time a workflow-terminal command (Complete / Cancel /
+    # Fail / ContinueAsNew) is pushed. After the :Run Future settles, core may
+    # still deliver further activations (e.g. the ResolveActivity for an activity
+    # that a CancelWorkflow (#6) or a Future->wait_any loser-cancel (#7) left
+    # pending. The outcome decision table runs every activation, so without this
+    # guard the still-settled :Run Future re-pushed its terminal command, yielding
+    # an invalid [..., Cancel, Cancel] / [..., Complete, Complete] sequence that
+    # core rejects (and that SEGVs the live worker on the #7 path). The guard
+    # emits at most one workflow-terminal command across the run.
+    field $workflow_terminal_emitted = 0;
+
     # A non-determinism error captured during job application (e.g. a
     # ResolveActivity for an unknown seq). Job application cannot simply die
     # because the dynamically-scoped $CURRENT teardown and the completion build
@@ -2627,6 +2640,23 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
+    # Emit a workflow-terminal command (CompleteWorkflowExecution,
+    # CancelWorkflowExecution, FailWorkflowExecution, or
+    # ContinueAsNewWorkflowExecution) AT MOST ONCE across the run (B2 C-CANCEL-CMD,
+    # bugs #6/#7). All three "this run is over" commands share this guard so a
+    # post-terminal activation (core resolving an activity that a CancelWorkflow
+    # (#6) or a wait_any loser-cancel (#7) left pending) does not re-push the
+    # terminal command and produce the invalid [..., Cancel, Cancel] /
+    # [..., Complete, Complete] sequence core rejects. Returns true when the
+    # command was emitted, false when suppressed as a duplicate (so callers can
+    # decide what else to buffer).
+    method _emit_terminal_command ($cmd) {
+        return 0 if $workflow_terminal_emitted;
+        $workflow_terminal_emitted = 1;
+        push @commands, $cmd;
+        return 1;
+    }
+
     # Build the WorkflowActivationCompletion from the run outcome + command
     # buffer. This is the spec section 10.3 step 6 OUTCOME DECISION TABLE
     # (MUST-match sdk-python _run_top_level_workflow_function /
@@ -2685,8 +2715,10 @@ class Temporalio::Workflow::Runner {
             my $payload = defined $result
                 ? $payload_converter->to_payload($result)
                 : undef;
-            push @commands,
-                Temporalio::Workflow::Commands::complete_workflow_execution($payload);
+            # Guarded so a post-completion activation (e.g. core resolving a
+            # wait_any loser activity, #7) never re-emits a second Complete.
+            $self->_emit_terminal_command(
+                Temporalio::Workflow::Commands::complete_workflow_execution($payload));
         }
 
         return $self->_successful_completion;
@@ -2700,7 +2732,8 @@ class Temporalio::Workflow::Runner {
         if (Scalar::Util::blessed($err)
             && $err->isa('Temporalio::Workflow::ContinueAsNew'))
         {
-            push @commands, $self->_build_continue_as_new_command($err);
+            $self->_emit_terminal_command(
+                $self->_build_continue_as_new_command($err));
             return $self->_successful_completion;
         }
 
@@ -2711,8 +2744,10 @@ class Temporalio::Workflow::Runner {
             && Scalar::Util::blessed($err)
             && $err->isa('Temporalio::Exception::Cancelled'))
         {
-            push @commands,
-                Temporalio::Workflow::Commands::cancel_workflow_execution();
+            # Guarded so a post-cancel activation (e.g. core resolving the
+            # try_cancel activity, #6) never re-emits a second Cancel.
+            $self->_emit_terminal_command(
+                Temporalio::Workflow::Commands::cancel_workflow_execution());
             return $self->_successful_completion;
         }
 
@@ -2875,10 +2910,14 @@ class Temporalio::Workflow::Runner {
     # buffered this activation are discarded — a failing run does not also emit
     # its earlier partial commands (sdk-python adds only the fail command).
     method _workflow_failed_completion ($err) {
+        # A failing run discards any partial commands buffered this activation
+        # (sdk-python adds only the fail command). Routed through the shared
+        # terminal-command guard (#6/#7) so a post-terminal activation cannot
+        # re-emit a second Fail; when already terminal, leave the buffer empty.
+        @commands = ();
         my $failure = $failure_converter->to_failure($err, $payload_converter);
-        @commands = (
-            Temporalio::Workflow::Commands::fail_workflow_execution($failure),
-        );
+        $self->_emit_terminal_command(
+            Temporalio::Workflow::Commands::fail_workflow_execution($failure));
         return $self->_successful_completion;
     }
 
