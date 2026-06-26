@@ -676,6 +676,19 @@ my @phase0_attach = (
     [ temporal_core_worker_complete_workflow_activation => 'worker_complete_workflow_activation',
       [ 'TemporalCoreWorker', 'TemporalCoreByteArrayRef', 'opaque', 'opaque' ]
         => 'void' ],
+    # Nexus poll/complete (spec section 26.3, #11). Identical shapes to the
+    # activity/workflow pairs: poll uses the 'worker_poll' kind (a
+    # TemporalCoreWorkerPollCallback returning the serialized coresdk.nexus.
+    # NexusTask byte array, or null/null on ShutDown); complete uses the 'worker'
+    # kind (a TemporalCoreWorkerCallback, fail-or-nothing) and takes the
+    # serialized coresdk.nexus.NexusTaskCompletion as a ByteArrayRef that must
+    # live through the callback. Both symbols ship in the pinned core C bridge
+    # (no shim change), so the existing trampoline pointers serve them.
+    [ temporal_core_worker_poll_nexus_task => 'worker_poll_nexus_task',
+      [ 'TemporalCoreWorker', 'opaque', 'opaque' ] => 'void' ],
+    [ temporal_core_worker_complete_nexus_task => 'worker_complete_nexus_task',
+      [ 'TemporalCoreWorker', 'TemporalCoreByteArrayRef', 'opaque', 'opaque' ]
+        => 'void' ],
     # Activity heartbeat (spec section 9.3, T-act-7). SYNCHRONOUS, not a
     # callback bridge call: the bridge serializes the coresdk.ActivityHeartbeat
     # proto we pass as a ByteArrayRef and returns NULL on success or an owned

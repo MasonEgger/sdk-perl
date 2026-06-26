@@ -22,6 +22,7 @@ use Temporalio::Activity::Pool ();
 use Temporalio::Worker::ActivityDispatcher ();
 use Temporalio::Worker::ActivityRegistry ();
 use Temporalio::Worker::Interceptor ();
+use Temporalio::Worker::NexusDispatcher ();
 use Temporalio::Worker::NexusRegistry ();
 use Temporalio::Worker::PollLoop ();
 use Temporalio::Worker::WorkflowDispatcher ();
@@ -428,7 +429,13 @@ class Temporalio::Worker {
             enable_workflows         => 1,
             enable_local_activities  => (@$workflows && @$activities) ? 1 : 0,
             enable_remote_activities => $no_remote_activities ? 0 : 1,
-            enable_nexus             => 0,
+            # Nexus serving (spec section 26.3, #11): enabled only when the worker
+            # registers a Nexus service. Hardcoded 0 meant core never polled Nexus
+            # tasks, so a handler worker could not serve operations and a caller's
+            # execute_nexus_operation blocked forever. With the flag set AND the
+            # Nexus poll loop wired in run(), the existing NexusDispatcher
+            # services each task. A non-Nexus worker stays at 0 (unaffected).
+            enable_nexus             => $self->_nexus_enabled,
 
             sticky_queue_schedule_to_start_timeout_millis =>
                 int($sticky_queue_schedule_to_start_timeout * 1000),
@@ -533,19 +540,32 @@ class Temporalio::Worker {
             loop        => $runtime->loop,
         );
 
+        # Nexus poll loop (spec section 26.3, #11): only wired when the worker
+        # registers a Nexus service (matches the enable_nexus build flag). Core
+        # rejects worker_poll_nexus_task when enable_nexus is off, so a non-Nexus
+        # worker must NOT start this loop.
+        my $nexus_loop;
+        if ($self->_nexus_enabled) {
+            $nexus_loop = Temporalio::Worker::PollLoop->new(
+                dispatcher  => $self->_build_nexus_dispatcher,
+                poll_source => sub { return $self->_poll_nexus_task },
+                loop        => $runtime->loop,
+            );
+        }
+
         my $error;
         {
             local $@;
-            # Drive both loops concurrently; each drains on its own ShutDown
-            # sentinel. wait_all waits for BOTH so neither loop is abandoned mid
-            # task (a still-running workflow/activity completion must be sent).
+            # Drive every loop concurrently; each drains on its own ShutDown
+            # sentinel. wait_all waits for ALL so no loop is abandoned mid task
+            # (a still-running workflow/activity/Nexus completion must be sent).
             # wait_all never itself fails, so inspect each sub-future and surface
-            # the first failure after both have settled.
-            my $af = $activity_loop->run;
-            my $wf = $workflow_loop->run;
+            # the first failure after all have settled.
+            my @loops = ($activity_loop->run, $workflow_loop->run);
+            push @loops, $nexus_loop->run if defined $nexus_loop;
             eval {
-                await Future->wait_all($af, $wf);
-                $_->is_failed and die(($_->failure)[0]) for $af, $wf;
+                await Future->wait_all(@loops);
+                $_->is_failed and die(($_->failure)[0]) for @loops;
                 1;
             } or $error = $@;
         }
@@ -645,6 +665,32 @@ class Temporalio::Worker {
         );
     }
 
+    # Build the Nexus dispatcher (spec section 26.2/26.3) with the real completer
+    # (worker_complete_nexus_task over the callback bridge). Only constructed when
+    # the worker registers a Nexus service; the dispatcher routes each polled
+    # NexusTask to a registered operation and sends the NexusTaskCompletion (#11).
+    method _build_nexus_dispatcher () {
+        my $runtime = $self->_runtime;
+        return Temporalio::Worker::NexusDispatcher->new(
+            registry       => $nexus_registry,
+            data_converter => $client->data_converter,
+            task_queue     => $task_queue,
+            client         => $client,
+            loop           => $runtime->loop,
+            completer      => sub ($completion_bytes) {
+                return $self->_complete_nexus_task($completion_bytes);
+            },
+        );
+    }
+
+    # _nexus_enabled() — true when the worker registers at least one Nexus
+    # service. Gates the enable_nexus build flag AND the Nexus poll loop so a
+    # non-Nexus worker neither asks core to poll Nexus tasks nor drains a loop
+    # (#11). Mirrors the registered-services rule the reference SDKs use.
+    method _nexus_enabled () {
+        return scalar(keys %{ $nexus_registry->services }) ? 1 : 0;
+    }
+
     # _in_versioned_mode() — true when this worker reports per-workflow
     # versioning behavior to core (spec §29.1): deployment-based with
     # use_worker_versioning on, or the legacy build-id strategy.
@@ -712,6 +758,37 @@ class Temporalio::Worker {
         my $f = Temporalio::Core::Callback->issue_async(
             $runtime, worker => sub ($user_data, $trampoline) {
                 Temporalio::Core::FFI::worker_complete_workflow_activation(
+                    $worker_ptr, $ref, $user_data, $trampoline);
+            });
+        return $f->on_ready(sub { @keep = (); undef $ref });
+    }
+
+    # Issue worker_poll_nexus_task over the callback bridge ('worker_poll' kind):
+    # resolves with the serialized coresdk.nexus.NexusTask bytes, or undef on the
+    # ShutDown sentinel. Same shape as the activity/workflow poll sources; only
+    # driven when the worker registers a Nexus service (#11).
+    method _poll_nexus_task () {
+        my $runtime = $self->_runtime;
+        return Temporalio::Core::Callback->issue_async(
+            $runtime, worker_poll => sub ($user_data, $trampoline) {
+                Temporalio::Core::FFI::worker_poll_nexus_task(
+                    $worker_ptr, $user_data, $trampoline);
+            });
+    }
+
+    # Issue worker_complete_nexus_task over the callback bridge ('worker' kind,
+    # fail-or-nothing). The serialized NexusTaskCompletion is passed as a
+    # ByteArrayRef; @keep pins the buffer through the call (#11).
+    method _complete_nexus_task ($completion_bytes) {
+        my $runtime = $self->_runtime;
+        my @keep;
+        my ($data, $size) =
+            Temporalio::Core::FFI::keep_buffer(\@keep, $completion_bytes);
+        my $ref = Temporalio::Core::FFI::ByteArrayRef->new(
+            data => $data, size => $size);
+        my $f = Temporalio::Core::Callback->issue_async(
+            $runtime, worker => sub ($user_data, $trampoline) {
+                Temporalio::Core::FFI::worker_complete_nexus_task(
                     $worker_ptr, $ref, $user_data, $trampoline);
             });
         return $f->on_ready(sub { @keep = (); undef $ref });

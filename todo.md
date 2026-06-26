@@ -45,10 +45,10 @@ leaves the suite green.
 - [x] B5.5 Verify: live repro passes; eager-workflow-start local-activity path works live; full `prove -lj4 t` green
 
 ## B6 C-NEXUS: enable Nexus serving + wire the task poller (#11)
-- [ ] B6.1 RED: create repro_nexus.t (one-worker caller->handler round-trip resolves); SUBPROCESS-GUARDED (blocks forever today); fail first
-- [ ] B6.2 GREEN: set enable_nexus from registered Nexus services (not hardcoded 0) and wire the Nexus task poll loop (memory guard + Alien rebuild if shim)
-- [ ] B6.3 REFACTOR: gate enable_nexus on actual Nexus registration; comment cites #11
-- [ ] B6.4 Verify: live round-trip passes; non-Nexus integration tests unaffected; full `prove -lj4 t` green
+- [x] B6.1 RED: create repro_nexus.t (one-worker caller->handler round-trip resolves); SUBPROCESS-GUARDED (blocks forever today); fail first
+- [x] B6.2 GREEN: set enable_nexus from registered Nexus services (not hardcoded 0) and wire the Nexus task poll loop (memory guard + Alien rebuild if shim)
+- [x] B6.3 REFACTOR: gate enable_nexus on actual Nexus registration; comment cites #11
+- [x] B6.4 Verify: live round-trip passes; non-Nexus integration tests unaffected; full `prove -lj4 t` green
 
 ## B7 C-ICEPT: invoke worker inbound interceptor chains (#10)
 - [ ] B7.1 RED: worker_inbound_interceptor.t spy asserts inbound execute_activity/execute_workflow (+ signal/query/update) invoked in order; repro_interceptor_inbound.t live smoke
