@@ -3,7 +3,7 @@
 
 [package]
 name = "temporalio-perl-bridge"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 description = "Callback trampoline shim between temporal-sdk-core-c-bridge and the Temporalio Perl SDK"

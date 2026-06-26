@@ -1,4 +1,4 @@
-# ABOUTME: v0.1.0 release version-agreement test (plan P5.5): every Perl
+# ABOUTME: v0.2.0 release version-agreement test (plan P5.5): every Perl
 # ABOUTME: distribution and hardcoded $VERSION declares the same dist version.
 use v5.38;
 use warnings;
@@ -13,10 +13,10 @@ my $repo_root = File::Spec->rel2abs(
     File::Spec->catdir($FindBin::Bin, File::Spec->updir, File::Spec->updir,
         File::Spec->updir));
 
-# The single source of truth for the v0.1 milestone (spec section 11:
-# "Temporalio::SDK::VERSION = 0.1.0"). All three distributions ship together
+# The single source of truth for the v0.2 milestone (spec section 11:
+# "Temporalio::SDK::VERSION"). All three distributions ship together
 # from this monorepo and must agree on the dist version.
-my $AGREED_VERSION = '0.1.0';
+my $AGREED_VERSION = '0.2.0';
 
 # --- helpers ---------------------------------------------------------------
 
@@ -104,11 +104,11 @@ T2->subtest('Rust shim crate version agrees' => sub {
 
 # --- the public SDK $VERSION the spec section 11 acceptance names -----------
 
-T2->subtest('Temporalio::SDK::VERSION == 0.1.0 (spec section 11)' => sub {
+T2->subtest('Temporalio::SDK::VERSION == 0.2.0 (spec section 11)' => sub {
     require Temporalio::SDK;
     no warnings 'once';
     T2->is($Temporalio::SDK::VERSION, $AGREED_VERSION,
-        '$Temporalio::SDK::VERSION matches the agreed v0.1 release version');
+        '$Temporalio::SDK::VERSION matches the agreed v0.2 release version');
 });
 
 # --- the Alien::Temporalio::Core pinned-sdk-core version is a SEPARATE axis --

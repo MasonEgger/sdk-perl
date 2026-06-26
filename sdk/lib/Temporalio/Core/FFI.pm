@@ -451,7 +451,7 @@ package Temporalio::Core::FFI::ClientEnvConfigOrFail {
 
 package Temporalio::Core::FFI;
 
-our $VERSION = '0.1.0';
+our $VERSION = '0.2.0';
 
 use FFI::Platypus 2.00;
 use FFI::Platypus::Buffer ();

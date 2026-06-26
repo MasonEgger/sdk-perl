@@ -5,7 +5,7 @@ package Temporalio::SDK;
 use v5.38;
 use warnings;
 
-our $VERSION = '0.1.0';
+our $VERSION = '0.2.0';
 
 1;
 

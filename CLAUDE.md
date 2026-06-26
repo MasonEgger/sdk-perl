@@ -5,22 +5,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Temporal SDK for Perl, driving the Rust `sdk-core` through its C ABI
-(`temporalio-sdk-core-c-bridge`) via `FFI::Platypus`. **Status: v0.1.0
-complete** (Phases 0–5: client, worker, sync/async activities, workflows,
-signals, queries, wait_condition, cancellation, continue-as-new, data
-conversion). **v0.2 (feature parity with the mature SDKs, Phases 6–10) is in
-progress** per spec §18–§31 and plan P6.1–P10.10.
+(`temporalio-sdk-core-c-bridge`) via `FFI::Platypus`. **Status: v0.2.0, feature-complete.** v0.1 (Phases 0-5: client, worker,
+sync/async activities, workflows, signals, queries, wait_condition,
+cancellation, continue-as-new, data conversion) and v0.2 (Phases 6-10, spec
+§18-§31: child workflows, updates, external handles, local activities, async
+activity completion, eager start, upsert SA/memo, schedules, Nexus, interceptors
++ OTel, log forwarding, metric meters, worker versioning, tuner/slot suppliers,
+autoscaling pollers, determinism guard, reset, http_proxy, env-config) are
+implemented; unit and replay suites green.
 
 ## Document hierarchy (read in this order)
 
-1. `spec.md` — the implementation contract. Every component has a public
+1. `.ai-sessions/v1/spec.md`: the implementation contract (archived under
+   `.ai-sessions/v1/` now that v1 is complete). Every component has a public
    API, behavioral contract, failure modes, and test IDs (`T-*`). The
    prime directive (spec §0): Temporal-spec semantics first, Perl idioms
-   second. When anything conflicts with spec.md, spec.md wins.
-2. `plan.md` — TDD steps generated from the spec for `/bpe:execute-plan`
-   (Phases 0–5 = v0.1, done; Phases 6–10 = v0.2, steps P6.1–P10.10). Each
-   step is a prompt with RED/GREEN/REFACTOR sub-steps.
-3. `todo.md` — per-sub-step checkbox tracker; check items off as completed.
+   second. When anything conflicts with the spec, the spec wins.
+2. `.ai-sessions/v1/plan.md`: TDD steps for `/bpe:execute-plan` (Phases 0-5 =
+   v0.1, Phases 6-10 = v0.2, steps P6.1-P10.10, all complete). Each step is a
+   prompt with RED/GREEN/REFACTOR sub-steps.
+3. `.ai-sessions/v1/todo.md`: per-sub-step checkbox tracker (all checked).
 4. `.ai-sessions/` — session summaries and `lessons.md`. Read the most
    recent summary before starting work; `lessons.md` holds hard-won
    toolchain gotchas (proto sub-message blessing, one-`class :isa`-per-file

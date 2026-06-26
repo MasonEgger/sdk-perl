@@ -5,7 +5,7 @@ use warnings;
 
 package Temporalio::Core::FFI::WorkerOptions;
 
-our $VERSION = '0.1.0';
+our $VERSION = '0.2.0';
 
 use Temporalio::Core::FFI ();
 

@@ -11,7 +11,7 @@ use parent 'Alien::Base';
 
 use File::Spec ();
 
-our $VERSION = '0.1.0';
+our $VERSION = '0.2.0';
 
 sub include_dir {
     my ($class) = @_;

@@ -15,12 +15,12 @@ over [IO::Async](https://metacpan.org/pod/IO::Async). Workflows run in a custom
 deterministic scheduler that resolves their futures from server activations rather
 than from wall-clock timers.
 
-> **Status: pre-1.0 (v0.1).** The public API is taking shape against the
-> implementation contract in [`spec.md`](spec.md). It is functional end to end —
-> client, worker, activities, and workflows with signals, queries, timers,
-> cancellation, and continue-as-new all work against a real server — but the
-> surface will change, and some features are
-> [deferred to v0.2+](#not-yet-supported). Expect breaking changes.
+> **Status: pre-1.0 (v0.2).** Both v0.1 and v0.2 (feature parity with the mature
+> SDKs) are implemented: client, worker, sync/async activities, and workflows
+> with signals, queries, updates, timers, cancellation, continue-as-new, child
+> workflows, external handles, local activities, schedules, Nexus, interceptors,
+> and worker hardening. The public API is pre-1.0 and may still change before a
+> 1.0 release; expect breaking changes.
 
 **Contents**
 
@@ -683,15 +683,16 @@ run is expected.
 
 ## Not yet supported
 
-The following are intentionally **deferred past v0.1** ([`spec.md` §15](spec.md)) and
-are not usable yet, even where placeholder classes exist:
+The v0.1 and v0.2 feature set is implemented. The following are out of scope for
+now:
 
-- **Child workflows** (`execute_child_workflow`).
-- **Workflow updates** (`:Update` handlers and client-side update calls). Signals
-  and queries are supported.
-- **Nexus** operations (the `Nexus*` exception classes only map server failures).
-- **Schedules**, **local activities** as a first-class API, and **interceptors /
-  plugins**.
+- **A time-skipping test environment.** Workflow tests use the deterministic
+  replay harness (`Temporalio::Test::WorkflowReplay`) or a real dev server
+  (`Temporalio::Test::DevServer`); there is no time-skipping `WorkflowEnvironment`.
+- **Windows.** The build targets Linux and other Unix-like platforms (the
+  callback bridge uses `eventfd` on Linux and a pipe elsewhere).
+- **CPAN distribution.** The three distributions are not published to CPAN yet;
+  install from this repository.
 
 ## Requirements
 
@@ -731,8 +732,8 @@ dzil test                                        # per-distribution check (run i
 
 Every public class ships hand-written POD; after installing, run
 `perldoc Temporalio::Client` (or `::Worker`, `::Workflow`, `::Activity`, …). The
-implementation contract is [`spec.md`](spec.md); the TDD roadmap is
-[`plan.md`](plan.md).
+implementation contract is [`spec.md`](.ai-sessions/v1/spec.md); the TDD roadmap
+is [`plan.md`](.ai-sessions/v1/plan.md).
 
 ## License
 

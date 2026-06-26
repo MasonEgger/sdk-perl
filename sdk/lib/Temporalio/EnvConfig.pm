@@ -5,7 +5,7 @@ use warnings;
 
 package Temporalio::EnvConfig;
 
-our $VERSION = '0.1.0';
+our $VERSION = '0.2.0';
 
 use JSON::PP ();
 use FFI::Platypus::Buffer ();
