@@ -52,6 +52,12 @@ my %TRUSTME = (
     # whose methods mirror the OutboundInterceptor surface and perform the real
     # RPC. Documented collectively in Temporalio::Client::Interceptor's POD.
     'Temporalio::Client::_RootOutbound' => [ qr/^[a-z]/ ],
+    # The worker inbound chain roots (spec section 27.2): internal mechanisms
+    # whose methods mirror the ActivityInbound / WorkflowInbound surface and
+    # perform the real activity/workflow dispatch via the input's _root coderef.
+    # Documented collectively in Temporalio::Worker::Interceptor's POD.
+    'Temporalio::Worker::_RootActivityInbound' => [ qr/^[a-z]/ ],
+    'Temporalio::Worker::_RootWorkflowInbound' => [ qr/^[a-z]/ ],
 );
 
 my @modules = all_modules('lib');

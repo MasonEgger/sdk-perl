@@ -23,6 +23,8 @@ use Temporalio::Exception::Activity::CompleteAsync ();
 use Temporalio::Exception::Application ();
 use Temporalio::Exception::Cancelled ();
 use Temporalio::Worker::ActivityCompletion ();
+use Temporalio::Worker::Interceptor ();          # build_activity_inbound + Input::*
+use Temporalio::Worker::_RootActivityInbound ();
 
 class Temporalio::Worker::ActivityDispatcher {
     # Temporalio::Worker::ActivityRegistry: activity type name -> { code, ... }.
@@ -52,6 +54,12 @@ class Temporalio::Worker::ActivityDispatcher {
     # Activity::Context for synchronous heartbeat recording. undef when the
     # worker carries no heartbeat path (heartbeats then no-op Perl-side).
     field $heartbeat_recorder :param = undef;
+
+    # The combined worker interceptor list (client-supplied then worker-supplied,
+    # spec section 27.2). Each activity start folds these over a root impl that
+    # runs the real body, so the activity-inbound chain is actually invoked (#10:
+    # the chain was built by Worker.pm but the dispatch path never called it).
+    field $interceptors :param = [];
 
     # task_token => { cancellation => Temporalio::Cancellation, context => ... }.
     # Added on start (step 5), used by cancel routing (step 3), removed on
@@ -134,11 +142,27 @@ class Temporalio::Worker::ActivityDispatcher {
 
             # Step 6: route by the activity's sync/async declaration. A sync
             # activity runs in the fork pool (spec section 9.4); an async one
-            # runs on the main loop under a dynamically-scoped Context.
+            # runs on the main loop under a dynamically-scoped Context. Either
+            # way the real dispatch is the ROOT of the activity-inbound chain:
+            # the combined interceptor list (client then worker, outermost
+            # first) wraps it, so every inbound execute_activity is invoked in
+            # order before reaching the body (#10). The root reads the body from
+            # the input's private `_root` coderef (the client-outbound _RootOutbound
+            # convention).
+            my $inbound = Temporalio::Worker::Interceptor::build_activity_inbound(
+                $interceptors,
+                Temporalio::Worker::_RootActivityInbound->new);
             my $result;
             if ($def->{sync}) {
-                $result = await $self->_run_in_pool(
-                    $task_token, $info, $cancellation, @args);
+                my $input =
+                    Temporalio::Worker::Interceptor::Input::ExecuteActivity->new(
+                        args  => [@args],
+                        _root => sub ($in) {
+                            return $self->_run_in_pool($task_token, $info,
+                                $cancellation, @{ $in->args });
+                        },
+                    );
+                $result = await $inbound->execute_activity($input);
             }
             else {
                 # Build the per-invocation context (spec section 9.3). info is
@@ -154,16 +178,25 @@ class Temporalio::Worker::ActivityDispatcher {
                 );
                 $running{$task_token}{context} = $ctx;
 
+                my $input =
+                    Temporalio::Worker::Interceptor::Input::ExecuteActivity->new(
+                        args  => [@args],
+                        _root => sub ($in) {
+                            return $self->_invoke($def->{code}, @{ $in->args });
+                        },
+                    );
+
                 # Run the body with the context dynamically scoped (NEVER
                 # `local` — F::AA panics across an await, spec section 16.1). The
                 # `dynamically` MUST wrap the `await` itself, not just the
                 # synchronous call: Syntax::Keyword::Dynamically restores the
                 # value correctly across each suspend/resume, so a body that
                 # parks on `await $ctx->cancellation->cancelled` still sees
-                # $CURRENT when it resumes.
+                # $CURRENT when it resumes. Scoping the whole chain await keeps
+                # the Context live through every inbound interceptor too.
                 $result = do {
                     dynamically $Temporalio::Activity::Context::CURRENT = $ctx;
-                    await $self->_invoke($def->{code}, @args);
+                    await $inbound->execute_activity($input);
                 };
             }
 

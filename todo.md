@@ -51,10 +51,10 @@ leaves the suite green.
 - [x] B6.4 Verify: live round-trip passes; non-Nexus integration tests unaffected; full `prove -lj4 t` green
 
 ## B7 C-ICEPT: invoke worker inbound interceptor chains (#10)
-- [ ] B7.1 RED: worker_inbound_interceptor.t spy asserts inbound execute_activity/execute_workflow (+ signal/query/update) invoked in order; repro_interceptor_inbound.t live smoke
-- [ ] B7.2 GREEN: wire built inbound chains into the activity dispatcher + workflow activation dispatch
-- [ ] B7.3 REFACTOR: ordering matches the outbound contract (client then worker, outermost first); comment cites #10
-- [ ] B7.4 Verify: unit spy + live smoke pass; full `prove -lj4 t` green
+- [x] B7.1 RED: worker_inbound_interceptor.t spy asserts inbound execute_activity/execute_workflow (+ signal/query/update) invoked in order; repro_interceptor_inbound.t live smoke
+- [x] B7.2 GREEN: wire built inbound chains into the activity dispatcher + workflow activation dispatch
+- [x] B7.3 REFACTOR: ordering matches the outbound contract (client then worker, outermost first); comment cites #10
+- [x] B7.4 Verify: unit spy + live smoke pass; full `prove -lj4 t` green
 
 ## B8 Cleanup: sample fix, revert workarounds, docs live-verified
 - [ ] B8.1 activity-choice sample fix (samples-perl): Menu returns undef; Workflow raises non-retryable Application; update t/01 + confirm t/02-smoke fast

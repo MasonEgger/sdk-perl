@@ -28,6 +28,8 @@ use Temporalio::Exception::Workflow::NoRunner ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::NexusOperation ();
 use Temporalio::Common::SearchAttributeUpdate ();
+use Temporalio::Worker::Interceptor ();          # build_workflow_inbound + Input::*
+use Temporalio::Worker::_RootWorkflowInbound ();
 
 # The dynamically-scoped pointer to the currently-active runner. Every
 # Temporalio::Workflow:: context function looks it up here (spec section 10.2).
@@ -105,7 +107,16 @@ class Temporalio::Workflow::Runner {
     # non-versioned worker, so this defaults off.
     field $report_versioning_behavior :param = 0;
 
+    # The combined worker interceptor list (client-supplied then worker-supplied,
+    # spec section 27.2). Folded over a root impl once the instance exists to
+    # form $workflow_inbound; execute_workflow / handle_signal / handle_query /
+    # handle_update all flow through that chain to the real handler (#10: the
+    # chain was built by Worker.pm but the dispatch path never called it). The
+    # replay harness defaults it empty (no interceptors).
+    field $interceptors :param = [];
+
     field $instance;                 # the workflow Definition instance
+    field $workflow_inbound;         # the built workflow-inbound interceptor chain
     field $workflow_type;            # resolved run type name
     field @commands;                 # outbound WorkflowCommand buffer
     field $main_run_future;          # the Future returned by :Run
@@ -1659,7 +1670,25 @@ class Temporalio::Workflow::Runner {
         # returned Future is pumped, not awaited synchronously.
         $instance = $workflow_class->new;
         my $run_ref = $workflow_class->_workflow_defs->{run};
-        $main_run_future = $instance->$run_ref(@args);
+
+        # Build the workflow-inbound interceptor chain now the instance exists,
+        # folding the combined list (client-supplied then worker-supplied,
+        # outermost first) over a root impl that calls the real handler (#10).
+        # The chain is cached for the run, so signals/queries/updates on later
+        # activations route through it too. execute_workflow is the run-body
+        # entry: the root reads the kicked-off body from the input's `_root`
+        # coderef (the client-outbound _RootOutbound convention).
+        $workflow_inbound =
+            Temporalio::Worker::Interceptor::build_workflow_inbound(
+                $interceptors,
+                Temporalio::Worker::_RootWorkflowInbound->new);
+        my $execute_input =
+            Temporalio::Worker::Interceptor::Input::ExecuteWorkflow->new(
+                type  => $workflow_class,
+                args  => [@args],
+                _root => sub ($in) { $instance->$run_ref(@{ $in->args }) },
+            );
+        $main_run_future = $workflow_inbound->execute_workflow($execute_input);
 
         # Drain any signals buffered before the instance existed (spec section
         # 10.3 T-wf-3 QUEUEING; MUST-match sdk-python draining _buffered_signals
@@ -2313,12 +2342,21 @@ class Temporalio::Workflow::Runner {
             (($job->input // [])->@*);
         my $name = $job->signal_name // '';
 
+        # Route through the workflow-inbound chain so every inbound handle_signal
+        # is invoked (outermost first) before the real handler (#10). The root
+        # reads the real handler from the input's `_root` coderef.
         my $future = Future->call(sub {
-            return Future->wrap(
-                $is_dynamic
-                    ? $instance->$handler($name, @args)
-                    : $instance->$handler(@args)
-            );
+            my $input =
+                Temporalio::Worker::Interceptor::Input::HandleSignal->new(
+                    signal => $name,
+                    args   => [@args],
+                    _root  => sub ($in) {
+                        return $is_dynamic
+                            ? $instance->$handler($name, @{ $in->args })
+                            : $instance->$handler(@{ $in->args });
+                    },
+                );
+            return Future->wrap($workflow_inbound->handle_signal($input));
         });
 
         # An already-ready handler (a synchronous handler that returned or threw)
@@ -2433,12 +2471,22 @@ class Temporalio::Workflow::Runner {
         push @commands, Temporalio::Workflow::Commands::update_response(
             $protocol_instance_id, accepted => 1);
 
+        # Route the handler through the workflow-inbound chain so every inbound
+        # handle_update is invoked (outermost first) before the real handler
+        # (#10). The root reads the real handler from the input's `_root` coderef.
         my $future = Future->call(sub {
-            return Future->wrap(
-                $is_dynamic
-                    ? $instance->$handler($name, @args)
-                    : $instance->$handler(@args)
-            );
+            my $input =
+                Temporalio::Worker::Interceptor::Input::HandleUpdate->new(
+                    id     => $job->id // '',
+                    update => $name,
+                    args   => [@args],
+                    _root  => sub ($in) {
+                        return $is_dynamic
+                            ? $instance->$handler($name, @{ $in->args })
+                            : $instance->$handler(@{ $in->args });
+                    },
+                );
+            return Future->wrap($workflow_inbound->handle_update($input));
         });
 
         # When the handler Future is ready now (a synchronous handler), settle
@@ -2600,12 +2648,22 @@ class Temporalio::Workflow::Runner {
         my @args = map { $payload_converter->from_payload($_) }
             (($job->arguments // [])->@*);
 
+        # Route through the workflow-inbound chain so every inbound handle_query
+        # is invoked (outermost first) before the real handler (#10). The root
+        # reads the real handler from the input's `_root` coderef.
         my $future = Future->call(sub {
-            return Future->wrap(
-                $is_dynamic
-                    ? $instance->$handler($name, @args)
-                    : $instance->$handler(@args)
-            );
+            my $input =
+                Temporalio::Worker::Interceptor::Input::HandleQuery->new(
+                    id    => $query_id,
+                    query => $name,
+                    args  => [@args],
+                    _root => sub ($in) {
+                        return $is_dynamic
+                            ? $instance->$handler($name, @{ $in->args })
+                            : $instance->$handler(@{ $in->args });
+                    },
+                );
+            return Future->wrap($workflow_inbound->handle_query($input));
         });
 
         if (my @failure = $future->failure) {

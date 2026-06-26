@@ -605,6 +605,9 @@ class Temporalio::Worker {
             client         => $client,
             loop           => $runtime->loop,
             pool           => $activity_pool,
+            # The combined interceptor list drives the activity-inbound chain
+            # the dispatcher now invokes per start (#10).
+            interceptors   => $all_interceptors,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_activity_task($completion_bytes);
             },
@@ -659,6 +662,10 @@ class Temporalio::Worker {
             # above and sdk-ruby). When off, a workflow calling
             # execute_local_activity fails cleanly instead of hanging core (#9).
             local_activities_enabled => (@$workflows && @$activities) ? 1 : 0,
+            # The combined interceptor list drives the workflow-inbound chain
+            # each per-run Runner now invokes for execute_workflow / handle_signal
+            # / handle_query / handle_update (#10).
+            interceptors   => $all_interceptors,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_workflow_activation($completion_bytes);
             },

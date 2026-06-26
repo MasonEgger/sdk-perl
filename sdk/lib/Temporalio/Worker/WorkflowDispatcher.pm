@@ -48,6 +48,12 @@ class Temporalio::Worker::WorkflowDispatcher {
     # when the worker built with enable_local_activities => 0 (#9).
     field $local_activities_enabled :param = 1;
 
+    # The combined worker interceptor list (client-supplied then worker-supplied,
+    # spec section 27.2), threaded to each Runner so the workflow-inbound chain
+    # is built and actually invoked for execute_workflow / handle_signal /
+    # handle_query / handle_update (#10).
+    field $interceptors :param = [];
+
     # A coderef ($completion_bytes) -> Future: sends the serialized
     # WorkflowActivationCompletion to core (worker_complete_workflow_activation
     # over the callback bridge). Injectable so unit tests capture completions
@@ -171,6 +177,7 @@ class Temporalio::Worker::WorkflowDispatcher {
             disable_eager_activity_execution => $disable_eager_activity_execution,
             report_versioning_behavior => $report_versioning_behavior,
             local_activities_enabled   => $local_activities_enabled,
+            interceptors               => $interceptors,
         );
         $runners{$run_id} = $runner;
         return $runner;

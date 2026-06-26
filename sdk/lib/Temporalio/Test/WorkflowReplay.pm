@@ -36,6 +36,12 @@ class Temporalio::Test::WorkflowReplay {
     # eager activity execution enabled.
     field $disable_eager_activity_execution :param = 0;
 
+    # The combined worker interceptor list (spec section 27.2), threaded to the
+    # Runner so a replay test can assert the workflow-inbound chain is actually
+    # invoked for execute_workflow / handle_signal / handle_query / handle_update
+    # (#10). Defaults empty (no interceptors).
+    field $interceptors :param = [];
+
     # The per-run Runner. Created lazily on the first push_activation so the
     # run_id from the activation seeds it (one harness drives one run, like
     # Python's WorkflowReplayer over a single run).
@@ -76,6 +82,7 @@ class Temporalio::Test::WorkflowReplay {
             nondeterminism_as_workflow_fail  => $nondeterminism_as_workflow_fail,
             namespace                        => $namespace,
             disable_eager_activity_execution => $disable_eager_activity_execution,
+            interceptors                     => $interceptors,
         );
 
         my $completion = $runner->process_activation($activation);
