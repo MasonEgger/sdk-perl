@@ -91,6 +91,14 @@ class Temporalio::Workflow::Runner {
     # TASK (the server retries); when true, it fails the WORKFLOW.
     field $nondeterminism_as_workflow_fail :param = 0;
 
+    # Whether the backing worker enabled the local-activity path (worker.rb rule:
+    # workflows && activities registered). Defaults TRUE so the replay harness and
+    # in-process tests keep scheduling LAs; the live worker injects the real value.
+    # When false, schedule_local_activity raises a clean error at the call site
+    # instead of emitting a ScheduleLocalActivity command core would drop, which
+    # left the workflow hung forever (and SEGV'd at teardown pre-B4) (#9).
+    field $local_activities_enabled :param = 1;
+
     # Worker versioning (spec §29.1): true when the worker runs in versioned
     # mode, so a successful completion may carry the per-workflow
     # VersioningBehavior (field 7). Core rejects a versioning_behavior from a
@@ -538,6 +546,21 @@ class Temporalio::Workflow::Runner {
     # per-LA state needed to re-schedule lives in %local_activity_state.
     method schedule_local_activity (%opts) {
         $self->_assert_writable('execute_local_activity/start_local_activity');
+
+        # Boundary guard (#9): a worker with no registered activities builds with
+        # enable_local_activities => 0, so core silently drops any
+        # ScheduleLocalActivity command and the workflow hangs forever (pre-B4 it
+        # SEGV'd the worker at teardown). Fail the call cleanly here instead, so a
+        # regression surfaces as a workflow-task error naming the cause, never a
+        # hang or a crash.
+        unless ($local_activities_enabled) {
+            die "Temporalio::Workflow::Runner: execute_local_activity/"
+              . "start_local_activity requires the worker to register the "
+              . "activity, but this worker has no activities registered "
+              . "(local activities run the worker's own activity code). Add the "
+              . "activity to the worker's 'activities' list (#9).\n";
+        }
+
         my $activity_type = $opts{activity_type}
             // die "Temporalio::Workflow::Runner: schedule_local_activity needs "
                  . "an activity_type";

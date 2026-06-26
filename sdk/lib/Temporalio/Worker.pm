@@ -415,11 +415,18 @@ class Temporalio::Worker {
             # max_concurrent_* slots (nexus is a fixed 100 in v0.1, spec 8.1).
             $self->_slot_supplier_options,
 
-            # task_types: workflows + remote activities only (spec 8.1).
-            # no_remote_activities (spec 23.2) flips enable_remote_activities;
-            # otherwise remote activities are enabled.
+            # task_types (spec 8.1): workflows always; remote activities unless
+            # no_remote_activities (spec 23.2); local activities only when the
+            # worker registers BOTH workflows and activities, since LAs run on the
+            # workflow worker and execute the same registered activity code. Core
+            # delivers LA tasks through the same poll_activity_task path, so the
+            # existing activity dispatcher handles them once the flag is set. This
+            # flag was hardcoded 0 (#9), which left the local-activity path off:
+            # core dropped every ScheduleLocalActivity command and the workflow
+            # hung forever (and SEGV'd at teardown pre-B4). Matches sdk-ruby
+            # (worker.rb: enable_local_activities = workflows && activities).
             enable_workflows         => 1,
-            enable_local_activities  => 0,
+            enable_local_activities  => (@$workflows && @$activities) ? 1 : 0,
             enable_remote_activities => $no_remote_activities ? 0 : 1,
             enable_nexus             => 0,
 
@@ -626,6 +633,12 @@ class Temporalio::Worker {
             # ("versioning behavior cannot be specified without deployment
             # options being set with versioned mode").
             report_versioning_behavior => $self->_in_versioned_mode,
+            # Local activities run on the workflow worker and execute the worker's
+            # own registered activity code, so the path is enabled only when BOTH
+            # workflows and activities are registered (matches the build flag
+            # above and sdk-ruby). When off, a workflow calling
+            # execute_local_activity fails cleanly instead of hanging core (#9).
+            local_activities_enabled => (@$workflows && @$activities) ? 1 : 0,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_workflow_activation($completion_bytes);
             },

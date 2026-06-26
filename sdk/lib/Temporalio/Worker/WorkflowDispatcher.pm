@@ -43,6 +43,11 @@ class Temporalio::Worker::WorkflowDispatcher {
     # from a non-versioned worker, so this defaults off.
     field $report_versioning_behavior :param = 0;
 
+    # Whether the worker enabled the local-activity path (workflows && activities
+    # registered). Threaded to each Runner so execute_local_activity fails cleanly
+    # when the worker built with enable_local_activities => 0 (#9).
+    field $local_activities_enabled :param = 1;
+
     # A coderef ($completion_bytes) -> Future: sends the serialized
     # WorkflowActivationCompletion to core (worker_complete_workflow_activation
     # over the callback bridge). Injectable so unit tests capture completions
@@ -165,6 +170,7 @@ class Temporalio::Worker::WorkflowDispatcher {
             namespace         => $namespace,
             disable_eager_activity_execution => $disable_eager_activity_execution,
             report_versioning_behavior => $report_versioning_behavior,
+            local_activities_enabled   => $local_activities_enabled,
         );
         $runners{$run_id} = $runner;
         return $runner;

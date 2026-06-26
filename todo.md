@@ -38,11 +38,11 @@ leaves the suite green.
 - [x] B4.5 Verify: repro_fd_signal.t passes un-gated; repro_external_signal.t passes; full `prove -lj4 t` green
 
 ## B5 C-LOCALACT: fix execute_local_activity segfault (#9)
-- [ ] B5.1 RED: create repro_local_activity.t (plain local activity returns, no exit 139) + a timeout+retry variant; SUBPROCESS-GUARDED (SEGV exit 139); fail first
-- [ ] B5.2 Diagnose: locate the segfault origin (Perl-side resolution vs shim path); record in ROOT-CAUSE-MAP.md + flag shim-touching or not
-- [ ] B5.3 GREEN: minimal fix at the identified layer (memory guard + Alien rebuild if shim)
-- [ ] B5.4 REFACTOR: boundary guard so a regression is a clean error, not a SEGV
-- [ ] B5.5 Verify: live repro passes; eager-workflow-start local-activity path works live; full `prove -lj4 t` green
+- [x] B5.1 RED: create repro_local_activity.t (plain local activity returns, no exit 139) + a timeout+retry variant; SUBPROCESS-GUARDED (SEGV exit 139); fail first
+- [x] B5.2 Diagnose: locate the segfault origin (Perl-side resolution vs shim path); record in ROOT-CAUSE-MAP.md + flag shim-touching or not
+- [x] B5.3 GREEN: minimal fix at the identified layer (memory guard + Alien rebuild if shim)
+- [x] B5.4 REFACTOR: boundary guard so a regression is a clean error, not a SEGV
+- [x] B5.5 Verify: live repro passes; eager-workflow-start local-activity path works live; full `prove -lj4 t` green
 
 ## B6 C-NEXUS: enable Nexus serving + wire the task poller (#11)
 - [ ] B6.1 RED: create repro_nexus.t (one-worker caller->handler round-trip resolves); SUBPROCESS-GUARDED (blocks forever today); fail first
