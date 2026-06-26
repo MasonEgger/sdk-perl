@@ -8,9 +8,9 @@ repros run in a timeout-guarded subprocess (never in-process); every commit
 leaves the suite green.
 
 ## B0 Triage doc (ROOT-CAUSE-MAP.md)
-- [ ] B0.1 Investigate each cluster read-only; locate the suspected root file:line (no test/source changes)
-- [ ] B0.2 Write ROOT-CAUSE-MAP.md: bug# -> cluster -> planned repro -> root file:line -> Perl/shim -> test type (replay vs subprocess-guarded integration); flag same-root candidates
-- [ ] B0.3 Verify suite stays green (doc-only); commit ROOT-CAUSE-MAP.md + session summary
+- [x] B0.1 Investigate each cluster read-only; locate the suspected root file:line (no test/source changes)
+- [x] B0.2 Write ROOT-CAUSE-MAP.md: bug# -> cluster -> planned repro -> root file:line -> Perl/shim -> test type (replay vs subprocess-guarded integration); flag same-root candidates
+- [x] B0.3 Verify suite stays green (doc-only); commit ROOT-CAUSE-MAP.md + session summary
 
 ## B1 C-COND: preserve continuation-registered conditions (#3, #4)
 - [ ] B1.1 RED: create repro_check_conditions.t (replay; CAN-boundary synchronous re-park) + #4 timer re-arm variant; fails for the documented reason first
