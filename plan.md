@@ -67,7 +67,7 @@ C-COND lands.
 - [ ] B6 C-NEXUS: enable Nexus serving + wire the task poller (#11)
 - [ ] B7 C-ICEPT: invoke worker inbound interceptor chains (#10)
 - [~] B8 Cleanup: activity-choice sample fix, revert sample workarounds, docs live-verified (PARTIAL: B8.1 done, B8.2 8/11 reverts landed; #1/#4/#10/#11 deferred to B9/B10/B11)
-- [ ] B9 C-FD-REAL: sync fork-pool child corrupts the bridge signal fd (#1; #11 shares it)
+- [~] B9 C-FD-REAL (RE-SCOPED): NO SDK signal-fd bug. #1 is a samples-perl import bug; the fix moves to B8 reconciliation. Fork-pool/signal-fd path verified healthy.
 - [ ] B10 C-COND-TIMEOUT: wait_condition-with-timeout timer cancel/re-arm wedge (#4)
 - [ ] B11 C-ICEPT-HEADERS: workflow-inbound input missing start headers (#10)
 
@@ -350,7 +350,16 @@ activity-choice fix is a samples-perl change, not an SDK change.
      t/02-smoke.t resolves fast as a WorkflowFailure (no timeout) with the SDK present.
 2. Revert each sample workaround per the cleanup contract, one box at a time,
    verifying the now-un-gated live smoke passes against a dev server:
-   - #1 sync-activity: drop TEMPORAL_SYNC_ACTIVITY_LIVE gate.
+   - #1 sync-activity: FIX THE IMPORT BUG FIRST (this is the real #1 root cause,
+     not an SDK bug; see re-scoped Step B9). In
+     sync-activity/lib/SyncActivity/Activities.pm the `use SyncActivity::Compute
+     qw(count_primes)` imports into package `main`, so the unqualified call inside
+     `class SyncActivity::Activities` resolves to an undefined sub and the activity
+     dies every dispatch (the ~200s loop). Either qualify the call to
+     `SyncActivity::Compute::count_primes(...)` OR import into the activity's own
+     package. THEN drop the TEMPORAL_SYNC_ACTIVITY_LIVE gate AND the stale "wedges
+     the worker loop" comment in sync-activity/t/02-smoke.t. The "signal fd write
+     failed (Bad file descriptor)" line is a benign teardown artifact, not a bug.
    - #2 mutex: drop MUTEX_SMOKE gate; verify full multi-caller hand-off.
    - #3 batch-sliding-window: restore the snapshot wait_condition form.
    - #4 updatable-timer: drop TEMPORAL_UPDATABLE_TIMER_LIVE gate.
@@ -377,55 +386,78 @@ activity-choice fix is a samples-perl change, not an SDK change.
 the activity-choice fix landed in samples-perl @3b3dded (Menu returns undef,
 Workflow raises a non-retryable Application). B8.2 is PARTIAL: 8 of the 11
 reverts landed and were verified live un-gated in samples-perl @3b3dded (#2, #3,
-#5, #6, #7, #8, #9). The reverts for #1, #4, #10, #11 are DEFERRED because B8.2's
-safety valve surfaced FOUR residual SDK bugs the B1-B7 fixes did not fully cover.
-Those become fix steps B9 (#1, and #11 shares its fd path), B10 (#4), and B11
-(#10) below. RECONCILIATION ORDER: land B9, B10, B11 first; THEN revert the
-remaining sample workarounds (#1, #4, #10, #11) in samples-perl and verify their
-un-gated live smokes; THEN do B8.3 (flip the sdk-perl CLAUDE.md + README status
-lines to "verified live against a dev server") and B8.5 (final green-suite +
-all-reverts-pass verification).
+#5, #6, #7, #8, #9). The reverts for #1, #4, #10, #11 are DEFERRED.
+
+CORRECTION (2026-06-26): the B8.2 safety valve was originally read as surfacing
+FOUR residual SDK bugs. The B9 investigation revised that down to THREE. #1 is
+NOT an SDK bug: it is a samples-perl import bug (see re-scoped Step B9), fixed in
+the #1 reconciliation entry above, not in the SDK. B9 is therefore re-scoped to
+"no SDK fix needed". The remaining real SDK fix steps are B10 (#4) and B11 (#10).
+#11 (nexus) shares NO fd path with #1; it must be re-verified INDEPENDENTLY on
+its own registration/sample. RECONCILIATION ORDER: land B10 and B11 first; THEN
+revert the remaining sample workarounds (#1 with its import fix, #4, #10, #11) in
+samples-perl and verify their un-gated live smokes; THEN do B8.3 (flip the
+sdk-perl CLAUDE.md + README status lines to "verified live against a dev server")
+and B8.5 (final green-suite + all-reverts-pass verification).
 
 ---
 
-## Step B9: C-FD-REAL sync fork-pool child corrupts the bridge signal fd (#1; #11 shares it)
+## Step B9: C-FD-REAL (RE-SCOPED, NOT AN SDK BUG)
 
-**NOTE.** This is the PRODUCTION half of #1 that B4 did NOT fix. B4 addressed a
-DIFFERENT symptom: a `Temporalio::Test::DevServer` teardown reaper SEGV (IO::Async's
-lingering process-wide SIGCHLD reaper stealing sdk-core's ephemeral-server child
-at `$server->shutdown`). The real sample (sync-activity) still wedges against a
-live server: the sync-activity `IO::Async::Function` fork-pool CHILD closes the
-bridge completion-queue signal fd during its inherited-FD hygiene sweep, so the
-parent's trampoline later fails with "signal fd 13 write failed (Bad file
-descriptor)" and the worker hangs (~200s before the harness gives up). The
-CLOEXEC hypothesis was disproven in B4's ISOLATED minimal repro, but the real
-sample pattern still corrupts the fd, so the fix is at fd creation and/or the
-fork-pool FD sweep. #11 (nexus) rides the same fork-pool path and must be
-re-verified after this fix.
+**RE-SCOPED 2026-06-26. There is NO SDK signal-fd bug.** The B9 investigation
+disproved the premise this step was written on. The fork-pool / bridge-signal-fd
+path is verified healthy, so steps B9.3 through B9.5 (the SDK fix / refactor /
+verify) are N/A: there is nothing in the SDK to fix. The #1 failure is a
+samples-perl import bug; its fix moves into the B8 samples-reconciliation list
+below (reconciliation item #1, alongside the still-pending #4, #10, #11 reverts).
+
+What the investigation actually found (each point verified by experiment):
+
+1. A faithful sync-activity repro fails the SAME way IN-PROCESS with NO fork at
+   all. A fork-pool FD sweep cannot be the cause of a failure that reproduces
+   without a fork.
+2. The parent's bridge signal fd stays OPEN throughout the apparent "hang": a
+   `dup` probe on it succeeds on every tick. Nothing closes or corrupts it.
+3. A CORRECT sync `:Defn(...,'sync=1')` activity runs cleanly end to end through
+   the fork pool against a live dev server and returns its value (25 in the probe).
+   The fork-pool path works.
+4. The bridge eventfd is already created `EFD_CLOEXEC`. The close-on-exec
+   hypothesis that motivated B9.3 was already satisfied in the code.
+
+Real root cause of #1 (a samples-perl bug, not an SDK bug):
+`samples-perl/sync-activity/lib/SyncActivity/Activities.pm` does
+`use SyncActivity::Compute qw(count_primes)` at FILE scope (package `main`),
+before the `class SyncActivity::Activities` block. The import lands in `main`, so
+the unqualified `count_primes(...)` call INSIDE the class resolves to an
+undefined `SyncActivity::Activities::count_primes`. The activity dies on every
+dispatch, and the sample's unlimited retry policy loops for ~200s before the
+harness gives up. The "signal fd N write failed (Bad file descriptor)" line is a
+BENIGN teardown-race artifact: it is printed AFTER the await has already failed,
+during runtime/callback teardown, and it misled three prior investigators into
+hunting a non-existent fd bug.
+
+The #1 fix is therefore a samples-perl change (see B8 reconciliation item #1
+below): qualify the call to `SyncActivity::Compute::count_primes(...)` (or import
+into the activity's own package), then drop the `TEMPORAL_SYNC_ACTIVITY_LIVE`
+gate and the stale "wedges the worker loop" comment in
+`sync-activity/t/02-smoke.t`. #11 (nexus) shares NO fd path with #1 and must be
+re-verified INDEPENDENTLY: its live status depends on its own registration and
+sample, not on a non-existent fd fix.
 
 ```text
-1. RED: Create sdk/t/integration/repro_fd_real.t, SUBPROCESS-GUARDED (reuse
-   t/lib/SubprocessGuard.pm) — the #1 failure is a hang + fd corruption that would
-   wedge prove otherwise:
-   - Mirror the sync-activity sample: a worker registering a SYNC
-     (`:Defn(...,'sync=1')`) activity with REAL FD hygiene (the fork-pool child
-     closing inherited descriptors, as the sample does), run end to end against an
-     ephemeral dev server in the guard child.
-   - Assert the child exits 0 within the bound and that no "signal fd write failed
-     (Bad file descriptor)" appears; today it FAILS for the documented reason (the
-     write to the closed signal fd, then the ~200s hang).
-2. Diagnose: confirm the fork-pool child closes/corrupts the bridge
-   completion-queue signal fd (eventfd on Linux, pipe elsewhere). Record in
-   ROOT-CAUSE-MAP.md, distinct from B4's teardown-reaper SEGV.
-3. GREEN: set close-on-exec on the eventfd/pipe at creation in
-   sdk/lib/Temporalio/Core/Callback.pm AND/OR have the Worker/Activity fork-pool
-   child EXCLUDE the bridge signal fd from its FD-close sweep so the parent's
-   trampoline can still signal completion.
-4. REFACTOR: document the signal-fd-ownership contract at the eventfd creation
-   site and at the fork-pool FD sweep; comment citing #1.
-5. Verify: repro_fd_real.t passes un-gated (no "signal fd write failed", no hang);
-   re-verify the #11 nexus live round-trip now that the fork-pool fd is intact;
-   full `prove -lj4 t` green.
+B9.1 / B9.2 DONE (diagnosis corrected: not an SDK bug). The RED repro and the
+diagnosis were carried out and inverted the original conclusion, per the four
+verified points above.
+
+B9.3 / B9.4 / B9.5 N/A (no SDK bug to fix). The SDK fix / refactor / verify
+sub-steps are dropped. The actual #1 fix lives in samples-perl and is tracked as
+B8 reconciliation item #1. The loop must NOT keep trying to make an SDK fix for a
+non-bug; the next remaining step is B10.
+
+Nice-to-have (NOT a bug, optional, lower priority): the fork-pool child could
+explicitly EXCLUDE the inherited bridge signal fd from any FD-close sweep so the
+misleading EBADF-on-close teardown noise never prints. This is cosmetic
+log-hygiene, not a correctness fix; the fd path is already healthy.
 ```
 
 ---
@@ -496,8 +528,10 @@ job carries the start headers; they just are not threaded into the inbound input
 ## Implementation Guidelines
 
 - **One step per commit, always green.** B0 is one commit (the map). Each fix step
-  (B1-B7 and the residual steps B9-B11) is one commit carrying its repro AND its
-  fix, so the repro lands green and the suite never goes red. B8's reverts commit
+  (B1-B7 and the residual SDK fix steps B10-B11) is one commit carrying its repro
+  AND its fix, so the repro lands green and the suite never goes red. B9 is
+  re-scoped to "no SDK bug" (its #1 fix is a samples-perl change tracked under B8).
+  B8's reverts commit
   per the project process. Shim steps fold the cargo test + cbindgen regen + Alien
   rebuild into the same commit.
 - **Crash/hang repros are subprocess-guarded** (directive 4): run the dangerous

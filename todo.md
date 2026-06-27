@@ -63,24 +63,29 @@ leaves the suite green.
 - [ ] B8.4 (Optional) SDK diagnostic for plain-die-in-workflow -> retryable task failure; doc note on Temporalio::Exception::Application
 - [ ] B8.5 Verify: sdk-perl full `prove -lj4 t` green; samples-perl `just check` green offline AND every reverted live smoke passes with the SDK on PERL5LIB
 
-### B8 reconciliation note (do after B9/B10/B11)
-B8.2's residual safety valve surfaced FOUR SDK bugs not fully covered by B1-B7:
-#1 (sync fork-pool child corrupts the bridge signal fd -> "Bad file descriptor"
-+ 200s hang; B4 fixed only a DIFFERENT teardown-reaper SEGV), #4 (wait_condition
-WITH A TIMEOUT still wedges even though B1's plain re-park fix is present), #10
-(workflow-inbound ExecuteWorkflow input built WITHOUT the start headers, so
-context propagation forwards an empty header), and #11 (nexus, which shares #1's
-fork-pool fd path and must be re-verified after B9). These become fix steps B9,
-B10, B11. AFTER B9/B10/B11 land: revert the remaining sample workarounds (#1, #4,
-#10, #11) in samples-perl and verify their un-gated live smokes, THEN do B8.3 and
-B8.5.
+### B8 reconciliation note (do after B10/B11)
+B8.2's residual safety valve was first read as FOUR residual SDK bugs; the B9
+investigation revised that down to THREE real SDK fix steps plus one samples-perl
+fix. The real SDK fixes: #4 (wait_condition WITH A TIMEOUT still wedges even
+though B1's plain re-park fix is present) -> B10, and #10 (workflow-inbound
+ExecuteWorkflow input built WITHOUT the start headers, so context propagation
+forwards an empty header) -> B11. NOT an SDK bug: #1 (sync-activity) is a
+samples-perl import bug (`use SyncActivity::Compute qw(count_primes)` lands in
+package main, so the unqualified call inside the class hits an undefined sub and
+the activity dies every dispatch; the "Bad file descriptor" + ~200s "hang" is the
+unlimited-retry loop plus a benign teardown-race log line). B9 is RE-SCOPED to
+"no SDK fix"; #1's fix is a samples-perl change tracked as reconciliation item #1
+below. #11 (nexus) shares NO fd path with #1 and must be re-verified
+INDEPENDENTLY on its own registration/sample. AFTER B10/B11 land: revert the
+remaining sample workarounds (#1 with its import fix, #4, #10, #11) in
+samples-perl and verify their un-gated live smokes, THEN do B8.3 and B8.5.
 
-## B9 C-FD-REAL: sync fork-pool child corrupts the bridge signal fd (#1; #11 shares it)
-- [ ] B9.1 RED: subprocess-guarded integration repro mirroring the sync-activity sample (a `:Defn(...,'sync=1')` activity with real FD hygiene) that asserts the worker returns without "signal fd write failed (Bad file descriptor)" and does not hang (~200s today); fails first for the documented reason
-- [ ] B9.2 Diagnose: confirm the fork-pool child closes/corrupts the bridge completion-queue signal fd (B4's reaper fix addressed a different teardown SEGV, NOT this production bug); record in ROOT-CAUSE-MAP.md
-- [ ] B9.3 GREEN: set close-on-exec on the eventfd/pipe at creation in Core/Callback.pm AND/OR exclude the bridge signal fd from the Worker/Activity fork-pool child's FD-close sweep
-- [ ] B9.4 REFACTOR: document the signal-fd-ownership contract at the eventfd creation site and the fork-pool FD sweep; comment cites #1
-- [ ] B9.5 Verify: live repro passes un-gated (no "signal fd write failed", no hang); re-verify #11 nexus round-trip after the fd fix; full `prove -lj4 t` green
+## B9 C-FD-REAL (RE-SCOPED 2026-06-26): NO SDK bug. #1 is a samples-perl import bug; fix moves to B8 reconciliation #1.
+- [x] B9.1 DONE (diagnosis corrected: NOT an SDK bug). RED repro built; a faithful sync-activity repro fails the SAME way IN-PROCESS with NO fork, so a fork-pool FD sweep cannot be the cause. The parent's signal fd stays OPEN throughout (dup probe succeeds every tick); a CORRECT sync `:Defn(...,'sync=1')` activity runs cleanly through the fork pool live (returns 25); the eventfd is already EFD_CLOEXEC.
+- [x] B9.2 DONE (diagnosis corrected). Real root cause of #1: samples-perl `sync-activity/lib/SyncActivity/Activities.pm` does `use SyncActivity::Compute qw(count_primes)` at file scope (package main), so the unqualified call inside `class SyncActivity::Activities` resolves to an undefined sub; the activity dies every dispatch and the unlimited-retry policy loops ~200s. The "signal fd N write failed (Bad file descriptor)" line is a BENIGN teardown-race artifact (printed after the await already failed). Recorded in ROOT-CAUSE-MAP.md.
+- [x] B9.3 N/A (no SDK bug to fix). The eventfd is already EFD_CLOEXEC and the fd path is verified healthy. The actual #1 fix is a samples-perl change tracked under B8 reconciliation #1 (qualify the call to `SyncActivity::Compute::count_primes(...)` or import into the activity's own package).
+- [x] B9.4 N/A (no SDK refactor needed). Optional cosmetic-only nice-to-have noted in plan.md Step B9: have the fork-pool child exclude the inherited bridge signal fd from its FD-close sweep to silence the misleading EBADF-on-close teardown noise. NOT a bug.
+- [x] B9.5 N/A (no SDK fix to verify). #1's fix is verified in samples-perl under B8 reconciliation #1. #11 (nexus) shares NO fd path with #1 and must be re-verified INDEPENDENTLY on its own registration/sample, not on a non-existent fd fix.
 
 ## B10 C-COND-TIMEOUT: wait_condition-with-timeout timer cancel/re-arm wedge (#4)
 - [ ] B10.1 RED: replay or subprocess-guarded integration repro of the timeout-timer cancel/re-arm (arm a long durable timer, an `:Update` moves the deadline, re-arm a short timer); asserts the workflow does not wedge; fails first (B1's plain re-park fix is present, so this is a distinct timeout-timer path)

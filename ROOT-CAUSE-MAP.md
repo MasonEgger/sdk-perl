@@ -73,24 +73,31 @@ fork-pool worker itself to avoid a zombie). #2 was already healthy.
 ## Residual findings (B8.2 safety valve, recorded 2026-06-26)
 
 The B8.2 sample-revert pass un-gated the workarounds one at a time and ran each
-live smoke. Eight passed clean (#2, #3, #5, #6, #7, #8, #9). Four did NOT: the
-B1-B7 fixes covered a related-but-different symptom, leaving a residual SDK bug.
-These become fix steps B9, B10, B11.
+live smoke. Eight passed clean (#2, #3, #5, #6, #7, #8, #9). Four did NOT pass on
+the first read. The B9 investigation (2026-06-26) then revised the count: only
+TWO are residual SDK bugs (#4 -> B10, #10 -> B11, where the B1-B7 fixes covered a
+related-but-different symptom). #1 is NOT an SDK bug at all but a samples-perl
+import bug (B9 RE-SCOPED to "no SDK fix"; the fix is a samples-perl change). #11
+(nexus) shares NO fd path with #1 and is re-verified INDEPENDENTLY on its own
+sample. See the per-row corrections below.
 
 | Bug | Residual cluster (plan step) | What B1-B7 fixed vs. what remains | Suspected root (file:line) | Layer | Test type |
 |-----|------------------------------|-----------------------------------|----------------------------|-------|-----------|
-| #1 sync fork-pool child corrupts the bridge signal fd | B9 C-FD-REAL | B4 fixed a DIFFERENT symptom: the `Temporalio::Test::DevServer` teardown-reaper SEGV (IO::Async's lingering SIGCHLD reaper stealing core's ephemeral-server child at `$server->shutdown`). The PRODUCTION bug remains: the real sync-activity sample wedges live with "signal fd 13 write failed (Bad file descriptor)" + a ~200s hang. The sync-activity `IO::Async::Function` fork-pool CHILD closes the bridge completion-queue signal fd in its inherited-FD hygiene sweep, so the parent's trampoline write fails. (CLOEXEC was disproven in B4's ISOLATED minimal repro, but the real sample pattern still corrupts the fd.) | fd creation in `sdk/lib/Temporalio/Core/Callback.pm` (set close-on-exec on the eventfd/pipe) AND/OR the Worker/Activity fork-pool child FD-close sweep (exclude the bridge signal fd) | Perl | subprocess-guarded integration |
+| #1 sync-activity sample import bug (NOT an SDK bug) | B8 reconciliation #1 (B9 RE-SCOPED to "no SDK fix") | CORRECTED 2026-06-26: there is NO SDK signal-fd bug. The B9 investigation disproved the premise. A faithful sync-activity repro fails the SAME way IN-PROCESS with NO fork (so a fork-pool FD sweep cannot be the cause); the parent's signal fd stays OPEN throughout the "hang" (a `dup` probe succeeds every tick); a CORRECT sync `:Defn(...,'sync=1')` activity runs cleanly through the fork pool live and returns its value (25); the eventfd is already `EFD_CLOEXEC`. Real root cause: `samples-perl/sync-activity/lib/SyncActivity/Activities.pm` does `use SyncActivity::Compute qw(count_primes)` at FILE scope (package `main`), before the `class SyncActivity::Activities` block, so the unqualified `count_primes(...)` inside the class resolves to an undefined `SyncActivity::Activities::count_primes`. The activity dies on every dispatch and the sample's unlimited retry policy loops ~200s. The "signal fd N write failed (Bad file descriptor)" line is a BENIGN teardown-race artifact (printed AFTER the await already failed, during runtime/callback teardown); it misled three prior investigators. | samples-perl: qualify the call to `SyncActivity::Compute::count_primes(...)` (or import into the activity's own package); then drop the `TEMPORAL_SYNC_ACTIVITY_LIVE` gate and the stale "wedges the worker loop" comment in `sync-activity/t/02-smoke.t`. NO sdk-perl change. Optional cosmetic SDK hardening (NOT a bug): fork-pool child could exclude the inherited bridge signal fd from its FD-close sweep to silence the EBADF-on-close teardown noise. | samples-perl (no sdk-perl fix) | samples-perl live smoke |
 | #4 wait_condition WITH A TIMEOUT still wedges | B10 C-COND-TIMEOUT | B1's plain re-park fix (covers #3) is present, but the durable-timer-backed timeout path is distinct: arm a long timer, an `:Update` moves the deadline, re-arm a short timer against the moved deadline — the stale timer is not cleanly cancelled before the new one arms and the workflow hangs. | the timeout-timer cancel/re-arm path in `sdk/lib/Temporalio/Workflow/Runner.pm` | Perl | replay (preferred) or subprocess-guarded integration |
 | #10 workflow-inbound input missing start headers | B11 C-ICEPT-HEADERS | B7 wired the workflow-inbound chain so the hook is now invoked, but the runner builds the inbound `ExecuteWorkflow` input WITHOUT the start headers (Runner.pm ~1685-1690 passes only `type`/`args`/`_root`). The now-invoked inbound hook has no header to read, so context propagation forwards an EMPTY header and the downstream activity reads `request_id=(none)`. The InitializeWorkflow job carries the headers; they are not threaded into the inbound input. | the inbound-input build in `sdk/lib/Temporalio/Workflow/Runner.pm` (~1685-1690) | Perl | unit (inbound-input build) or integration (context propagation) |
-| #11 nexus re-verify after #1 | B9 (shares #1's fd path) | B6 enabled Nexus serving + wired the poll loop and the round-trip resolved in B6's repro, but #11's sample rides the same sync fork-pool fd path as #1, so it must be RE-VERIFIED live after B9 fixes the signal fd. | shares #1's root (Callback.pm / fork-pool FD sweep) | Perl | subprocess-guarded integration (re-verify) |
+| #11 nexus re-verify (INDEPENDENT of #1) | B8 reconciliation #11 | CORRECTED 2026-06-26: #11 shares NO fd path with #1 (there is no SDK fd bug; see the corrected #1 row). B6 enabled Nexus serving + wired the poll loop and the round-trip resolved in B6's repro. #11 must be re-verified INDEPENDENTLY: its live status depends on its OWN registration and sample (endpoint/enable_nexus un-gating), not on a non-existent fd fix. Do NOT block #11 on B9. | #11's own Nexus registration/sample (not Callback.pm, not a fork-pool FD sweep) | Perl | subprocess-guarded integration (re-verify) |
 
-**Correction to the #1/#2 note above.** The earlier "Shared roots" entry and the
-"Superseded by the B4 implementation" note record that B4 fixed #1. That is only
-half true and is corrected here: B4 fixed the test-teardown reaper-race SEGV, NOT
-#1's production signal-fd corruption. The production bug is the fork-pool child
-closing the bridge completion-queue signal fd, fixed in B9 (Callback.pm
-close-on-exec and/or the fork-pool FD-sweep exclusion). B4's DevServer teardown
-fix stands; it simply did not cover the production path.
+**Correction to the #1/#2 note above (superseded again, 2026-06-26).** The
+earlier "Shared roots" entry and the "Superseded by the B4 implementation" note
+record that B4 fixed #1; a later note claimed B9 would fix a residual production
+"signal-fd corruption". BOTH framings overstated an SDK fd bug that does not
+exist. Final finding: there is NO SDK signal-fd corruption. #1 is a samples-perl
+import bug (see the corrected #1 row above); the "Bad file descriptor" line is a
+benign teardown-race artifact. B4's `Temporalio::Test::DevServer` teardown
+reaper-race fix stands on its own merits (it prevents a real test-teardown SEGV)
+and is unrelated to #1's true cause. B9 is re-scoped to "no SDK fix"; #1's fix is
+a samples-perl change.
 
 ## Out of scope for this map
 
