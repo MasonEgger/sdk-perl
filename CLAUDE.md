@@ -12,7 +12,8 @@ cancellation, continue-as-new, data conversion) and v0.2 (Phases 6-10, spec
 activity completion, eager start, upsert SA/memo, schedules, Nexus, interceptors
 + OTel, log forwarding, metric meters, worker versioning, tuner/slot suppliers,
 autoscaling pollers, determinism guard, reset, http_proxy, env-config) are
-implemented; unit and replay suites green.
+implemented and verified live against a dev server: unit, replay, and live
+integration suites green.
 
 ## Document hierarchy (read in this order)
 

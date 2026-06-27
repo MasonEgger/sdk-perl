@@ -19,8 +19,10 @@ than from wall-clock timers.
 > SDKs) are implemented: client, worker, sync/async activities, and workflows
 > with signals, queries, updates, timers, cancellation, continue-as-new, child
 > workflows, external handles, local activities, schedules, Nexus, interceptors,
-> and worker hardening. The public API is pre-1.0 and may still change before a
-> 1.0 release; expect breaking changes.
+> and worker hardening. v0.2.0 is feature-complete and verified live against a
+> dev server: the unit, replay, and live integration suites are green. The public
+> API is pre-1.0 and may still change before a 1.0 release; expect breaking
+> changes.
 
 **Contents**
 

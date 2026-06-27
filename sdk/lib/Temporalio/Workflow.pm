@@ -383,6 +383,34 @@ predicate holds, optionally with a timeout), and C<continue_as_new>. Each looks
 up the active runner and raises L<Temporalio::Exception::Workflow::NoRunner> when
 called outside a workflow body.
 
+=head1 RAISING ERRORS FROM WORKFLOW CODE
+
+How you fail a workflow task matters. A plain C<die> (or any uncaught
+exception that is not a Temporal application error) is treated as a transient
+workflow-task failure: the task is retried indefinitely until it succeeds or
+the workflow times out. That is correct for a genuinely transient fault (a bug
+you are about to fix, a momentary glitch), because it lets the workflow recover
+once the cause is gone. It is the wrong behavior for a business or validation
+error that will never succeed on retry: the workflow wedges, retrying the same
+losing task forever.
+
+For business and validation failures, raise
+L<Temporalio::Exception::Application> instead, and set
+C<< non_retryable => 1 >> when the condition will never clear on its own:
+
+  use Temporalio::Exception::Application;
+
+  Temporalio::Exception::Application->throw(
+      message       => 'menu choice is required',
+      non_retryable => 1,
+  );
+
+A non-retryable application error fails the workflow execution promptly with a
+clear, typed reason instead of looping on retried workflow tasks. This is the
+lesson from the activity-choice sample: a plain C<die> in the workflow body
+turned a should-fail-fast validation error into a retryable task failure that
+spun for the duration of the run.
+
 =head1 METHODS
 
 =head2 all_handlers_finished
