@@ -152,11 +152,22 @@ class Temporalio::Worker::ActivityDispatcher {
             my $inbound = Temporalio::Worker::Interceptor::build_activity_inbound(
                 $interceptors,
                 Temporalio::Worker::_RootActivityInbound->new);
+            # Thread the activity Start task's header_fields (proto field 6) into
+            # the activity-inbound input the same pass-through way the workflow
+            # Runner threads InitializeWorkflow headers (#10 C-ICEPT-ACTIVITY-
+            # HEADERS GAP A — the input previously carried only args/_root, so
+            # $input->headers was an empty map and context propagation read
+            # request_id=(none) on the activity side). The header_fields are
+            # already Str => Payload off the wire, so they pass through as-is
+            # (the inbound half of Temporalio::Interceptor::Headers' contract);
+            # re-encoding them here would double-encode (GAP B).
+            my $start_headers = $start->header_fields // {};
             my $result;
             if ($def->{sync}) {
                 my $input =
                     Temporalio::Worker::Interceptor::Input::ExecuteActivity->new(
-                        args  => [@args],
+                        args    => [@args],
+                        headers => { %$start_headers },
                         _root => sub ($in) {
                             return $self->_run_in_pool($task_token, $info,
                                 $cancellation, @{ $in->args });
@@ -180,7 +191,8 @@ class Temporalio::Worker::ActivityDispatcher {
 
                 my $input =
                     Temporalio::Worker::Interceptor::Input::ExecuteActivity->new(
-                        args  => [@args],
+                        args    => [@args],
+                        headers => { %$start_headers },
                         _root => sub ($in) {
                             return $self->_invoke($def->{code}, @{ $in->args });
                         },

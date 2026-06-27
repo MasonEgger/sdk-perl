@@ -17,6 +17,7 @@ use Temporalio::Workflow::Logger ();
 use Temporalio::Workflow::ContinueAsNew ();
 use Temporalio::Converter::Payload ();
 use Temporalio::Converter::Failure ();
+use Temporalio::Interceptor::Headers ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception ();
 use Temporalio::Exception::Cancelled ();
@@ -493,13 +494,16 @@ class Temporalio::Workflow::Runner {
             $fields{retry_policy} = $rp->to_proto;
         }
 
-        # Headers: { name => Perl value } -> { name => Payload } when non-empty.
+        # Headers: { name => value } -> { name => Payload } when non-empty. A
+        # value already shaped as a Payload (as context propagation forwards the
+        # start headers it read off the workflow-inbound hook) passes through
+        # untouched — re-encoding it would double-encode (#10
+        # C-ICEPT-ACTIVITY-HEADERS GAP B). One contract, shared with the inbound
+        # paths, in Temporalio::Interceptor::Headers.
         if (my $headers = $opts{headers}) {
             if (%$headers) {
-                $fields{headers} = {
-                    map { $_ => $payload_converter->to_payload($headers->{$_}) }
-                        keys %$headers
-                };
+                $fields{headers} = Temporalio::Interceptor::Headers::to_payload_map(
+                    $payload_converter, $headers);
             }
         }
 
@@ -609,12 +613,12 @@ class Temporalio::Workflow::Runner {
             $base{retry_policy} = $rp->to_proto;
         }
 
+        # Pass-through Payloads, never re-encoded (#10 GAP B); shared contract in
+        # Temporalio::Interceptor::Headers.
         if (my $headers = $opts{headers}) {
             if (%$headers) {
-                $base{headers} = {
-                    map { $_ => $payload_converter->to_payload($headers->{$_}) }
-                        keys %$headers
-                };
+                $base{headers} = Temporalio::Interceptor::Headers::to_payload_map(
+                    $payload_converter, $headers);
             }
         }
 
@@ -815,13 +819,18 @@ class Temporalio::Workflow::Runner {
             $fields{retry_policy} = $rp->to_proto;
         }
 
-        # Headers / memo: { name => Perl value } -> { name => Payload } when set.
-        for my $map (qw(headers memo)) {
-            my $h = $opts{$map};
-            next unless $h && %$h;
-            $fields{$map} = {
-                map { $_ => $payload_converter->to_payload($h->{$_}) } keys %$h
-            };
+        # Headers / memo: { name => value } -> { name => Payload } when set.
+        # Headers pass an already-Payload value through (#10 GAP B, shared
+        # contract in Temporalio::Interceptor::Headers); memo values are raw
+        # user data, always encoded once.
+        if (my $h = $opts{headers}) {
+            $fields{headers} = Temporalio::Interceptor::Headers::to_payload_map(
+                $payload_converter, $h) if %$h;
+        }
+        if (my $m = $opts{memo}) {
+            $fields{memo} = {
+                map { $_ => $payload_converter->to_payload($m->{$_}) } keys %$m
+            } if %$m;
         }
 
         # Search attributes -> proto when given (the value already exposes
@@ -908,12 +917,12 @@ class Temporalio::Workflow::Runner {
             signal_name       => $name,
             (@args ? (args => [@args]) : ()),
         );
+        # Pass-through Payloads, never re-encoded (#10 GAP B); shared contract in
+        # Temporalio::Interceptor::Headers.
         if (my $h = $opts{headers}) {
             if (%$h) {
-                $fields{headers} = {
-                    map { $_ => $payload_converter->to_payload($h->{$_}) }
-                        keys %$h
-                };
+                $fields{headers} = Temporalio::Interceptor::Headers::to_payload_map(
+                    $payload_converter, $h);
             }
         }
 
@@ -968,12 +977,12 @@ class Temporalio::Workflow::Runner {
             signal_name        => $name,
             (@args ? (args => [@args]) : ()),
         );
+        # Pass-through Payloads, never re-encoded (#10 GAP B); shared contract in
+        # Temporalio::Interceptor::Headers.
         if (my $h = $opts{headers}) {
             if (%$h) {
-                $fields{headers} = {
-                    map { $_ => $payload_converter->to_payload($h->{$_}) }
-                        keys %$h
-                };
+                $fields{headers} = Temporalio::Interceptor::Headers::to_payload_map(
+                    $payload_converter, $h);
             }
         }
 
@@ -2957,12 +2966,12 @@ class Temporalio::Workflow::Runner {
             }
         }
 
+        # Pass-through Payloads, never re-encoded (#10 GAP B); shared contract in
+        # Temporalio::Interceptor::Headers.
         if (my $headers = $opts{headers}) {
             if (%$headers) {
-                $fields{headers} = {
-                    map { $_ => $payload_converter->to_payload($headers->{$_}) }
-                        keys %$headers
-                };
+                $fields{headers} = Temporalio::Interceptor::Headers::to_payload_map(
+                    $payload_converter, $headers);
             }
         }
 

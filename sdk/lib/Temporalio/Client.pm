@@ -26,6 +26,7 @@ use Temporalio::Client::WorkflowExecutionIterator ();
 use Temporalio::Client::ScheduleHandle ();
 use Temporalio::Client::ScheduleListIterator ();
 use Temporalio::Common::TypedSearchAttributes ();
+use Temporalio::Interceptor::Headers ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::RpcError ();
@@ -562,7 +563,19 @@ class Temporalio::Client {
         my $Message = Temporalio::Core::Proto::resolve($proto_name);
         my %map;
         for my $key (sort keys %$hashref) {
-            my ($payload) = await $data_converter->to_payloads([ $hashref->{$key} ]);
+            # A value already shaped as a Payload (as a context-propagation
+            # client-outbound interceptor sets header values, matching the
+            # sdk-python Str => Payload header contract) passes through untouched:
+            # re-running it through the converter would double-encode it (#10
+            # C-ICEPT-ACTIVITY-HEADERS GAP B). Raw values (the usual memo/header
+            # case) encode exactly once. One contract, in
+            # Temporalio::Interceptor::Headers.
+            my $value = $hashref->{$key};
+            if (Temporalio::Interceptor::Headers::is_payload($value)) {
+                $map{$key} = $value;
+                next;
+            }
+            my ($payload) = await $data_converter->to_payloads([ $value ]);
             $map{$key} = $payload;
         }
         return $Message->new({ fields => \%map });
