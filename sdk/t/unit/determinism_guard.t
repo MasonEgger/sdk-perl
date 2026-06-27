@@ -19,6 +19,7 @@ use Temporalio::Test::WorkflowReplay;
 use Temporalio::Workflow ();
 use Temporalio::Workflow::Unsafe ();
 use Temporalio::Workflow::DeterminismGuard ();
+use Temporalio::Converter::Payload ();
 
 # The guard is process-global; install it once for the whole test run. It is a
 # no-op outside workflow context, so installing it here does not perturb the
@@ -125,13 +126,32 @@ T2->subtest('suppression does not leak across the await (T-det-3)' => sub {
 # ---------------------------------------------------------------------------
 # T-det-4: the SDK's own deterministic primitives (Workflow::time / now /
 # random) never throw, even with the guard installed and $Runner::CURRENT set.
+#
+# now is the load-bearing exemption (bug #4, B10 C-COND-TIMEOUT): it builds a
+# DateTime via DateTime->from_epoch, which internally calls the `gmtime` builtin
+# the guard traps. Without the guard-suppression hatch in Workflow::now, SafeNow
+# (which now calls Workflow::now->epoch) task-fails under the installed guard,
+# the exact wedge the updatable-timer sample hit live, where every loop iteration
+# calls now. Asserting now->epoch equals the activation timestamp proves the
+# primitive both runs and returns the deterministic value, not a real wall clock.
 # ---------------------------------------------------------------------------
 T2->subtest('SDK now/time/random never throw under the guard (T-det-4)' => sub {
     my $completion = run_once('WfDef::SafeNow');
     T2->isnt($completion->which_status, 'failed',
-        'SafeNow completes - SDK primitives self-exempt');
+        'SafeNow completes - SDK primitives (incl. now) self-exempt');
     my $success = $completion->successful;
     T2->ok(defined $success, 'SafeNow produced a successful completion');
+
+    # The body returned { t, now, r }; now must equal the activation epoch (100s),
+    # confirming Workflow::now ran under the guard and read the deterministic time.
+    my @cmds = $success ? ($success->commands // [])->@* : ();
+    my ($complete) =
+        grep { $_->which_variant eq 'complete_workflow_execution' } @cmds;
+    T2->ok(defined $complete, 'SafeNow emitted a CompleteWorkflowExecution');
+    my $result = Temporalio::Converter::Payload->default->from_payload(
+        $complete->complete_workflow_execution->result);
+    T2->is($result->{now}, 100,
+        'Workflow::now ran under the guard and returned the activation epoch (#4)');
 });
 
 # ---------------------------------------------------------------------------

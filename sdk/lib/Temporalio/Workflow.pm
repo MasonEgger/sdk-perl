@@ -40,9 +40,26 @@ sub _runner {
 }
 
 # now -> a DateTime at the activation timestamp (never the OS clock).
+#
+# now/time/random are the deterministic primitives the determinism guard must
+# NEVER trap (the self-exemption contract, T-det-4 / spec §29.4). time and random
+# read the runner directly and touch no builtin, so they are naturally exempt.
+# now is the exception: DateTime->from_epoch decomposes the epoch into calendar
+# fields via the `gmtime` builtin, which the guard's CORE::GLOBAL::gmtime override
+# traps as non-determinism, so a workflow body that calls now (e.g. the
+# updatable-timer loop's `now->epoch`) task-fails every activation under a LIVE
+# worker and wedges, even though the epoch is the deterministic activation time
+# and the decomposition is provably safe (bug #4, B10 C-COND-TIMEOUT). Construct
+# the DateTime under the guard-suppression hatch so now honors the same
+# self-exemption time and random already enjoy. The block is fully synchronous
+# (no await), and Unsafe::illegal_call_tracing_disabled scopes the suppression
+# to it, so the guard re-engages the instant now returns.
 sub now {
     require DateTime;
-    return DateTime->from_epoch(epoch => _runner()->activation_time);
+    require Temporalio::Workflow::Unsafe;
+    my $epoch = _runner()->activation_time;
+    return Temporalio::Workflow::Unsafe::illegal_call_tracing_disabled(
+        sub { DateTime->from_epoch(epoch => $epoch) });
 }
 
 # time -> epoch seconds (float) of the activation timestamp.

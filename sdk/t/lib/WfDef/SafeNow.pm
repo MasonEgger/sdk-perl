@@ -10,14 +10,19 @@ use Future::AsyncAwait;
 use Temporalio::Workflow;
 use Temporalio::Workflow::Definition;
 
-# The :Run draws the activation timestamp via Workflow::time and an RNG value via
-# Workflow::random. Neither touches the trapped CORE builtins, so the body must
-# complete normally with the guard installed (T-det-4).
+# The :Run draws the activation timestamp via Workflow::time and Workflow::now and
+# an RNG value via Workflow::random. None of these may trip the guard with it
+# installed (T-det-4). now is the load-bearing case (bug #4, B10): it builds a
+# DateTime via DateTime->from_epoch, which calls the `gmtime` builtin the guard
+# traps - so now must construct it under the guard-suppression hatch to honor the
+# same self-exemption time and random already enjoy, or every live activation that
+# calls now task-fails. Returning now->epoch makes the exemption observable.
 class WfDef::SafeNow :isa(Temporalio::Workflow::Definition) {
     async method run :Run () {
         my $t   = Temporalio::Workflow::time();
+        my $now = Temporalio::Workflow::now->epoch;
         my $rng = Temporalio::Workflow::random();
-        return { t => $t, r => $rng->irand };
+        return { t => $t, now => $now, r => $rng->irand };
     }
 }
 
