@@ -539,6 +539,36 @@ class Temporalio::Client {
                 'temporal.api.common.v1.Header', $headers);
         }
 
+        # Nexus async completion (B13 #11, spec section 26.2): a
+        # :WorkflowRunOperation backing-workflow start carries the caller's
+        # completion callback(s) (so the server notifies the caller when this
+        # workflow completes), the caller<->backing event links, and reuses the
+        # Nexus request_id as the start idempotency key. The OperationContext
+        # passes ready-built temporal.api.common.v1.{Callback,Link} protos; the
+        # client just places them on the request. When a callback is attached we
+        # also set on_conflict_options so an id-conflict (USE_EXISTING) still
+        # wires the callback to the already-running workflow — MUST-match
+        # sdk-python _impl _build_start_workflow_execution_request.
+        if (defined(my $callbacks = delete $k{completion_callbacks})) {
+            $fields{completion_callbacks} = $callbacks if @$callbacks;
+        }
+        if (defined(my $start_links = delete $k{links})) {
+            $fields{links} = $start_links if @$start_links;
+        }
+        my $rid = delete $k{request_id};
+        if (defined $rid && length $rid) {
+            $fields{request_id} = $rid;
+        }
+        if ($fields{completion_callbacks}) {
+            my $OnConflict = Temporalio::Core::Proto::resolve(
+                'temporal.api.workflow.v1.OnConflictOptions');
+            $fields{on_conflict_options} = $OnConflict->new({
+                attach_request_id           => 1,
+                attach_completion_callbacks => 1,
+                attach_links                => 1,
+            });
+        }
+
         # Quietly ignore fields parked for later phases (static_summary/
         # static_details/versioning_override) — but reject genuine typos.
         delete @k{qw(static_summary static_details versioning_override)};

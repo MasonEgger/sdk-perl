@@ -8,6 +8,8 @@ no warnings 'experimental::class';
 use Future::AsyncAwait;
 
 use Temporalio::Nexus::WorkflowHandle ();
+use Temporalio::Nexus::Link ();
+use Temporalio::Core::Proto ();
 
 # Shared info carried by every operation context (spec section 26.2). A plain
 # value object: the service + operation being handled, plus the endpoint and
@@ -64,23 +66,81 @@ class Temporalio::Nexus::WorkflowRunOperationContext {
     field $logger  :param = undef;
     field $headers :param = {};
 
-    method info    { return $info }
-    method client  { return $client }
-    method logger  { return $logger }
-    method headers { return $headers }
+    # Inbound StartOperation details the dispatcher copies off the request (B13
+    # #11): the caller's async-completion callback URL + header, the Nexus
+    # request_id (an idempotency key), and the caller's links. start_workflow
+    # threads these onto the backing-workflow start so the server notifies the
+    # caller on completion (spec section 26.2).
+    field $callback        :param = undef;
+    field $callback_header :param = {};
+    field $request_id      :param = undef;
+    field $links           :param = [];
+
+    method info            { return $info }
+    method client          { return $client }
+    method logger          { return $logger }
+    method headers         { return $headers }
+    method callback        { return $callback }
+    method callback_header { return $callback_header }
+    method request_id      { return $request_id }
+    method links           { return $links }
 
     # start_workflow($workflow, $args, %kwargs) -> (async) a
     # Temporalio::Nexus::WorkflowHandle. Mirrors sdk-python
     # WorkflowRunOperationContext.start_workflow: start via the client, then wrap
     # the namespace + workflow id into the Nexus handle the dispatcher tokenizes.
+    #
+    # B13 (#11): a :WorkflowRunOperation backing-workflow start MUST carry the
+    # Nexus async-completion callback so the server delivers this workflow's
+    # result to the caller's parked operation on completion. Before this, the
+    # start issued a plain start_workflow with completionCallbacks:null, so the
+    # backing workflow reached WorkflowExecutionCompleted while the caller's
+    # operation parked forever (server: `Pending Nexus Operations: 1`). The
+    # callback/links/request_id wiring lives HERE, the one place a workflow-run
+    # operation starts its backing workflow.
     async method start_workflow ($workflow, $args = [], %kwargs) {
         die "WorkflowRunOperationContext has no client to start the workflow\n"
             unless defined $client;
-        my $handle = await $client->start_workflow($workflow, $args, %kwargs);
+
+        # Convert the caller's inbound links to temporal links (best-effort: an
+        # unparseable link is dropped, never breaking the start), then build the
+        # Nexus completion callback carrying those links (spec section 26.2,
+        # MUST-match sdk-python _get_callbacks/_get_links).
+        my @temporal_links =
+            grep { defined }
+            map { Temporalio::Nexus::Link::nexus_link_to_temporal_link(
+                    $_->{url}, $_->{type}) }
+            @{ $links // [] };
+
+        my @callbacks = _nexus_completion_callbacks(
+            $callback, $callback_header, \@temporal_links);
+
+        my $handle = await $client->start_workflow($workflow, $args,
+            %kwargs,
+            (@callbacks       ? (completion_callbacks => \@callbacks)      : ()),
+            (@temporal_links  ? (links                => \@temporal_links) : ()),
+            (defined $request_id && length $request_id
+                              ? (request_id           => $request_id)      : ()),
+        );
         return Temporalio::Nexus::WorkflowHandle->new(
             namespace   => $client->namespace,
             workflow_id => $handle->workflow_id,
         );
+    }
+
+    # Build the temporal.api.common.v1.Callback list for the backing-workflow
+    # start. Empty when there is no callback URL (a manual/test invocation
+    # without an inbound Nexus request): the start then behaves like any other.
+    sub _nexus_completion_callbacks ($url, $header, $temporal_links) {
+        return () unless defined $url && length $url;
+        my $Callback = Temporalio::Core::Proto::resolve(
+            'temporal.api.common.v1.Callback');
+        my $Nexus = Temporalio::Core::Proto::resolve(
+            'temporal.api.common.v1.Callback.Nexus');
+        return ($Callback->new({
+            nexus => $Nexus->new({ url => $url, header => ($header // {}) }),
+            links => $temporal_links,
+        }));
     }
 }
 

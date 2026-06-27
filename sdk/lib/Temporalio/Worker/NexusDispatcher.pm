@@ -173,7 +173,18 @@ class Temporalio::Worker::NexusDispatcher {
         my $ctx = $def->{kind} eq 'workflow_run'
             ? Temporalio::Nexus::WorkflowRunOperationContext->new(
                 info => $info, client => $client, logger => $logger,
-                headers => ($request->can('header') ? ($request->header // {}) : {}))
+                headers => ($request->can('header') ? ($request->header // {}) : {}),
+                # B13 (#11): copy the inbound StartOperation async-completion
+                # details so start_workflow can attach them to the backing
+                # workflow start. The callback URL/header is what the server
+                # calls on backing-workflow completion to resolve the caller's
+                # parked operation; the request_id is the start idempotency key;
+                # the links are the caller<->backing correlation (spec 26.2).
+                callback        => $start->callback,
+                callback_header => ($start->callback_header // {}),
+                request_id      => $start->request_id,
+                links           => [ map { { url => $_->url, type => $_->type } }
+                                         @{ $start->links // [] } ])
             : Temporalio::Nexus::StartOperationContext->new(
                 info => $info, client => $client, logger => $logger,
                 headers => ($request->can('header') ? ($request->header // {}) : {}));
