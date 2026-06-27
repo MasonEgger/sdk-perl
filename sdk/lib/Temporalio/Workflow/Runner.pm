@@ -1682,11 +1682,20 @@ class Temporalio::Workflow::Runner {
             Temporalio::Worker::Interceptor::build_workflow_inbound(
                 $interceptors,
                 Temporalio::Worker::_RootWorkflowInbound->new);
+        # Thread the start headers off the InitializeWorkflow job into the
+        # inbound input the same way the outbound paths (schedule_activity et
+        # al., ~L497) carry their `Str => Payload` header maps: the now-invoked
+        # inbound hook (and context propagation built on it) reads the REAL
+        # start headers here instead of an empty map (#10 C-ICEPT-HEADERS — the
+        # input previously passed only type/args/_root, so the forwarded header
+        # was empty and downstream activities saw request_id=(none)).
+        my $start_headers = $init->headers // {};
         my $execute_input =
             Temporalio::Worker::Interceptor::Input::ExecuteWorkflow->new(
-                type  => $workflow_class,
-                args  => [@args],
-                _root => sub ($in) { $instance->$run_ref(@{ $in->args }) },
+                type    => $workflow_class,
+                args    => [@args],
+                headers => { %$start_headers },
+                _root   => sub ($in) { $instance->$run_ref(@{ $in->args }) },
             );
         $main_run_future = $workflow_inbound->execute_workflow($execute_input);
 

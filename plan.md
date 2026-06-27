@@ -69,7 +69,7 @@ C-COND lands.
 - [~] B8 Cleanup: activity-choice sample fix, revert sample workarounds, docs live-verified (PARTIAL: B8.1 done, B8.2 8/11 reverts landed; #1/#4/#10/#11 deferred to B9/B10/B11)
 - [~] B9 C-FD-REAL (RE-SCOPED): NO SDK signal-fd bug. #1 is a samples-perl import bug; the fix moves to B8 reconciliation. Fork-pool/signal-fd path verified healthy.
 - [ ] B10 C-COND-TIMEOUT: wait_condition-with-timeout timer cancel/re-arm wedge (#4)
-- [ ] B11 C-ICEPT-HEADERS: workflow-inbound input missing start headers (#10)
+- [x] B11 C-ICEPT-HEADERS: workflow-inbound input missing start headers (#10)
 
 ---
 
