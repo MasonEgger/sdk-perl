@@ -70,6 +70,8 @@ C-COND lands.
 - [~] B9 C-FD-REAL (RE-SCOPED): NO SDK signal-fd bug. #1 is a samples-perl import bug; the fix moves to B8 reconciliation. Fork-pool/signal-fd path verified healthy.
 - [ ] B10 C-COND-TIMEOUT: wait_condition-with-timeout timer cancel/re-arm wedge (#4)
 - [x] B11 C-ICEPT-HEADERS: workflow-inbound input missing start headers (#10)
+- [ ] B12 C-ICEPT-ACTIVITY-HEADERS: activity-inbound input missing headers + header double-encoding (#10, two gaps)
+- [ ] B13 C-NEXUS-CALLBACK: :WorkflowRunOperation async completion callback (#11)
 
 ---
 
@@ -392,13 +394,27 @@ CORRECTION (2026-06-26): the B8.2 safety valve was originally read as surfacing
 FOUR residual SDK bugs. The B9 investigation revised that down to THREE. #1 is
 NOT an SDK bug: it is a samples-perl import bug (see re-scoped Step B9), fixed in
 the #1 reconciliation entry above, not in the SDK. B9 is therefore re-scoped to
-"no SDK fix needed". The remaining real SDK fix steps are B10 (#4) and B11 (#10).
-#11 (nexus) shares NO fd path with #1; it must be re-verified INDEPENDENTLY on
-its own registration/sample. RECONCILIATION ORDER: land B10 and B11 first; THEN
-revert the remaining sample workarounds (#1 with its import fix, #4, #10, #11) in
-samples-perl and verify their un-gated live smokes; THEN do B8.3 (flip the
-sdk-perl CLAUDE.md + README status lines to "verified live against a dev server")
-and B8.5 (final green-suite + all-reverts-pass verification).
+"no SDK fix needed". B10 (#4) and B11 (#10) landed.
+
+PASS 2 (samples-perl @0195c34): reverted #1 sync-activity and #4 updatable-timer
+and verified BOTH live, so 10/11 reverts have now landed un-gated. Pass 2 also
+instrumented the last two failures more precisely and surfaced THREE more SDK
+gaps blocking #10 and #11:
+- #10 context propagation still reads `request_id=(none)` live for TWO reasons on
+  the ACTIVITY side: (A) the activity-inbound interceptor input has no headers
+  (ActivityDispatcher.pm `_handle_start` never reads the Start task's
+  `header_fields`), and (B) header double-encoding (the outbound path re-encodes an
+  already-Payload header value through `to_payload`). Tracked as Step B12.
+- #11 (nexus) `:WorkflowRunOperation` async never completes for the caller:
+  OperationContext.pm `WorkflowRunOperationContext::start_workflow` starts the
+  backing workflow with NO completion callback / operation token / event links, so
+  the operation parks forever. The fd theory for #11 is CONFIRMED DEAD. Tracked as
+  Step B13.
+RECONCILIATION ORDER (revised): land B12 and B13 first; THEN do the final samples
+pass to revert #10 (context-propagation) and #11 (nexus) in samples-perl and
+verify their un-gated live smokes; THEN do B8.3 (flip the sdk-perl CLAUDE.md +
+README status lines to "verified live against a dev server") and B8.5 (final
+green-suite + all-reverts-pass verification).
 
 ---
 
@@ -525,10 +541,94 @@ job carries the start headers; they just are not threaded into the inbound input
 
 ---
 
+## Step B12: C-ICEPT-ACTIVITY-HEADERS activity-inbound input missing headers + header double-encoding (#10)
+
+**NOTE.** B11 threaded the WORKFLOW-inbound start headers, so the workflow-inbound
+hook now reads the real request id. But context propagation STILL reads
+`request_id=(none)` live, for two distinct reasons on the ACTIVITY side:
+
+(A) The activity-inbound interceptor input carries NO headers.
+`sdk/lib/Temporalio/Worker/ActivityDispatcher.pm` `_handle_start` (the sync branch
+~L158 and the async branch ~L182) builds the `ExecuteActivity` interceptor input
+as `Input::ExecuteActivity->new(args => ..., _root => ...)` and never reads the
+activity Start task's `header_fields` (proto field 6). The activity-inbound hook
+therefore sees an empty `$input->headers`.
+
+(B) Header representation asymmetry / double-encoding. The client-outbound path
+runs an already-Payload-shaped header value through the data converter
+`to_payload`, so the inbound hook receives a blessed
+`Temporalio::Proto::Api::Common::V1::Payload` whose `data` is doubly encoded,
+while consumers (and sdk-python) expect a pass-through Payload, not a re-encoded
+one. Headers must travel as Payloads consistently in BOTH directions.
+
+```text
+1. RED: a unit/integration repro asserting (a) the activity-inbound ExecuteActivity
+   input carries the Start task's header_fields, AND (b) a header set at start
+   round-trips to the activity-inbound hook un-double-encoded. Today it FAILS for
+   the documented reason: the header is absent on activity-inbound, and where a
+   header IS present its value is a doubly-encoded Payload.
+2. GREEN:
+   (A) Thread the activity Start `header_fields` into the ExecuteActivity
+       interceptor input in ActivityDispatcher.pm `_handle_start` (both the sync
+       branch ~L158 and the async branch ~L182) so `$input->headers` is populated
+       in the activity-inbound hook.
+   (B) Settle the interceptor-header representation so headers pass through as
+       Payloads consistently in BOTH directions (outbound and inbound), matching
+       sdk-python; do not run an already-Payload header value back through
+       `to_payload` (no double-encode).
+3. REFACTOR: one header-representation contract shared by the outbound and inbound
+   paths (pass-through Payload, never re-encoded); comment citing #10.
+4. Verify: the activity-inbound header repro passes; B7's
+   t/unit/workflow_inbound_interceptor.t and B11's t/unit/workflow_inbound_headers.t
+   still pass; full `prove -lj4 t` green.
+```
+
+---
+
+## Step B13: C-NEXUS-CALLBACK :WorkflowRunOperation async completion callback (#11)
+
+**NOTE.** B6 enabled Nexus serving and the SYNC Nexus operation works, but a
+`:WorkflowRunOperation` (async) operation never completes for the CALLER.
+`sdk/lib/Temporalio/Nexus/OperationContext.pm`
+`WorkflowRunOperationContext::start_workflow` (~L76-84) issues a plain
+`$client->start_workflow` with NO Nexus completion callback, operation token, or
+workflow event links. The backing workflow runs and reaches
+`WorkflowExecutionCompleted`, but the caller's Nexus operation parks forever (the
+server shows `Pending Nexus Operations: 1`, and the backing workflow's
+`WorkflowExecutionStarted` has `completionCallbacks: null`). The fd theory for #11
+is confirmed dead: #11 shares no fd path with #1 and there is no SDK fd bug. All
+three nexus samples use WorkflowRunOperation, so this fix unblocks all three.
+
+```text
+1. RED: a SUBPROCESS-GUARDED live repro of a `:WorkflowRunOperation`
+   caller -> handler round-trip asserting the caller's operation resolves with the
+   backing workflow's result. Today it FAILS for the documented reason: the
+   operation parks forever / the repro times out.
+2. Investigate first: whether the pinned c-bridge / proto already lets Perl populate
+   the StartWorkflowExecution request's `completion_callbacks` (plus the Nexus
+   operation token / workflow event links) from the Nexus operation context. The
+   likely answer is yes, Perl-side only (the B6 Nexus poll needed no shim). If shim
+   work IS required, follow the CLAUDE.md memory guard (CARGO_BUILD_JOBS=2,
+   foreground, cargo test + cbindgen regen + Alien rebuild).
+3. GREEN: attach the Nexus async completion callback (plus operation token and
+   workflow event links) to the WorkflowRunOperation backing-workflow start in
+   OperationContext.pm `WorkflowRunOperationContext::start_workflow` so the server
+   notifies the caller on completion. This means populating the
+   StartWorkflowExecution request's `completion_callbacks` (and the Nexus operation
+   token / links) from the Nexus operation context.
+4. REFACTOR: the callback/token/links wiring lives in one place on the
+   WorkflowRunOperation start path; comment citing #11.
+5. Verify: the live round-trip repro passes (the caller's operation resolves with
+   the backing workflow's result); B6's repro_nexus.t still passes; full
+   `prove -lj4 t` green.
+```
+
+---
+
 ## Implementation Guidelines
 
 - **One step per commit, always green.** B0 is one commit (the map). Each fix step
-  (B1-B7 and the residual SDK fix steps B10-B11) is one commit carrying its repro
+  (B1-B7 and the residual SDK fix steps B10-B13) is one commit carrying its repro
   AND its fix, so the repro lands green and the suite never goes red. B9 is
   re-scoped to "no SDK bug" (its #1 fix is a samples-perl change tracked under B8).
   B8's reverts commit

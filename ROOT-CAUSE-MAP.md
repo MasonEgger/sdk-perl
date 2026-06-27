@@ -99,6 +99,22 @@ reaper-race fix stands on its own merits (it prevents a real test-teardown SEGV)
 and is unrelated to #1's true cause. B9 is re-scoped to "no SDK fix"; #1's fix is
 a samples-perl change.
 
+## Residual findings (B8.2 reconciliation pass 2, recorded 2026-06-26)
+
+Pass 2 (samples-perl @0195c34) reverted #1 sync-activity and #4 updatable-timer
+and verified BOTH live, so 10/11 reverts have now landed un-gated. The last two
+(#10 context-propagation, #11 nexus) stayed red, and pass 2 instrumented them
+more precisely, splitting #10 into two distinct activity-side gaps and pinning
+#11 to a missing async completion callback. These are the new fix steps B12 and
+B13.
+
+| Bug | Residual cluster (plan step) | What B1-B11 fixed vs. what remains | Suspected root (file:line) | Layer | Test type |
+|-----|------------------------------|-----------------------------------|----------------------------|-------|-----------|
+| #10 context propagation reads `request_id=(none)` live, ACTIVITY side (two gaps) | B12 C-ICEPT-ACTIVITY-HEADERS | B11 threaded the WORKFLOW-inbound start headers (workflow-inbound hook now reads the real id), but the ACTIVITY side has TWO uncovered gaps. (A) The activity-inbound interceptor input carries NO headers: `_handle_start` builds `Input::ExecuteActivity->new(args=>..., _root=>...)` and never reads the activity Start task's `header_fields` (proto field 6), so `$input->headers` is empty in the activity-inbound hook. (B) Header representation asymmetry / double-encoding: the client-outbound path runs an already-Payload-shaped header value through the data converter `to_payload`, so the inbound hook receives a blessed `Temporalio::Proto::Api::Common::V1::Payload` whose `data` is doubly encoded, while consumers (and sdk-python) expect a pass-through Payload. | (A) `sdk/lib/Temporalio/Worker/ActivityDispatcher.pm` `_handle_start` (sync branch ~L158, async branch ~L182). (B) the outbound client header-encode path vs. the inbound decode path: settle on pass-through Payloads in BOTH directions, no re-encode. | Perl | unit (activity-inbound input + round-trip) and/or integration |
+| #11 nexus `:WorkflowRunOperation` async parks forever for the caller | B13 C-NEXUS-CALLBACK | B6 enabled Nexus serving + wired the poll loop and the SYNC operation works, but the async `:WorkflowRunOperation` never completes for the CALLER. `WorkflowRunOperationContext::start_workflow` issues a plain `$client->start_workflow` with NO Nexus completion callback / operation token / workflow event links, so the backing workflow reaches `WorkflowExecutionCompleted` while the caller's Nexus operation parks forever (server: `Pending Nexus Operations: 1`; backing workflow's `WorkflowExecutionStarted` has `completionCallbacks: null`). The fd theory for #11 is CONFIRMED DEAD: #11 shares no fd path with #1, and there is no SDK fd bug. | `sdk/lib/Temporalio/Nexus/OperationContext.pm` `WorkflowRunOperationContext::start_workflow` (~L76-84): populate the StartWorkflowExecution request's `completion_callbacks` (+ operation token / event links) from the Nexus operation context. Investigate whether the pinned c-bridge / proto already supports it Perl-side (likely yes, like B6's poll which needed no shim); shim work only if required (memory guard). | Perl (likely no shim) | subprocess-guarded integration (live round-trip) |
+
+All three nexus samples use WorkflowRunOperation, so B13 unblocks all three.
+
 ## Out of scope for this map
 
 The activity-choice "unknown order hangs" item (issues doc, "Actionable fix"
