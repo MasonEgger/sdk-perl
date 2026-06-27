@@ -70,6 +70,28 @@ shim, NO Callback.pm, and NO cargo/Alien rebuild are involved. The fix lives in
 the core-shutdown window so core reaps its own child (and reaps any still-watched
 fork-pool worker itself to avoid a zombie). #2 was already healthy.
 
+## Residual findings (B8.2 safety valve, recorded 2026-06-26)
+
+The B8.2 sample-revert pass un-gated the workarounds one at a time and ran each
+live smoke. Eight passed clean (#2, #3, #5, #6, #7, #8, #9). Four did NOT: the
+B1-B7 fixes covered a related-but-different symptom, leaving a residual SDK bug.
+These become fix steps B9, B10, B11.
+
+| Bug | Residual cluster (plan step) | What B1-B7 fixed vs. what remains | Suspected root (file:line) | Layer | Test type |
+|-----|------------------------------|-----------------------------------|----------------------------|-------|-----------|
+| #1 sync fork-pool child corrupts the bridge signal fd | B9 C-FD-REAL | B4 fixed a DIFFERENT symptom: the `Temporalio::Test::DevServer` teardown-reaper SEGV (IO::Async's lingering SIGCHLD reaper stealing core's ephemeral-server child at `$server->shutdown`). The PRODUCTION bug remains: the real sync-activity sample wedges live with "signal fd 13 write failed (Bad file descriptor)" + a ~200s hang. The sync-activity `IO::Async::Function` fork-pool CHILD closes the bridge completion-queue signal fd in its inherited-FD hygiene sweep, so the parent's trampoline write fails. (CLOEXEC was disproven in B4's ISOLATED minimal repro, but the real sample pattern still corrupts the fd.) | fd creation in `sdk/lib/Temporalio/Core/Callback.pm` (set close-on-exec on the eventfd/pipe) AND/OR the Worker/Activity fork-pool child FD-close sweep (exclude the bridge signal fd) | Perl | subprocess-guarded integration |
+| #4 wait_condition WITH A TIMEOUT still wedges | B10 C-COND-TIMEOUT | B1's plain re-park fix (covers #3) is present, but the durable-timer-backed timeout path is distinct: arm a long timer, an `:Update` moves the deadline, re-arm a short timer against the moved deadline — the stale timer is not cleanly cancelled before the new one arms and the workflow hangs. | the timeout-timer cancel/re-arm path in `sdk/lib/Temporalio/Workflow/Runner.pm` | Perl | replay (preferred) or subprocess-guarded integration |
+| #10 workflow-inbound input missing start headers | B11 C-ICEPT-HEADERS | B7 wired the workflow-inbound chain so the hook is now invoked, but the runner builds the inbound `ExecuteWorkflow` input WITHOUT the start headers (Runner.pm ~1685-1690 passes only `type`/`args`/`_root`). The now-invoked inbound hook has no header to read, so context propagation forwards an EMPTY header and the downstream activity reads `request_id=(none)`. The InitializeWorkflow job carries the headers; they are not threaded into the inbound input. | the inbound-input build in `sdk/lib/Temporalio/Workflow/Runner.pm` (~1685-1690) | Perl | unit (inbound-input build) or integration (context propagation) |
+| #11 nexus re-verify after #1 | B9 (shares #1's fd path) | B6 enabled Nexus serving + wired the poll loop and the round-trip resolved in B6's repro, but #11's sample rides the same sync fork-pool fd path as #1, so it must be RE-VERIFIED live after B9 fixes the signal fd. | shares #1's root (Callback.pm / fork-pool FD sweep) | Perl | subprocess-guarded integration (re-verify) |
+
+**Correction to the #1/#2 note above.** The earlier "Shared roots" entry and the
+"Superseded by the B4 implementation" note record that B4 fixed #1. That is only
+half true and is corrected here: B4 fixed the test-teardown reaper-race SEGV, NOT
+#1's production signal-fd corruption. The production bug is the fork-pool child
+closing the bridge completion-queue signal fd, fixed in B9 (Callback.pm
+close-on-exec and/or the fork-pool FD-sweep exclusion). B4's DevServer teardown
+fix stands; it simply did not cover the production path.
+
 ## Out of scope for this map
 
 The activity-choice "unknown order hangs" item (issues doc, "Actionable fix"

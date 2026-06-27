@@ -57,8 +57,39 @@ leaves the suite green.
 - [x] B7.4 Verify: unit spy + live smoke pass; full `prove -lj4 t` green
 
 ## B8 Cleanup: sample fix, revert workarounds, docs live-verified
-- [ ] B8.1 activity-choice sample fix (samples-perl): Menu returns undef; Workflow raises non-retryable Application; update t/01 + confirm t/02-smoke fast
-- [ ] B8.2 Revert sample workarounds per the cleanup contract (#1-#11), verifying each un-gated live smoke passes
-- [ ] B8.3 Update sdk-perl CLAUDE.md + README status lines to "verified live against a dev server"
+- [x] B8.1 activity-choice sample fix (samples-perl): Menu returns undef; Workflow raises non-retryable Application; update t/01 + confirm t/02-smoke fast (committed samples-perl @3b3dded)
+- [~] B8.2 PARTIAL: revert sample workarounds per the cleanup contract. 8 reverts landed and verified live un-gated in samples-perl @3b3dded: #2 mutex, #3 batch-sliding-window, #5 external-workflow, #6 cancellation, #7 timer, #8 waiting-for-handlers, #9 local-activity. Reverts #1 sync-activity, #4 updatable-timer, #10 context-propagation, #11 nexus DEFERRED pending the residual fixes B9/B10/B11 below (B8.2's safety valve surfaced four residual SDK bugs the B1-B7 fixes did not fully cover)
+- [ ] B8.3 Update sdk-perl CLAUDE.md + README status lines to "verified live against a dev server" (do AFTER B9/B10/B11 land and the remaining reverts #1/#4/#10/#11 are un-gated)
 - [ ] B8.4 (Optional) SDK diagnostic for plain-die-in-workflow -> retryable task failure; doc note on Temporalio::Exception::Application
 - [ ] B8.5 Verify: sdk-perl full `prove -lj4 t` green; samples-perl `just check` green offline AND every reverted live smoke passes with the SDK on PERL5LIB
+
+### B8 reconciliation note (do after B9/B10/B11)
+B8.2's residual safety valve surfaced FOUR SDK bugs not fully covered by B1-B7:
+#1 (sync fork-pool child corrupts the bridge signal fd -> "Bad file descriptor"
++ 200s hang; B4 fixed only a DIFFERENT teardown-reaper SEGV), #4 (wait_condition
+WITH A TIMEOUT still wedges even though B1's plain re-park fix is present), #10
+(workflow-inbound ExecuteWorkflow input built WITHOUT the start headers, so
+context propagation forwards an empty header), and #11 (nexus, which shares #1's
+fork-pool fd path and must be re-verified after B9). These become fix steps B9,
+B10, B11. AFTER B9/B10/B11 land: revert the remaining sample workarounds (#1, #4,
+#10, #11) in samples-perl and verify their un-gated live smokes, THEN do B8.3 and
+B8.5.
+
+## B9 C-FD-REAL: sync fork-pool child corrupts the bridge signal fd (#1; #11 shares it)
+- [ ] B9.1 RED: subprocess-guarded integration repro mirroring the sync-activity sample (a `:Defn(...,'sync=1')` activity with real FD hygiene) that asserts the worker returns without "signal fd write failed (Bad file descriptor)" and does not hang (~200s today); fails first for the documented reason
+- [ ] B9.2 Diagnose: confirm the fork-pool child closes/corrupts the bridge completion-queue signal fd (B4's reaper fix addressed a different teardown SEGV, NOT this production bug); record in ROOT-CAUSE-MAP.md
+- [ ] B9.3 GREEN: set close-on-exec on the eventfd/pipe at creation in Core/Callback.pm AND/OR exclude the bridge signal fd from the Worker/Activity fork-pool child's FD-close sweep
+- [ ] B9.4 REFACTOR: document the signal-fd-ownership contract at the eventfd creation site and the fork-pool FD sweep; comment cites #1
+- [ ] B9.5 Verify: live repro passes un-gated (no "signal fd write failed", no hang); re-verify #11 nexus round-trip after the fd fix; full `prove -lj4 t` green
+
+## B10 C-COND-TIMEOUT: wait_condition-with-timeout timer cancel/re-arm wedge (#4)
+- [ ] B10.1 RED: replay or subprocess-guarded integration repro of the timeout-timer cancel/re-arm (arm a long durable timer, an `:Update` moves the deadline, re-arm a short timer); asserts the workflow does not wedge; fails first (B1's plain re-park fix is present, so this is a distinct timeout-timer path)
+- [ ] B10.2 GREEN: fix the timeout-timer cancel/re-arm path in Runner.pm so a moved deadline cancels the stale timer and arms the new one without wedging
+- [ ] B10.3 REFACTOR: unify the timeout-timer cancel/re-arm with the plain re-park path; comment cites #4
+- [ ] B10.4 Verify: the timeout repro passes; B1's #3 plain re-park repro still passes; full `prove -lj4 t` green
+
+## B11 C-ICEPT-HEADERS: workflow-inbound input missing start headers (#10)
+- [ ] B11.1 RED: unit or integration repro asserting the workflow-inbound ExecuteWorkflow input carries the start headers from the InitializeWorkflow job (today Runner.pm ~1685-1690 passes only type/args/_root, so the inbound hook reads no header and the activity sees request_id=(none)); fails first
+- [ ] B11.2 GREEN: populate the workflow-inbound input headers from the InitializeWorkflow job so the inbound interceptor and context propagation see the real start headers
+- [ ] B11.3 REFACTOR: thread the start headers through the inbound-input build the same way the outbound path carries them; comment cites #10
+- [ ] B11.4 Verify: the inbound-headers repro passes; context-propagation live smoke forwards a non-empty header (activity reads the real request_id); full `prove -lj4 t` green

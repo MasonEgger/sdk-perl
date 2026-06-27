@@ -66,7 +66,10 @@ C-COND lands.
 - [ ] B5 C-LOCALACT: fix execute_local_activity segfault (#9)
 - [ ] B6 C-NEXUS: enable Nexus serving + wire the task poller (#11)
 - [ ] B7 C-ICEPT: invoke worker inbound interceptor chains (#10)
-- [ ] B8 Cleanup: activity-choice sample fix, revert sample workarounds, docs live-verified
+- [~] B8 Cleanup: activity-choice sample fix, revert sample workarounds, docs live-verified (PARTIAL: B8.1 done, B8.2 8/11 reverts landed; #1/#4/#10/#11 deferred to B9/B10/B11)
+- [ ] B9 C-FD-REAL: sync fork-pool child corrupts the bridge signal fd (#1; #11 shares it)
+- [ ] B10 C-COND-TIMEOUT: wait_condition-with-timeout timer cancel/re-arm wedge (#4)
+- [ ] B11 C-ICEPT-HEADERS: workflow-inbound input missing start headers (#10)
 
 ---
 
@@ -370,14 +373,133 @@ activity-choice fix is a samples-perl change, not an SDK change.
    offline AND every reverted live smoke passes with the SDK on PERL5LIB.
 ```
 
+**B8 STATUS + reconciliation (recorded during the B8 cleanup).** B8.1 is DONE:
+the activity-choice fix landed in samples-perl @3b3dded (Menu returns undef,
+Workflow raises a non-retryable Application). B8.2 is PARTIAL: 8 of the 11
+reverts landed and were verified live un-gated in samples-perl @3b3dded (#2, #3,
+#5, #6, #7, #8, #9). The reverts for #1, #4, #10, #11 are DEFERRED because B8.2's
+safety valve surfaced FOUR residual SDK bugs the B1-B7 fixes did not fully cover.
+Those become fix steps B9 (#1, and #11 shares its fd path), B10 (#4), and B11
+(#10) below. RECONCILIATION ORDER: land B9, B10, B11 first; THEN revert the
+remaining sample workarounds (#1, #4, #10, #11) in samples-perl and verify their
+un-gated live smokes; THEN do B8.3 (flip the sdk-perl CLAUDE.md + README status
+lines to "verified live against a dev server") and B8.5 (final green-suite +
+all-reverts-pass verification).
+
+---
+
+## Step B9: C-FD-REAL sync fork-pool child corrupts the bridge signal fd (#1; #11 shares it)
+
+**NOTE.** This is the PRODUCTION half of #1 that B4 did NOT fix. B4 addressed a
+DIFFERENT symptom: a `Temporalio::Test::DevServer` teardown reaper SEGV (IO::Async's
+lingering process-wide SIGCHLD reaper stealing sdk-core's ephemeral-server child
+at `$server->shutdown`). The real sample (sync-activity) still wedges against a
+live server: the sync-activity `IO::Async::Function` fork-pool CHILD closes the
+bridge completion-queue signal fd during its inherited-FD hygiene sweep, so the
+parent's trampoline later fails with "signal fd 13 write failed (Bad file
+descriptor)" and the worker hangs (~200s before the harness gives up). The
+CLOEXEC hypothesis was disproven in B4's ISOLATED minimal repro, but the real
+sample pattern still corrupts the fd, so the fix is at fd creation and/or the
+fork-pool FD sweep. #11 (nexus) rides the same fork-pool path and must be
+re-verified after this fix.
+
+```text
+1. RED: Create sdk/t/integration/repro_fd_real.t, SUBPROCESS-GUARDED (reuse
+   t/lib/SubprocessGuard.pm) — the #1 failure is a hang + fd corruption that would
+   wedge prove otherwise:
+   - Mirror the sync-activity sample: a worker registering a SYNC
+     (`:Defn(...,'sync=1')`) activity with REAL FD hygiene (the fork-pool child
+     closing inherited descriptors, as the sample does), run end to end against an
+     ephemeral dev server in the guard child.
+   - Assert the child exits 0 within the bound and that no "signal fd write failed
+     (Bad file descriptor)" appears; today it FAILS for the documented reason (the
+     write to the closed signal fd, then the ~200s hang).
+2. Diagnose: confirm the fork-pool child closes/corrupts the bridge
+   completion-queue signal fd (eventfd on Linux, pipe elsewhere). Record in
+   ROOT-CAUSE-MAP.md, distinct from B4's teardown-reaper SEGV.
+3. GREEN: set close-on-exec on the eventfd/pipe at creation in
+   sdk/lib/Temporalio/Core/Callback.pm AND/OR have the Worker/Activity fork-pool
+   child EXCLUDE the bridge signal fd from its FD-close sweep so the parent's
+   trampoline can still signal completion.
+4. REFACTOR: document the signal-fd-ownership contract at the eventfd creation
+   site and at the fork-pool FD sweep; comment citing #1.
+5. Verify: repro_fd_real.t passes un-gated (no "signal fd write failed", no hang);
+   re-verify the #11 nexus live round-trip now that the fork-pool fd is intact;
+   full `prove -lj4 t` green.
+```
+
+---
+
+## Step B10: C-COND-TIMEOUT wait_condition-with-timeout timer cancel/re-arm wedge (#4)
+
+**NOTE.** B1 fixed the plain `wait_condition` re-park (covers #3): a condition
+re-registered by a synchronous continuation is no longer dropped at the
+`_check_conditions` rebuild. But a `wait_condition` WITH A TIMEOUT is
+durable-timer-backed, and the timer-cancel/re-arm path still wedges when the
+deadline MOVES: arm a long timer, an `:Update` moves the deadline, re-arm a short
+timer — the stale timer is not cleanly cancelled before the new one arms and the
+workflow hangs. B1's fix is present and does not cover this distinct
+timeout-timer path.
+
+```text
+1. RED: Create the timeout repro — prefer a deterministic sdk/t/replay/ repro of
+   the timer cancel/re-arm command sequence; fall back to a SUBPROCESS-GUARDED
+   sdk/t/integration/ repro if the wedge only reproduces live:
+   - Arm a long durable timer behind a wait_condition timeout; an :Update moves
+     the deadline; re-arm a short timer against the moved deadline.
+   - Assert the workflow does not wedge (the short timer fires / the condition
+     resolves) and, in replay form, that exactly one StartTimer + one CancelTimer
+     are emitted for the moved deadline. Today it FAILS (wedge) for the documented
+     reason.
+2. GREEN: Fix the timeout-timer cancel/re-arm path in
+   sdk/lib/Temporalio/Workflow/Runner.pm so a moved deadline cancels the stale
+   timer and arms the new one without leaving the condition parked forever.
+3. REFACTOR: unify the timeout-timer cancel/re-arm with the plain re-park path so
+   both share one re-arm helper; comment citing #4.
+4. Verify: the timeout repro passes; B1's #3 plain re-park repro still passes;
+   full `prove -lj4 t` green.
+```
+
+---
+
+## Step B11: C-ICEPT-HEADERS workflow-inbound input missing start headers (#10)
+
+**NOTE.** B7 wired the workflow-inbound interceptor chain so the inbound hook is
+now invoked (covers #10's "never called" half). But the runner builds the
+workflow-inbound `ExecuteWorkflow` input WITHOUT the start headers: Runner.pm
+(~1685-1690) passes only `type` / `args` / `_root`, so the now-invoked inbound
+hook has no header to read, and context propagation forwards an EMPTY header (the
+downstream activity reads `request_id=(none)`). The InitializeWorkflow activation
+job carries the start headers; they just are not threaded into the inbound input.
+
+```text
+1. RED: Create the repro — a unit test on the inbound-input build, or an
+   integration repro of context propagation:
+   - Drive an InitializeWorkflow job carrying a non-empty `headers` map; assert the
+     workflow-inbound ExecuteWorkflow input the runner builds carries those start
+     headers (today it is empty / absent). For the integration form, a header-reading
+     inbound interceptor forwards a request_id to an activity and the activity
+     asserts it is the real id, not "(none)". Today it FAILS for the documented
+     reason (input has no headers).
+2. GREEN: Populate the workflow-inbound input headers from the InitializeWorkflow
+   job in Runner.pm so the inbound interceptor and context propagation see the real
+   start headers.
+3. REFACTOR: thread the start headers through the inbound-input build the same way
+   the outbound path carries them; comment citing #10.
+4. Verify: the inbound-headers repro passes; the context-propagation live smoke
+   forwards a non-empty header (the activity reads the real request_id); full
+   `prove -lj4 t` green.
+```
+
 ---
 
 ## Implementation Guidelines
 
 - **One step per commit, always green.** B0 is one commit (the map). Each fix step
-  B1-B7 is one commit carrying its repro AND its fix, so the repro lands green and
-  the suite never goes red. B8's reverts commit per the project process. Shim steps
-  fold the cargo test + cbindgen regen + Alien rebuild into the same commit.
+  (B1-B7 and the residual steps B9-B11) is one commit carrying its repro AND its
+  fix, so the repro lands green and the suite never goes red. B8's reverts commit
+  per the project process. Shim steps fold the cargo test + cbindgen regen + Alien
+  rebuild into the same commit.
 - **Crash/hang repros are subprocess-guarded** (directive 4): run the dangerous
   worker+workflow in a child under a hard timeout, assert exit 0; never in-process.
 - **Replay over live where deterministic.** C-COND and C-CANCEL-CMD are
