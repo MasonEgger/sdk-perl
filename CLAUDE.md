@@ -5,7 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Temporal SDK for Perl, driving the Rust `sdk-core` through its C ABI
-(`temporalio-sdk-core-c-bridge`) via `FFI::Platypus`. **Status: v0.2.0, feature-complete.** v0.1 (Phases 0-5: client, worker,
+(`temporalio-sdk-core-c-bridge`) via `FFI::Platypus`. **Status: v0.2.0 API
+surface feature-complete and verified live; a remediation and feature-parity
+phase (root `spec.md`, R1-R97) is specced and planned, not yet implemented.**
+v0.1 (Phases 0-5: client, worker,
 sync/async activities, workflows, signals, queries, wait_condition,
 cancellation, continue-as-new, data conversion) and v0.2 (Phases 6-10, spec
 §18-§31: child workflows, updates, external handles, local activities, async
@@ -13,26 +16,39 @@ activity completion, eager start, upsert SA/memo, schedules, Nexus, interceptors
 + OTel, log forwarding, metric meters, worker versioning, tuner/slot suppliers,
 autoscaling pollers, determinism guard, reset, http_proxy, env-config) are
 implemented and verified live against a dev server: unit, replay, and live
-integration suites green.
+integration suites green. A later multi-agent portfolio review (step-45) plus a
+reference-SDK parity audit against `../sdk-python` found 70 defects and 27
+feature-parity gaps; all 97 are specced as R1-R97 in the root `spec.md` and
+sequenced in the root `plan.md`. "Feature-complete" describes the shipped API
+surface, not defect-free parity, until that plan lands.
 
 ## Document hierarchy (read in this order)
 
-1. `.ai-sessions/v1/spec.md`: the implementation contract (archived under
-   `.ai-sessions/v1/` now that v1 is complete). Every component has a public
-   API, behavioral contract, failure modes, and test IDs (`T-*`). The
-   prime directive (spec §0): Temporal-spec semantics first, Perl idioms
-   second. When anything conflicts with the spec, the spec wins.
-2. `.ai-sessions/v1/plan.md`: TDD steps for `/bpe:execute-plan` (Phases 0-5 =
-   v0.1, Phases 6-10 = v0.2, steps P6.1-P10.10, all complete). Each step is a
-   prompt with RED/GREEN/REFACTOR sub-steps.
-3. `.ai-sessions/v1/todo.md`: per-sub-step checkbox tracker (all checked).
-4. `.ai-sessions/` — session summaries and `lessons.md`. Read the most
+1. `spec.md` (repo root): the ACTIVE contract, a remediation and feature-parity
+   spec with 97 requirements (R1-R70 are the step-45 verified defects; R71-R97
+   are reference-SDK parity gaps from the 2026-07-06 audit). This is what the
+   code is currently held to. The prime directive (spec §0, inherited from v1):
+   Temporal-spec semantics first, Perl idioms second. When anything conflicts
+   with the spec, the spec wins.
+2. `plan.md` / `todo.md` (repo root): the TDD plan and checkbox tracker for
+   R1-R97 (`/bpe:execute-plan`), 77 steps across 10 phases keyed to the spec's
+   R-ids (merged ranges like `R8-R10` are the spec's Component-Boundaries
+   clusters). None checked yet.
+3. `.ai-sessions/v1/spec.md`: the archived v1 IMPLEMENTATION contract (the
+   original public API, behavioral contracts, failure modes, `T-*` test IDs).
+   Consult it for the baseline behavior a remediation requirement holds the
+   code to.
+4. `.ai-sessions/v1/{plan,todo}.md`: TDD steps for v0.1/v0.2 (Phases 0-10, all
+   complete). `.ai-sessions/live-hardening/{plan,todo}.md`: the completed
+   B0-B13 live-hardening phase (fixed the 11 field-report bugs in
+   `sdk-perl-issues-from-samples.md`), archived once done.
+5. `.ai-sessions/`: session summaries and `lessons.md`. Read the most
    recent summary before starting work; `lessons.md` holds hard-won
    toolchain gotchas (proto sub-message blessing, one-`class :isa`-per-file
    under Future::AsyncAwait on 5.38.2, `Future->call`-vs-`->wrap`, etc.).
-5. `.v0.2-drafts/` (gitignored, scratch) — the fuller per-feature rationale,
+6. `.v0.2-drafts/` (gitignored, scratch): the fuller per-feature rationale,
    flagged-decision write-ups, and file:line reference anchors that were
-   condensed into spec §18–§31. Consult the matching draft when a v0.2 spec
+   condensed into spec §18-§31. Consult the matching draft when a v0.2 spec
    section is terse.
 
 ## Commands
