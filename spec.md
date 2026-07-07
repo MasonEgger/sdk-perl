@@ -2,18 +2,20 @@
 
 ## Overview
 
-This repository has no root spec.md; the v1 implementation contract is archived at `.ai-sessions/v1/spec.md`.
-The contract this document holds the code to is reconstructed from three sources.
+This repository has no root *implementation-contract* spec.md; the v1 contract is archived at `.ai-sessions/v1/spec.md`.
+This document, `spec.md` at the repository root, is a remediation and feature-parity spec, not that contract.
+The contract it holds the code to is reconstructed from three sources.
 First, the archived v1 spec, whose prime directive (spec §0) is Temporal-spec semantics first, Perl idioms second: any behavior consistent across two or more reference SDKs is the de facto contract.
 Second, the live-hardening phase docs: the root `plan.md`/`todo.md`, the 11-bug field report `sdk-perl-issues-from-samples.md`, and `ROOT-CAUSE-MAP.md`.
 Third, the shipped API surface as mapped in the step-43 state note (`../../.ai-sessions/step-43-sdk-perl-state.md` relative to this repo; the portfolio-level `.ai-sessions/` under `~/Code`).
 Where those sources are silent, the sibling checkout `../sdk-python` is the semantics ground truth, per §0 and the repo CLAUDE.md.
-The bar for this repository: a Perl developer can build on this SDK against documented behavior.
-A method whose POD promises spans, codec coverage, or cancellation delivery that the code does not perform fails that bar even when the suite is green.
+The bar for this repository: feature-complete parity with the reference SDKs (`../sdk-python` first), so a Perl developer can build on this SDK against documented behavior and reach for any capability the reference SDKs expose.
+A method whose POD promises spans, codec coverage, or cancellation delivery that the code does not perform fails that bar even when the suite is green; so does a capability the reference SDKs ship that this SDK lacks.
 
 A multi-agent portfolio review on 2026-07-02 produced candidate findings against the v0.2.0 tree (branch v1, commit 4994ba6).
 Adversarial verification (step 45, `../../.ai-sessions/step-45-sdk-perl-verified.md`) confirmed 68 unique defects with exact file and line references, refuted 1 candidate, refuted 4 sub-claims inside confirmed items, and surfaced 2 adjacent defects while re-running probes.
 This spec defines the required behavior for all 70: the 68 confirmed findings plus the two adjacent ones (ADJ1, ADJ2).
+R71 onward add the reference-SDK feature-parity requirements from a 2026-07-06 audit (see Feature Parity below); together they carry the SDK to feature-complete parity, not just defect-free.
 
 Citation convention, matching the step-45 note: module paths are relative to `sdk/lib/Temporalio/`; the `ext:` prefix means `ext/temporalio-perl-bridge/src/lib.rs`; `t/` and `xt/` paths are under `sdk/`.
 Each requirement names its step-45 finding id in parentheses.
@@ -22,8 +24,10 @@ Probe artifacts from the verification live in the session scratchpad (`scratchpa
 
 ## Scope
 
-In scope: the 70 defects below, their reproduce-first tests, and the POD or README corrections a fix requires.
-Out of scope: the refuted candidate L27 (see Review Record), new features beyond what a documented promise requires, samples-perl fixes (tracked in that repo's own remediation spec), and refactors beyond what a fix needs.
+In scope: the 70 defects below, their reproduce-first tests, the POD or README corrections a fix requires, and the feature-parity work needed to bring this SDK to feature-complete parity with the reference SDKs (`../sdk-python` first).
+Refactors are in scope when a fix or a parity gap needs one, but each must be scoped as its own requirement so it can be planned and estimated accurately, not left open-ended.
+Parity gaps not already covered by R1 through R70 are enumerated as additional requirements (R71 onward) from a reference-SDK audit; that audit landed on 2026-07-06 and its gaps are enumerated as R71 through R97 below, so the requirement body is complete.
+Out of scope: the refuted candidate L27 (see Review Record) and samples-perl fixes (tracked in that repo's own remediation spec; nothing here changes samples-perl).
 
 Severity triage used for ordering:
 
@@ -32,6 +36,7 @@ Severity triage used for ordering:
 - Medium (R22 through R38): documented features that do not function, resource leaks and fd hygiene, backpressure and validation gaps, flaky test infrastructure.
 - Low-medium (R39 through R49): missing or dead test coverage, unreachable diagnostics and retry branches, teardown hygiene.
 - Low (R50 through R70): doc and POD drift, error-typing polish, cross-SDK parity edges, comment fixes.
+- Feature parity (R71 through R97): reference-SDK capability gaps from the 2026-07-06 audit, banded High, Medium, and Low by blast radius.
 
 ## Available Tooling
 
@@ -1123,6 +1128,356 @@ The step-45 sub-claim about `rpc_metadata` was refuted; it is documented (see Re
 - Remaining server-only guards carry the justification comment.
 
 **Test notes.** Do this sweep last; earlier requirements add replay harness capability (R8 through R10) that makes more conversions possible.
+
+## Feature Parity (R71 onward)
+
+R71 through R97 come from a reference-SDK parity audit on 2026-07-06: a six-way fan-out over the client, worker, in-workflow, activity and conversion, nexus and interceptor, and schedule and runtime surfaces of `../sdk-python`, verified against source per spec §0.
+Each requirement names its audit slice and finding, the Python source that is ground truth, and the Perl source it was checked against.
+"Confidence" is the auditor's read of whether the gap is a real capability drop versus a deliberate Perl-idiom deviation; where a low-confidence item resolved to a documented deviation under spec §0 rather than an implementation, the requirement states that decision (R97 is the one such case).
+The parity-versus-idiom judgment calls are resolved inline: R95 implements the from-history replayer, R96 exposes an activity context-detail accessor rather than mandating a logging framework, and R97 documents a deliberate deviation instead of porting deprecated APIs.
+Every other item is an implementation requirement.
+
+### Parity: High
+
+### R71: Wire and Invoke the Workflow-Outbound Interceptor Chain (High)
+
+**Defect.** `Temporalio::Worker::WorkflowOutbound` is defined (`Worker/Interceptor.pm:57-67`) but never used: no root outbound is built, the Runner never calls `WorkflowInbound.init(outbound)`, and no outbound method is invoked (`Workflow/Runner.pm:1690` builds only the inbound chain).
+Every `execute_activity`, `start_child_workflow`, `signal_*`, and `continue_as_new` bypasses interceptors, and the base lacks `info()` and `start_nexus_operation()`.
+This also caps R22: the OTel interceptor's outbound span table (`Contrib/OpenTelemetry/TracingInterceptor.pm:138-150`) is unreachable, so outbound trace-context injection cannot work even after R22 lands.
+(Parity audit, nexus/interceptor finding 1; Python `worker/_interceptor.py:416-481`, Perl `Worker/Interceptor.pm`. Confidence: high.)
+
+**Root cause.** The B7 live-hardening pass wired only the inbound chain; the outbound direction was never built.
+
+**Required behavior.** The Runner constructs a root workflow-outbound interceptor, folds the configured interceptor list over it, calls `inbound->init(outbound)`, and routes `execute_activity`, `execute_local_activity`, `start_child_workflow`, `signal_child_workflow`, `signal_external_workflow`, `continue_as_new`, `start_nexus_operation`, and `info` through the outbound chain, matching Python.
+
+**Acceptance criteria.**
+- A replay test registers a workflow interceptor whose outbound `execute_activity` and `start_child_workflow` mutate a header or args, and asserts the mutation reaches the emitted command; the test fails against the current unwired base.
+
+**Test notes.** Land before or with R22 so the OTel outbound spans have a chain to hang on.
+
+### R72: Add the Activity-Outbound Interceptor and Wire ActivityInbound.init (High)
+
+**Defect.** No `Temporalio::Worker::ActivityOutbound` class exists; `Worker/ActivityDispatcher.pm:152` builds the inbound chain but never calls `$inbound->init($outbound)`, so `activity.info()` and `activity.heartbeat()` go straight to `Activity/Context.pm` and a custom interceptor cannot observe or wrap them.
+(Parity audit, nexus/interceptor finding 2; Python `worker/_interceptor.py:135-156`, Perl `Worker/ActivityDispatcher.pm`. Confidence: high.)
+
+**Root cause.** The activity-outbound direction was never defined or wired.
+
+**Required behavior.** Define `Temporalio::Worker::ActivityOutbound` with `info` and `heartbeat`, have the dispatcher build a root outbound and call `inbound->init(outbound)`, and route the Activity Context heartbeat and info through the outbound chain.
+
+**Acceptance criteria.**
+- A unit test with an activity interceptor overriding outbound `heartbeat` asserts the override fires when the activity body calls `heartbeat`.
+
+### R73: Add the Nexus Operation Inbound Interceptor Role (High)
+
+**Defect.** `Temporalio::Worker::Interceptor` (`Worker/Interceptor.pm:73-76`) defines only `intercept_activity` and `intercept_workflow`; there is no `intercept_nexus_operation` and no `NexusOperationInbound` base, and `NexusDispatcher::_handle_start` (`Worker/NexusDispatcher.pm:196`) and `_handle_cancel_operation` (`:257`) invoke the handler directly with no chain, so nexus start and cancel cannot be intercepted (no OTel nexus spans, no handler-side header extraction).
+(Parity audit, nexus/interceptor finding 3; Python `worker/_interceptor.py:66-78, 500-528`, Perl `Worker/NexusDispatcher.pm`. Confidence: high.)
+
+**Root cause.** The nexus interceptor role was never added to the interceptor surface.
+
+**Required behavior.** Add `intercept_nexus_operation` and a `NexusOperationInbound` base with `execute_nexus_operation_start` and `execute_nexus_operation_cancel`, and have `NexusDispatcher` fold the interceptor list over a root that runs the handler.
+
+**Acceptance criteria.**
+- A unit test dispatches a nexus start task with an interceptor overriding `execute_nexus_operation_start` and asserts the override runs before the handler body.
+
+### R74: Carry ApplicationError next_retry_delay Through Exception and Failure Proto (High)
+
+**Defect.** `Exception/Application.pm:11-14` has no `next_retry_delay` field, and `Converter/Failure.pm:231-240, :251-261` never reads or writes `ApplicationFailureInfo.next_retry_delay`; the proto field exists (`share/proto/temporal/api/failure/v1/message.proto:27`), so this is a dropped capability.
+(Parity audit, activity/conversion finding 1; Python `exceptions.py:133,168-175` and `converter/_failure_converter.py:160-162,340`, Perl `Exception/Application.pm`, `Converter/Failure.pm`. Confidence: high. Distinct from R5, which carries type/non_retryable/details/cause over the fork channel only.)
+
+**Root cause.** The option and its proto mapping were never added.
+
+**Required behavior.** `Exception::Application` accepts `next_retry_delay`, and the failure converter round-trips it to and from `ApplicationFailureInfo.next_retry_delay`, matching Python; a set value overrides the next retry interval.
+
+**Acceptance criteria.**
+- A unit test builds an ApplicationError with `next_retry_delay`, runs `to_failure` then `from_failure`, and asserts the value survives and appears in the proto field.
+
+### R75: Support encode_common_attributes on the Failure Converter (High)
+
+**Defect.** `Converter/Failure.pm` always writes cleartext `message` and `stack_trace` and never produces or reads `encoded_attributes`; `Converter/Data.pm:99-102` will codec-transform `encoded_attributes` if present, but nothing produces it, so a configured encryption codec cannot protect the failure message or stack trace, and no `DefaultFailureConverterWithEncodedAttributes` equivalent is constructible.
+(Parity audit, activity/conversion finding 2; Python `converter/_failure_converter.py:84,119-127,312-327,461-468`, Perl `Converter/Failure.pm`. Confidence: high. R7 extends the codec surface but assumes the payloads already exist; R56 only wraps failure-conversion errors.)
+
+**Root cause.** The failure converter shipped without the encode-common-attributes relocation Python performs.
+
+**Required behavior.** The failure converter accepts `encode_common_attributes`; when set, `to_failure` relocates message and stack_trace into an `encoded_attributes` payload (message becomes "Encoded failure", stack_trace ""), and `from_failure` restores them, so the codec chain can encrypt them.
+
+**Acceptance criteria.**
+- A test with `encode_common_attributes` on and a marker codec asserts the on-wire Failure has message "Encoded failure" and a codec-tagged `encoded_attributes`, and that `from_failure` recovers the original message and stack trace.
+
+### R76: Expose Activity Cancellation Details and Reason (High)
+
+**Defect.** `Worker/ActivityDispatcher.pm:105-113` receives the `Cancel` job (which carries `reason` and an `ActivityCancellationDetails`, proto `activity_task.proto`) but fires only `->cancel` on the token and discards both; `Activity/Context.pm` exposes a single cancellation future whose POD conflates server-cancel with worker-shutdown, so a body cannot tell why it was cancelled (paused, reset, timed out, worker shutdown, not found, explicit cancel).
+(Parity audit, worker finding 2 and activity/conversion finding 3; Python `activity.py:169-191,315-317` and `worker/_activity.py:221-226`, Perl `Worker/ActivityDispatcher.pm`, `Activity/Context.pm`. Confidence: high. Distinct from R18/R19, which cover sync-activity heartbeat relay and cancel delivery, not the reason.)
+
+**Root cause.** The dispatcher drops the cancel reason and details.
+
+**Required behavior.** The dispatcher captures `reason` and `ActivityCancellationDetails` and exposes them on the activity context (a `cancellation_details` accessor with the boolean fields), matching Python, so a body can distinguish the cancellation cause.
+
+**Acceptance criteria.**
+- A test delivers a cancel carrying `WORKER_SHUTDOWN` (and separately `PAUSED`) and asserts the context reports the matching reason and details.
+
+### R77: Add workflow.uuid4 Deterministic UUID (High)
+
+**Defect.** `Workflow.pm` exposes `random` (`:72`) but no `uuid4`; the only UUID code is client-side `Temporalio::Client::_new_uuid`, which is non-deterministic and not workflow-safe.
+(Parity audit, in-workflow finding 1; Python `workflow/_context.py:866`, Perl `Workflow.pm`. Confidence: high.)
+
+**Root cause.** The deterministic UUID helper was never added to the workflow surface.
+
+**Required behavior.** Add `Temporalio::Workflow::uuid4` returning a v4 UUID derived from the workflow's deterministic RNG, stable across replays of the same run.
+
+**Acceptance criteria.**
+- A replay test asserts `uuid4()` is stable across replay, differs from a second call, and is seeded from the activation randomness seed.
+
+### R78: Carry a Summary on Timers, sleep, and wait_condition Timeouts (High)
+
+**Defect.** `Workflow::sleep`/`start_timer` take only `$seconds` (`Workflow.pm:241,250`), `Runner::start_timer` (`Runner.pm:1220`) emits StartTimer with no user-metadata, and `wait_condition` (`Runner.pm:1366,1388`) passes no summary; local activities already carry `summary`, so timers are the only omission.
+(Parity audit, in-workflow finding 2; Python `workflow/_context.py:878,894`, Perl `Workflow.pm`, `Workflow/Runner.pm`. Confidence: high. R69 covers activity summary only.)
+
+**Root cause.** The timer command builder was never extended for user-metadata.
+
+**Required behavior.** `sleep`/`start_timer` accept a `summary` and `wait_condition` a `timeout_summary`, converted to the StartTimer user-metadata single-line summary, matching Python.
+
+**Acceptance criteria.**
+- A replay test asserts the StartTimer command carries the user-metadata summary payload when passed, and none when omitted.
+
+### R79: Expose Per-Activation Workflow Info Accessors (High)
+
+**Defect.** No accessors exist for the current activation's `history_length`, `history_size_bytes`, `build_id`, or `continue_as_new_suggested` (grep of `sdk/lib` finds none); R36 completes only the static `info()` fields, while these four are per-activation dynamic values the runner receives but never surfaces.
+(Parity audit, in-workflow finding 3; Python `workflow/_context.py:140,165,175,185`, Perl `Workflow/Runner.pm`. Confidence: high.)
+
+**Root cause.** The dynamic per-activation fields were never plumbed to the context.
+
+**Required behavior.** Surface `get_current_history_length`, `get_current_history_size`, `get_current_build_id`, and `is_continue_as_new_suggested` (or the equivalent info accessors), updated each activation, so authors can gate continue-as-new on history growth.
+
+**Acceptance criteria.**
+- A replay test drives an activation carrying these fields and asserts each accessor returns the delivered value.
+
+### R80: Add the max_concurrent_nexus_tasks Worker Kwarg (High)
+
+**Defect.** The fallback fixed tuner hardcodes `nexus_task_slots => 100` (`Worker.pm:300,416`); no `max_concurrent_nexus_tasks` field exists (`Worker.pm:60-62`) and it is absent from the tuner mutual-exclusion set (`Worker.pm:959-961`), so the nexus pool is only tunable by building a full custom tuner.
+(Parity audit, worker finding 1; Python `worker/_worker.py:31,129-133`, Perl `Worker.pm`, `Worker/Tuner.pm`. Confidence: high.)
+
+**Root cause.** The kwarg was left as a fixed v0.1 default and never surfaced.
+
+**Required behavior.** `Worker->new` accepts `max_concurrent_nexus_tasks`, mutually exclusive with `tuner`, feeding the synthesized fixed tuner's nexus slot supplier; unset keeps the 100 default.
+
+**Acceptance criteria.**
+- A worker built with `max_concurrent_nexus_tasks => N` packs a FixedSize nexus supplier of N into the tuner, and passing it alongside `tuner` throws the mutual-exclusion error.
+
+### R81: Add fairness_key and fairness_weight to Priority (High)
+
+**Defect.** `Common/Priority.pm` declares and encodes only `priority_key`; the vendored proto (`share/proto/temporal/api/common/v1/message.proto:344,354`) already carries `fairness_key` and `fairness_weight`, so this is a dropped field set, not a pin limitation.
+(Parity audit, schedule/runtime finding 3; Python `common.py:1149-1220`, Perl `Common/Priority.pm`. Confidence: high.)
+
+**Root cause.** Priority shipped with only the first field.
+
+**Required behavior.** `Priority` accepts `fairness_key` (string) and `fairness_weight` (float) and encodes both into `temporal.api.common.v1.Priority`, matching Python.
+
+**Acceptance criteria.**
+- A unit test constructs a Priority with all three fields and asserts `to_proto` sets `priority_key`, `fairness_key`, and `fairness_weight`.
+
+### R82: Encode static_summary and static_details on the Schedule Action (High)
+
+**Defect.** `Schedule/Action.pm:28-39` declares no `static_summary`/`static_details`, and `_to_proto` (`:73-124`) never sets `user_metadata`; this is a separate code path from the direct `start_workflow` (R37) and the schedule backfills kwarg (R69).
+(Parity audit, schedule/runtime finding 1; Python `client/_schedule.py:551-552`, Perl `Schedule/Action.pm`. Confidence: high.)
+
+**Root cause.** The schedule action builder was not extended when user-metadata landed.
+
+**Required behavior.** `Schedule::Action::StartWorkflow` accepts `static_summary` and `static_details` and encodes them into the `NewWorkflowExecutionInfo.user_metadata` payloads, matching Python.
+
+**Acceptance criteria.**
+- A request-capture or replay test creating a schedule with both asserts they appear as encoded payloads in the emitted `user_metadata`.
+
+### Parity: Medium
+
+### R83: Expose a User-Facing Metric Meter in Workflow, Activity, and Nexus Context (Medium)
+
+**Defect.** No workflow, activity, or nexus context exposes a meter user code can emit to (grep of `sdk/lib` finds none); `Runtime/MetricMeter.pm` is only the custom-sink adapter that consumes core-emitted metrics, so user code cannot record a counter, histogram, or gauge to the configured exporter.
+(Parity audit, in-workflow finding 6, schedule/runtime finding 2, and nexus finding 4; Python `activity.py:247,461`, `workflow/_context.py:710`, `nexus/_operation_context.py:107`, Perl `Activity/Context.pm`, `Runtime/MetricMeter.pm`. Confidence: medium-high. Distinct from R60, which covers custom-sink drop behavior.)
+
+**Root cause.** Only the metric-consumption side was built; the emission side was never exposed to user code.
+
+**Required behavior.** Workflow, activity, and nexus context expose a core-backed metric meter that creates counters, histograms, and gauges (with per-call attributes) delivered to the configured exporter; the workflow meter no-ops during replay, matching Python.
+
+**Acceptance criteria.**
+- A replay test records a counter via the workflow meter and asserts it emits when live and is suppressed during replay.
+- A test records a counter from an activity and asserts it reaches a test buffer or exporter.
+
+### R84: Provide Worker-Shutdown Detection Inside Activities (Medium)
+
+**Defect.** `Activity/Context.pm:28-30` folds worker shutdown into the single cancellation token; there is no separate worker-shutdown event or query, so an activity cannot distinguish graceful worker shutdown from an ordinary cancel or await shutdown independently.
+(Parity audit, activity/conversion finding 4; Python `activity.py:400-438`, Perl `Activity/Context.pm`. Confidence: medium.)
+
+**Root cause.** Worker shutdown was never signalled to activity bodies as a distinct event.
+
+**Required behavior.** The activity context exposes `is_worker_shutdown` and an awaitable shutdown future, fired when the worker begins shutdown, distinct from cancellation, matching Python.
+
+**Acceptance criteria.**
+- A test triggers worker shutdown while an activity awaits and asserts the activity observes `is_worker_shutdown` true and its shutdown future resolves, without a plain cancel being indistinguishable.
+
+### R85: Complete Activity Info with priority and retry_policy (Medium)
+
+**Defect.** `Worker/ActivityDispatcher.pm:320-341` omits `priority` and `retry_policy` from the built Info, both present on the `ActivityTask.Start` proto.
+(Parity audit, activity/conversion finding 5; Python `activity.py:130-136`, Perl `Worker/ActivityDispatcher.pm`. Confidence: medium. R36 completes the workflow info(), not the activity Info.)
+
+**Root cause.** The Info builder shipped without the two fields.
+
+**Required behavior.** Activity Info carries `priority` and `retry_policy` populated from the start job, matching Python naming.
+
+**Acceptance criteria.**
+- A dispatch test with a start job carrying a retry policy and priority asserts both surface on the activity Info.
+
+### R86: Support Runtime Signal, Query, and Update Handler Registration (Medium)
+
+**Defect.** Handlers bind only at definition time via `:Signal`/`:Query`/`:Update` attributes; there is no way to register or replace a named or dynamic handler at runtime from workflow code (no `set_*_handler`/`get_*_handler` in Runner or Workflow), though the dynamic catch-all attribute is supported.
+(Parity audit, in-workflow finding 4; Python `workflow/_workflow_ops.py:833-985`, Perl `Workflow/Definition.pm`, `Workflow/Runner.pm`. Confidence: medium.)
+
+**Root cause.** Handler installation is compile-time only.
+
+**Required behavior.** Provide runtime setters and getters that install or replace named and dynamic signal, query, and update handlers on the running instance, with buffered-signal replay semantics matching Python.
+
+**Acceptance criteria.**
+- A replay test installs a signal handler via the setter after start, delivers a signal for that name, and asserts the new handler runs and a buffered pre-registration signal drains on registration.
+
+### R87: Honor Per-Handler HandlerUnfinishedPolicy (Medium)
+
+**Defect.** `Workflow/Attributes.pm` parses only `name` and `dynamic`; there is no `unfinished_policy`, and the warn-on-abandon behavior (`Workflow.pm:418-421`) is unconditional with no per-handler opt-out.
+(Parity audit, in-workflow finding 5; Python `workflow/_handlers.py:36`, Perl `Workflow/Attributes.pm`. Confidence: medium.)
+
+**Root cause.** The policy option was never added to the handler attributes.
+
+**Required behavior.** `:Signal` and `:Update` accept an unfinished-handler policy; ABANDON suppresses the completion warning for that handler, matching Python's default-warn, opt-out-abandon.
+
+**Acceptance criteria.**
+- A replay test completes a workflow with an in-flight ABANDON-policy update handler and asserts no warning, while the default policy still warns.
+
+### R88: Expose Last-Completion-Result and Last-Failure (Medium)
+
+**Defect.** No accessors exist for the initializing activation's `last_completion_result` or `last_failure` (grep of `sdk/lib` finds none), so a cron or scheduled workflow cannot read the previous run's result or prior failure.
+(Parity audit, in-workflow finding 7; Python `workflow/_context.py:675,688,696`, Perl `Workflow/Runner.pm`. Confidence: medium.)
+
+**Root cause.** The carry-over fields on InitializeWorkflow are never surfaced.
+
+**Required behavior.** Surface `has_last_completion_result`, `get_last_completion_result`, and `get_last_failure` from the initializing activation with the documented decode and type-hint behavior.
+
+**Acceptance criteria.**
+- A replay test seeds an InitializeWorkflow with a last-completion-result and a last-failure and asserts the accessors return the decoded value and the typed failure.
+
+### R89: Restore Dropped Nexus Handler-Context Capabilities (Medium)
+
+**Defect.** `Temporalio::Nexus` (`Nexus.pm:40-54`) omits `wait_for_worker_shutdown`/`_sync`, its `is_worker_shutdown` reads a `$IS_WORKER_SHUTDOWN` (`Nexus.pm:29,54`) no dispatcher ever sets (always false), and `OperationInfo` (`Nexus/OperationContext.pm:18-28`) omits `namespace`, which Python's Info carries. (The metric meter is covered by R83.)
+(Parity audit, nexus finding 4; Python `nexus/_operation_context.py:82-147`, Perl `Nexus.pm`, `Nexus/OperationContext.pm`. Confidence: medium.)
+
+**Root cause.** The nexus handler context shipped partial and the shutdown flag was never wired.
+
+**Required behavior.** Add `namespace` to `OperationInfo`, add `wait_for_worker_shutdown` and its sync variant, and set the shutdown flag during dispatcher drain so `is_worker_shutdown` reflects reality.
+
+**Acceptance criteria.**
+- A unit test inside a dispatched nexus operation asserts `OperationInfo->namespace` matches the worker namespace and `is_worker_shutdown` flips true once the dispatcher enters shutdown drain.
+
+### R90: Implement Lazy Client Connections (Medium)
+
+**Defect.** `Client.pm:817,829-831` accepts `lazy` then throws "lazy client connections are not supported in v0.1"; R66 asks only to document `lazy`, which presumes it works, so R66 does not close this.
+(Parity audit, client finding 3; Python `_client.py:151,205-207`, Perl `Client.pm`. Confidence: medium.)
+
+**Root cause.** The option was stubbed as rejected and never implemented; the reject message is stale in a v0.2 tree.
+
+**Required behavior.** `connect(lazy => 1)` returns a client that defers the gRPC connection until the first RPC; the eager path is unchanged when `lazy` is false or absent.
+
+**Acceptance criteria.**
+- A test constructs a lazy client against an unreachable target without error and asserts the connection is attempted only on the first RPC.
+
+### R91: Expose Raw Service Clients on the Client (Medium)
+
+**Defect.** No raw RPC passthrough exists (grep for `operator_service`/`workflow_service`/`service_client` in `sdk/lib` returns nothing); `Client/Connection.pm` holds only the core client pointer, so operator-namespace RPCs (add/remove search attributes, describe cluster) and any raw service call are unreachable.
+(Parity audit, client finding 1; Python `_client.py:307-322`, Perl `Client.pm`, `Client/Connection.pm`. Confidence: medium.)
+
+**Root cause.** Only the high-level API was built; the low-level escape hatch was never exposed.
+
+**Required behavior.** The Client exposes a low-level service handle over the WorkflowService and OperatorService RPC surface (at minimum operator search-attribute management), matching Python's `operator_service`/`workflow_service` passthrough.
+
+**Acceptance criteria.**
+- A test issues an operator-service RPC (request-captured or skip_all offline) through the handle and asserts the request is formed and sent.
+
+### R92: Add WorkflowHandle get_update_handle (Medium)
+
+**Defect.** `Client/WorkflowHandle.pm` has no `get_update_handle`; the capability exists (`Client/WorkflowUpdateHandle.pm:41-79` polls purely from id/run/update-id with a public constructor), so only the ergonomic accessor is missing.
+(Parity audit, client finding 2; Python `_workflow.py:978,1008`, Perl `Client/WorkflowHandle.pm`. Confidence: medium.)
+
+**Root cause.** The accessor was never added even though its backing handle is public.
+
+**Required behavior.** `WorkflowHandle` gains `get_update_handle(update_id, run_id => ..., result_type => ...)` returning a `WorkflowUpdateHandle` bound to the handle's run, Python parity.
+
+**Acceptance criteria.**
+- A test builds a handle via `get_update_handle` and asserts `result` polls `PollWorkflowExecutionUpdate` with the given update id and the handle's run id.
+
+### R93: Honor a Client-Level Default Query Reject Condition (Medium)
+
+**Defect.** `Client.pm` connect (`:800-824`) neither accepts nor stores `default_workflow_query_reject_condition`, and `Client/WorkflowHandle.pm:379-380` reads only a per-call `reject_condition`; R67 covers only per-call enum mapping, not a connect-level default.
+(Parity audit, client finding 4; Python `_client.py:144-145,184-187`, Perl `Client.pm`. Confidence: medium.)
+
+**Root cause.** The connect-level default was never added.
+
+**Required behavior.** `connect` accepts `default_workflow_query_reject_condition`, applied by `query` when the call omits `reject_condition`; a per-call condition overrides it.
+
+**Acceptance criteria.**
+- A test connects with the default set, queries without a per-call condition, and asserts the outbound `QueryWorkflow` carries the client default; a per-call value overrides.
+
+### R94: Add an on_fatal_error Worker Hook (Medium)
+
+**Defect.** `Worker.pm` has no `on_fatal_error` field; `run()` re-raises loop failures (`Worker.pm:568,589`) with no user callback, so a caller can only catch the die after `run()` unwinds, not observe it before the shutdown sequence.
+(Parity audit, worker finding 3; Python `worker/_worker.py:47,202-204`, Perl `Worker.pm`. Confidence: medium.)
+
+**Root cause.** The hook was never added to the worker surface.
+
+**Required behavior.** `Worker->new` accepts an `on_fatal_error` coderef invoked with the error before the fatal-path shutdown; exceptions from it are logged and ignored, matching Python.
+
+**Acceptance criteria.**
+- A worker whose poll loop dies fatally invokes `on_fatal_error` with the error before `run()` returns, and a throwing hook does not mask the original failure.
+
+### R95: Provide a Real-History and Multi-History Replayer Surface (Medium)
+
+**Defect.** `Test/WorkflowReplay.pm` is an activation-pushing harness keyed to one `workflow_class` (`:14`) with no history-JSON input, no batch replay, and no aggregated result type; R43 covers only the truthfulness of its nondeterminism claim, not replaying a downloaded history or batch replay with aggregated failures.
+(Parity audit, worker finding 4; Python `worker/_replayer.py:110,138,166`, Perl `Test/WorkflowReplay.pm`. Confidence: medium.)
+
+**Root cause.** The replay harness was built for internal activation tests, not real histories.
+
+**Required behavior.** A public replayer accepts real `WorkflowHistory` objects (from fetched or JSON-loaded history), exposes `from_json` construction, and replays a stream of histories returning a per-history result; nondeterminism surfaces as a per-history failure.
+This is the resolved direction, not harness-only; it pairs with R43, which makes the nondeterminism check real.
+
+**Acceptance criteria.**
+- Replaying a downloaded multi-event history JSON returns a result per history, with a mutated history producing a Nondeterminism failure in its result.
+- `from_json` reconstructs a history that replays identically to the fetched form.
+
+### Parity: Low
+
+### R96: Add an Activity Context-Aware Logger (Low)
+
+**Defect.** No activity logger surface exists in `Activity.pm` or `Activity/Context.pm`; Python's logger embeds activity id, type, attempt, namespace, task queue, and workflow ids into every log line.
+(Parity audit, activity/conversion finding 6; Python `activity.py:479-537`, Perl `Activity/Context.pm`. Confidence: low, partly a Perl-ecosystem-idiom question.)
+
+**Root cause.** Perl has no single standard logging framework, so no context logger was shipped.
+
+**Required behavior.** The activity context exposes a logging-detail accessor (activity id, type, attempt, namespace, task queue, and the workflow ids) plus a documented pattern for attaching those details to the caller's logger (for example `Log::Any`); the SDK does not mandate a logging framework.
+This is the resolved direction, chosen because Perl has no single standard logger.
+
+**Acceptance criteria.**
+- A test asserts the context detail accessor yields the documented field set for the running activity.
+- The POD documents the pattern for wiring the details into the caller's logger.
+
+### R97: Document the Legacy Build-ID Worker-Versioning APIs as a Deliberate Deviation (Low)
+
+**Defect.** The three legacy build-id client RPCs are absent (all Perl versioning code is worker-side): `update_worker_build_id_compatibility`, `get_worker_build_id_compatibility`, `get_worker_task_reachability`.
+(Parity audit, client finding 5; Python `_client.py:2770,2801,2832`, Perl `Client.pm`. Confidence: low: all three are deprecated in Python, superseded by the deployment-based versioning Perl already implements.)
+
+**Root cause.** The legacy build-id API predates deployment versioning and was not ported.
+
+**Required behavior.** The three legacy build-id client RPCs are not ported.
+This is the resolved decision: they are deprecated in Python and superseded, so the surface is not worth implementing (spec §0 allows a documented surface deviation).
+A Client POD note records the deliberate omission and points to the deployment-based versioning Perl already implements as the supported path.
+
+**Acceptance criteria.**
+- A Client POD section names the three omitted APIs and the deployment-based replacement; xt pod coverage stays green.
+- A test asserts the deployment-versioning path is exercised and green.
 
 ## Component Boundaries
 
