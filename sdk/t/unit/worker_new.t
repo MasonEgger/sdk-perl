@@ -197,9 +197,13 @@ T2->subtest('explicit kwargs map onto WorkerOptions (spec 8.1)' => sub {
         'graceful_shutdown_period seconds -> millis');
     T2->is($echoed->{'nondeterminism_as_workflow_fail'}, 'true',
         'nondeterminism_as_workflow_fail');
-    T2->is($echoed->{'nondeterminism_as_workflow_fail_for_types'},
-        '[My::Err,Other::Err]',
-        'workflow_failure_exception_types -> nondeterminism fail-for-types');
+    # spec R14+R15 (finding A1): workflow_failure_exception_types holds Perl
+    # EXCEPTION class names routed to live Runners; core's fail-for-types field
+    # is a set of WORKFLOW TYPE names (sdk-python fills it from per-definition
+    # failure_exception_types, unsupported here) and stays empty. This
+    # assertion previously pinned the misroute ('[My::Err,Other::Err]').
+    T2->is($echoed->{'nondeterminism_as_workflow_fail_for_types'}, '[]',
+        'exception classes are NOT packed into core\'s workflow-TYPE field');
 });
 
 T2->subtest('an unknown kwarg raises Argument' => sub {

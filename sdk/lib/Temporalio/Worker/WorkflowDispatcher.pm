@@ -67,6 +67,14 @@ class Temporalio::Worker::WorkflowDispatcher {
     # handle_query / handle_update (#10).
     field $interceptors :param = [];
 
+    # Worker-level failure-routing options (spec R14+R15, findings A1/ADJ2),
+    # threaded to each Runner via _runner_failure_options below. Pre-fix the
+    # worker misrouted the type list into core's per-workflow-TYPE field and
+    # dropped the boolean, so live Runners ran with defaults while the replay
+    # harness (Test/WorkflowReplay.pm) threaded both: live/replay divergence.
+    field $workflow_failure_exception_types :param = [];
+    field $nondeterminism_as_workflow_fail  :param = 0;
+
     # A coderef ($completion_bytes) -> Future: sends the serialized
     # WorkflowActivationCompletion to core (worker_complete_workflow_activation
     # over the callback bridge). Injectable so unit tests capture completions
@@ -91,6 +99,21 @@ class Temporalio::Worker::WorkflowDispatcher {
 
     method registry       { $registry }
     method data_converter { $data_converter }
+    method workflow_failure_exception_types { $workflow_failure_exception_types }
+    method nondeterminism_as_workflow_fail  { $nondeterminism_as_workflow_fail }
+
+    # The single naming point for the failure-routing plumbing keys (spec
+    # R14+R15 REFACTOR): the pairs below MUST use the exact
+    # Workflow::Runner constructor parameter names, which are also the
+    # Worker->new kwarg names and the Test::WorkflowReplay kwarg names: one
+    # name end to end, so the live path (here) and the replay harness
+    # (Test/WorkflowReplay.pm) cannot drift apart again (findings A1/ADJ2).
+    method _runner_failure_options () {
+        return (
+            workflow_failure_exception_types => $workflow_failure_exception_types,
+            nondeterminism_as_workflow_fail  => $nondeterminism_as_workflow_fail,
+        );
+    }
     method has_runner ($run_id) { exists $runners{$run_id} ? 1 : 0 }
     method runner     ($run_id) { return $runners{$run_id} }
 
@@ -260,6 +283,9 @@ class Temporalio::Worker::WorkflowDispatcher {
             report_versioning_behavior => $report_versioning_behavior,
             local_activities_enabled   => $local_activities_enabled,
             interceptors               => $interceptors,
+            # spec R14+R15 (findings A1/ADJ2): the failure-routing options,
+            # which pre-fix never reached a live Runner.
+            $self->_runner_failure_options,
         );
         $runners{$run_id} = $runner;
         return $runner;
@@ -511,6 +537,16 @@ Constructs a Temporalio::Worker::WorkflowDispatcher. Named parameters:
 
 (required)
 
+=item C<workflow_failure_exception_types>
+
+(optional, default C<[]>)
+Exception class names routed to every live Runner (spec R14, finding A1); a listed class escaping C<:Run> fails the workflow instead of the task.
+
+=item C<nondeterminism_as_workflow_fail>
+
+(optional, default C<0>)
+When true, a detected nondeterminism fails the workflow instead of the task on every live Runner (spec R15, finding ADJ2).
+
 =back
 
 =head1 METHODS
@@ -518,6 +554,14 @@ Constructs a Temporalio::Worker::WorkflowDispatcher. Named parameters:
 =head2 data_converter
 
 Accessor returning the C<data_converter> value.
+
+=head2 workflow_failure_exception_types
+
+Accessor returning the C<workflow_failure_exception_types> value.
+
+=head2 nondeterminism_as_workflow_fail
+
+Accessor returning the C<nondeterminism_as_workflow_fail> value.
 
 =head2 dispatch_task
 

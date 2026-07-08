@@ -456,8 +456,15 @@ class Temporalio::Worker {
             nonsticky_to_sticky_poll_ratio      => $nonsticky_to_sticky_poll_ratio,
 
             nondeterminism_as_workflow_fail => $nondeterminism_as_workflow_fail ? 1 : 0,
-            nondeterminism_as_workflow_fail_for_types =>
-                $workflow_failure_exception_types,
+            # spec R14+R15 (finding A1): core's field is a set of WORKFLOW TYPE
+            # names; sdk-python fills it from per-definition
+            # failure_exception_types (_workflow.py
+            # nondeterminism_as_workflow_fail_for_types), a surface this SDK
+            # does not expose, so it stays empty. The Perl EXCEPTION class
+            # names in workflow_failure_exception_types were misrouted here
+            # pre-fix; they now reach each live Runner via
+            # _build_workflow_dispatcher below.
+            nondeterminism_as_workflow_fail_for_types => [],
             plugins         => [],
             storage_drivers => [],
         );
@@ -682,6 +689,13 @@ class Temporalio::Worker {
             # each per-run Runner now invokes for execute_workflow / handle_signal
             # / handle_query / handle_update (#10).
             interceptors   => $all_interceptors,
+            # spec R14+R15 (findings A1/ADJ2): the failure-routing options ride
+            # to each live Runner through the dispatcher, under the SAME kwarg
+            # names the replay harness threads (Test/WorkflowReplay.pm): the
+            # live/replay parity requirement. They are NOT core options; the
+            # Runner's outcome decision table consumes them.
+            workflow_failure_exception_types => $workflow_failure_exception_types,
+            nondeterminism_as_workflow_fail  => $nondeterminism_as_workflow_fail,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_workflow_activation($completion_bytes);
             },

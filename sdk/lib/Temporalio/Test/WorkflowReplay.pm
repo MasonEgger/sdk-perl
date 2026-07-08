@@ -20,6 +20,10 @@ class Temporalio::Test::WorkflowReplay {
     # Worker-level outcome-policy options (spec section 10.3 step 6), threaded
     # to the Runner so a test can exercise the full completion decision table
     # (T-wf-13 / T-wf-15c). Defaults match a worker with no overrides.
+    # The kwarg names are the Runner constructor parameter names, shared
+    # verbatim with the live path (Worker/WorkflowDispatcher.pm
+    # _runner_failure_options), per spec R14+R15 (findings A1/ADJ2): the live
+    # worker used to drop both, so live and replay Runners diverged.
     field $workflow_failure_exception_types :param = [];
     field $nondeterminism_as_workflow_fail   :param = 0;
 

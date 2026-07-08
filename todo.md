@@ -129,10 +129,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R13.4 Verify: response-present and mutating-dropped assertions pass; prove -lj4 t green
 
 ### Step R14+R15: Route workflow_failure_exception_types and nondeterminism_as_workflow_fail to Live Runners
-- [ ] R14+R15.1 RED: unit dispatcher_failure_options.t asserts both options reach the live Runner; replay failure_exception_types.t asserts workflow vs task failure
-- [ ] R14+R15.2 GREEN: reroute both options from core's workflow-type field into the live Runner constructor at Worker.pm:459-460 / WorkflowDispatcher.pm:170-181
-- [ ] R14+R15.3 REFACTOR: name the plumbing keys once so live and replay share them; cite A1/ADJ2
-- [ ] R14+R15.4 Verify: unit-arrival and replay outcome assertions (listed-type + nondeterminism) pass; prove -lj4 t green
+- [x] R14+R15.1 RED: unit dispatcher_failure_options.t asserts both options reach the live Runner; replay failure_exception_types.t asserts workflow vs task failure
+- [x] R14+R15.2 GREEN: reroute both options from core's workflow-type field into the live Runner constructor at Worker.pm:459-460 / WorkflowDispatcher.pm:170-181
+- [x] R14+R15.3 REFACTOR: name the plumbing keys once so live and replay share them; cite A1/ADJ2
+- [x] R14+R15.4 Verify: unit-arrival and replay outcome assertions (listed-type + nondeterminism) pass; prove -lj4 t green
 
 ### Step R17: Settle Updates from Cancelled Handler Futures Without Croaking
 - [ ] R17.1 RED: replay evict_pending_update.t (no croak, eviction completes) + unit settle_update_states.t (done/failed/cancelled)

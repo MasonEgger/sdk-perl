@@ -384,6 +384,12 @@ class Temporalio::Workflow::Runner {
     method workflow_type { return $workflow_type }
     method is_replaying  { return $is_replaying ? 1 : 0 }
 
+    # The worker-level failure-routing options (spec R14+R15, findings
+    # A1/ADJ2): readers so the plumbing tests can assert both options actually
+    # arrived; the live path silently dropped them pre-fix.
+    method workflow_failure_exception_types { return $workflow_failure_exception_types }
+    method nondeterminism_as_workflow_fail  { return $nondeterminism_as_workflow_fail ? 1 : 0 }
+
     # Epoch seconds (float) of the activation timestamp.
     method activation_time {
         return $activation_seconds + ($activation_nanos / 1_000_000_000);
