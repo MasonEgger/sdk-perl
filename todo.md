@@ -49,10 +49,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R5.4 Verify: both failure shapes correct; prove -lj4 t green under the memory guard
 
 ### Step R18+R19: Pool Fork-Channel: Live Heartbeat Relay and Cancel Delivery
-- [ ] R18+R19.1 RED: unit test asserts parent sees the heartbeat before the body returns; integration test (offline-skip) asserts no heartbeat timeout for a compliant activity; unit test asserts a running child observes cancel and resolves cancelled
-- [ ] R18+R19.2 GREEN: extend the R4 channel to a two-directional protocol at Activity/Pool.pm:114-124, 172-174 (live heartbeat) and :161-162 + Worker/ActivityDispatcher.pm:280 (live cancel via Context)
-- [ ] R18+R19.3 REFACTOR: consolidate both directions into the single R4 fork-protocol module; comment cites L13 and L15
-- [ ] R18+R19.4 Verify: heartbeat-before-return, no timeout for compliant activity, running child cancels; prove -lj4 t green under the memory guard
+- [x] R18+R19.1 RED: unit test asserts parent sees the heartbeat before the body returns; integration test (offline-skip) asserts no heartbeat timeout for a compliant activity; unit test asserts a running child observes cancel and resolves cancelled
+- [x] R18+R19.2 GREEN: extend the R4 channel to a two-directional protocol at Activity/Pool.pm:114-124, 172-174 (live heartbeat) and :161-162 + Worker/ActivityDispatcher.pm:280 (live cancel via Context)
+- [x] R18+R19.3 REFACTOR: consolidate both directions into the single R4 fork-protocol module; comment cites L13 and L15
+- [x] R18+R19.4 Verify: heartbeat-before-return, no timeout for compliant activity, running child cancels; prove -lj4 t green under the memory guard
 
 ### Step R30: Close Inherited gRPC Descriptors in Pool Children
 - [ ] R30.1 RED: prove test (Linux, skip elsewhere) forks a pool child and asserts core/client gRPC sockets closed via /proc/self/fd while the pool channel fds stay open

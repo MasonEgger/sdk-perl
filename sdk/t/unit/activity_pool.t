@@ -335,7 +335,9 @@ T2->done_testing;
 class FakePool {
     field $seen :param;
     field $registry :param = undef;
-    method invoke ($inv) {
+    # %opts absorbs the R19 `cancellation` option the dispatcher now passes;
+    # the routing test does not exercise live cancel delivery.
+    method invoke ($inv, %opts) {
         push @$seen, $inv;
         # Resolve to a result so the dispatcher can build a completion. The
         # routing test only needs the value; run the body inline here.

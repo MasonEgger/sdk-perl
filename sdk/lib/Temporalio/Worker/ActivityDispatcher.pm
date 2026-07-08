@@ -264,7 +264,13 @@ class Temporalio::Worker::ActivityDispatcher {
     # serializable cross-fork invocation struct — activity type, already-decoded
     # args (plain scalars), the info hashref, task token, and the cooperative
     # cancellation flag — and awaits the pool. No live core pointers or
-    # Cancellation objects cross the fork; cancellation is conveyed as a flag.
+    # Cancellation objects cross the fork. Cancellation crosses it twice
+    # (spec R19, finding L15): a cancel that already happened rides the
+    # frozen `cancelled` flag, and the `cancellation` option lets the pool
+    # forward a cancel that fires WHILE the child runs down its live control
+    # channel — pre-R19 the flag below was the ONLY hand-off, so a cancel
+    # task arriving mid-body (_handle_cancel cancelling this token) was
+    # invisible in-child and the body ran to completion.
     async method _run_in_pool ($task_token, $info, $cancellation, @args) {
         Temporalio::Exception::Application->throw(
             message => 'Sync activity dispatched but the worker has no activity'
@@ -279,7 +285,7 @@ class Temporalio::Worker::ActivityDispatcher {
             task_token    => $task_token,
             cancelled     => $cancellation->is_cancelled,
         );
-        return await $pool->invoke($inv);
+        return await $pool->invoke($inv, cancellation => $cancellation);
     }
 
     # Build the failed/cancelled completion for a thrown $error. A Cancelled
