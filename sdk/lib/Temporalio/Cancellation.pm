@@ -6,12 +6,13 @@ use feature 'class';
 no warnings 'experimental::class';
 
 use Future ();
-use Temporalio::Core::FFI ();
+use Temporalio::Common::CancellationFuture ();
+use Temporalio::Core::FFI                  ();
 
 class Temporalio::Cancellation {
     field $ptr;
     field $cancelled = 0;    # Perl-side flag: is_cancelled never hits FFI
-    field $future;           # shared Future, created lazily by ->cancelled
+    field $future;           # shared source Future, created lazily by ->cancelled
 
     ADJUST {
         $ptr = Temporalio::Core::FFI::cancellation_token_new();
@@ -31,9 +32,13 @@ class Temporalio::Cancellation {
         return;
     }
 
+    # Spec R23 (finding R2, =A4=L31a): each call derives a fresh
+    # ->without_cancel view of the one shared source future, so a consumer
+    # cancel (Future->wait_any's loser sweep) cannot poison the source.
     method cancelled () {
-        $future //= $cancelled ? Future->done : Future->new;
-        return $future;
+        return Temporalio::Common::CancellationFuture::consumer_future(
+            \$future, $cancelled,
+        );
     }
 
     method DESTROY {
@@ -88,8 +93,14 @@ Returns the Perl-side flag — cheap, no FFI call.
 =head2 cancelled
 
 Returns a L<Future> that resolves when the token is cancelled. If the token
-is already cancelled, returns an already-resolved Future. The same Future
-instance is shared across calls.
+is already cancelled, returns an already-resolved Future.
+
+Each call returns a fresh consumer view (via
+L<Temporalio::Common::CancellationFuture>) of one shared source future.
+Cancelling the returned Future, as C<< Future->wait_any >>'s loser sweep
+does when another component settles first, affects only that view: the
+token's eventual cancel still resolves every other consumer, so
+C<cancelled> is safe to race in C<wait_any> (spec R23, finding R2).
 
 =head2 core_ptr
 

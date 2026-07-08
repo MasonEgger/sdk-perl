@@ -141,10 +141,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R17.4 Verify: no-croak eviction and three-state settle assertions pass; prove -lj4 t green
 
 ### Step R23+R50: Make the Shared Cancellation Future Survive wait_any (with Direct ChildCancellation Tests)
-- [ ] R23+R50.1 RED: cancellation.t wait_any-double-race then later-consumer-observes; new child_cancellation.t covers construction, observation, and the race
-- [ ] R23+R50.2 GREEN: cancelled() returns a per-call derived (or ->without_cancel) future in Cancellation.pm and Activity/ChildCancellation.pm
-- [ ] R23+R50.3 REFACTOR: share the derivation helper; add POD documenting the safe-to-race contract; cite R2/T2
-- [ ] R23+R50.4 Verify: both classes' second-consumer-observes assertions pass; prove -lj4 t and xt green
+- [x] R23+R50.1 RED: cancellation.t wait_any-double-race then later-consumer-observes; new child_cancellation.t covers construction, observation, and the race
+- [x] R23+R50.2 GREEN: cancelled() returns a per-call derived (or ->without_cancel) future in Cancellation.pm and Activity/ChildCancellation.pm
+- [x] R23+R50.3 REFACTOR: share the derivation helper; add POD documenting the safe-to-race contract; cite R2/T2
+- [x] R23+R50.4 Verify: both classes' second-consumer-observes assertions pass; prove -lj4 t and xt green
 
 ### Step R24: Enforce Read-Only Context and Writability Asserts Uniformly
 - [ ] R24.1 RED: replay query_readonly.t table-drives the four bypassing APIs raising the typed read-only error in query context; unchanged in writable context

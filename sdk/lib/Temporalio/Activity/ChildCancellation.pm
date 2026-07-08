@@ -9,6 +9,7 @@ use feature 'class';
 no warnings 'experimental::class';
 
 use Future ();
+use Temporalio::Common::CancellationFuture ();
 
 class Temporalio::Activity::ChildCancellation {
     # The Perl-side cancelled flag. Set from the parent-supplied invocation
@@ -49,11 +50,14 @@ class Temporalio::Activity::ChildCancellation {
     # future resolves when a cancel is OBSERVED (an is_cancelled poll or an
     # explicit cancel), not spontaneously: a synchronous child has no event
     # loop to push the resolution, so a body must poll is_cancelled (or
-    # heartbeat) to see a live cancel.
+    # heartbeat) to see a live cancel. Spec R50 (finding T2, R23 clone): each
+    # call derives a fresh ->without_cancel view of the shared source future,
+    # so a consumer cancel (Future->wait_any's loser sweep) cannot poison it.
     method cancelled () {
         $self->is_cancelled;    # give a live-channel cancel a chance to land
-        $future //= $cancelled ? Future->done : Future->new;
-        return $future;
+        return Temporalio::Common::CancellationFuture::consumer_future(
+            \$future, $cancelled,
+        );
     }
 }
 
@@ -116,7 +120,18 @@ Marks this child cancellation token as cancelled, signalling the activity body t
 
 =head2 cancelled
 
-Accessor returning the truthy cancelled flag.
+Returns a L<Future> that resolves once a cancel has been observed (an
+C<is_cancelled> poll, the C<poll> hook consulted by this call, or an explicit
+C<cancel>). If the token is already cancelled, returns an already-resolved
+Future.
+
+Each call returns a fresh consumer view (via
+L<Temporalio::Common::CancellationFuture>) of one shared source future, the
+same contract as L<Temporalio::Cancellation/cancelled>: cancelling the
+returned Future, as C<< Future->wait_any >>'s loser sweep does when another
+component settles first, affects only that view, so C<cancelled> is safe to
+race in C<wait_any> (spec R50, finding T2; the R23 fix applied to this
+class).
 
 =head2 is_cancelled
 
