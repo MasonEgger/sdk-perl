@@ -23,10 +23,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R3.4 Verify: no free while the bridge future is pending; forced-timeout test shows deferral/skip; prove -lj4 t green under the memory guard
 
 ### Step R28: Stop Writing Through a COW-Shared Tag Buffer
-- [ ] R28.1 RED: unit test (adapted cow_tag.pl) asserts a shim write through the tag slot leaves an independent "\0" scalar untouched; audit note lists the scalar_to_buffer write sites
-- [ ] R28.2 GREEN: force a private non-COW allocation before scalar_to_buffer at Core/Callback.pm:362-363 and Worker/SlotSupplierRegistry.pm:69-70
-- [ ] R28.3 REFACTOR: route both write sites through one private-buffer helper; comment cites L4
-- [ ] R28.4 Verify: independent "\0" scalar untouched; audit note enumerates write sites; prove -lj4 t green under the memory guard
+- [x] R28.1 RED: unit test (adapted cow_tag.pl) asserts a shim write through the tag slot leaves an independent "\0" scalar untouched; audit note lists the scalar_to_buffer write sites
+- [x] R28.2 GREEN: force a private non-COW allocation before scalar_to_buffer at Core/Callback.pm:362-363 and Worker/SlotSupplierRegistry.pm:69-70
+- [x] R28.3 REFACTOR: route both write sites through one private-buffer helper; comment cites L4
+- [x] R28.4 Verify: independent "\0" scalar untouched; audit note enumerates write sites; prove -lj4 t green under the memory guard
 
 ### Step R16: Make Evict Iteration Safe Against Sibling Deletion
 - [ ] R16.1 RED: replay test (adapted probe_l6_freed_iteration.pl) drives an evict whose cancel continuation deletes an unvisited sibling; asserts no freed-value croak and eviction completion sent; also covers self-delete

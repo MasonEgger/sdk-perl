@@ -381,9 +381,14 @@ class Temporalio::Core::Callback {
     # frees the request box. The shim never blocks waiting on this.
     sub _service_meter_requests () {
         my $ffi = Temporalio::Core::FFI::ffi();
-        # A 1-byte slot the shim writes the request tag into.
-        my $tag_slot = "\0";
-        my ($tag_ptr) = FFI::Platypus::Buffer::scalar_to_buffer($tag_slot);
+        # A 1-byte slot the shim writes the request tag into (lib.rs
+        # meter_next_request, `*out_tag = req.tag`). The slot must be a
+        # private non-COW buffer: `= "\0"` would COW-share the PV with the
+        # op-tree constant, and the shim's write would corrupt it plus
+        # every COW sibling (finding L4 / spec R28).
+        my $tag_slot;
+        my $tag_ptr =
+            Temporalio::Core::FFI::private_write_buffer($tag_slot, 1);
         while (1) {
             my $request_ptr =
                 Temporalio::Core::FFI::meter_next_request($tag_ptr);

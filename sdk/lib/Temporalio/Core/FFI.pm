@@ -526,6 +526,23 @@ sub keep_buffer ($keep, $scalar) {
     return FFI::Platypus::Buffer::scalar_to_buffer($copy);
 }
 
+# private_write_buffer($slot, $size): (re)fill $slot (aliased through @_,
+# modified in place) with $size NUL bytes backed by a private, non-COW PV,
+# returning the writable buffer pointer. Every buffer the shim WRITES into
+# must come from here: assigning a string literal ties the scalar's PV to
+# the op-tree constant via copy-on-write, and a foreign write through
+# scalar_to_buffer would silently corrupt that constant and every COW
+# sibling (finding L4 / spec R28). grow() detaches any COW buffer; the
+# substr splice then pins deterministic NUL content into the private PV.
+sub private_write_buffer {
+    my $size = $_[1];
+    $_[0] = '';
+    FFI::Platypus::Buffer::grow($_[0], $size, { clear => 1, set_length => 1 });
+    substr($_[0], 0, $size, "\0" x $size);
+    my ($ptr) = FFI::Platypus::Buffer::scalar_to_buffer($_[0]);
+    return $ptr;
+}
+
 # keep_record(\@keep, $record) — pushes the record object onto @$keep and
 # returns its address as an opaque pointer (for struct members that hold a
 # pointer to another struct).

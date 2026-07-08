@@ -65,9 +65,10 @@ sub _register_impl ($class, $id, $impl) {
 # returns a permit. An impl method that dies is caught + warned (it must never
 # unwind across the C ABI the drain runs under).
 sub _service_requests ($class) {
-    require FFI::Platypus::Buffer;
-    my $tag_slot = "\0";
-    my ($tag_ptr) = FFI::Platypus::Buffer::scalar_to_buffer($tag_slot);
+    # The 1-byte tag slot the shim writes into must be a private non-COW
+    # buffer (finding L4 / spec R28); see Core::FFI::private_write_buffer.
+    my $tag_slot;
+    my $tag_ptr = Temporalio::Core::FFI::private_write_buffer($tag_slot, 1);
     while (1) {
         my $request_ptr =
             Temporalio::Core::FFI::supplier_next_request($tag_ptr);
