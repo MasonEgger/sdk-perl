@@ -1,6 +1,8 @@
 # ABOUTME: Sync-activity fork pool (spec section 9.4). Runs sync activity
 # ABOUTME: bodies in an IO::Async::Function fork pool. The forked children
-# ABOUTME: CLOSE inherited parent FDs (the runtime eventfd/pipe + core handles)
+# ABOUTME: CLOSE inherited parent FDs — an identity-checked /proc sweep of the
+# ABOUTME: parent's whole descriptor table (core/client gRPC sockets included,
+# ABOUTME: R30) plus the runtime eventfd/pipe handles by filehandle —
 # ABOUTME: so a child never drains the parent's completion signal; a per-child
 # ABOUTME: control channel streams heartbeats to the parent WHILE the body runs
 # ABOUTME: (R18) and delivers post-dispatch cancels down to the child (R19);
@@ -61,6 +63,10 @@ class Temporalio::Activity::Pool {
 
     field $function;
 
+    # A reference to the R4 %channel hash below, kept so invoke() can refresh
+    # the R30 parent-fd snapshot right before a call may fork a new child.
+    field $fork_channel;
+
     # --- parent-side control-channel state (spec R18+R19) -------------------
     # One UNIX listener per pool; each forked child connects back to it from
     # init_code, giving the pool a per-child duplex stream. $control_dir is
@@ -116,7 +122,15 @@ class Temporalio::Activity::Pool {
             close_fhs    => [@$inherited_fhs],   # FD hygiene: close in init_code
             modules      => [@$activity_modules],# require before first dispatch
             control_path => $control_path,       # R18/R19: child connects here
+            # R30 (finding L16): the parent's open-descriptor snapshot the
+            # child sweeps immediately after fork — core/client gRPC sockets
+            # included, which close_fhs (a caller-supplied handle list) never
+            # covered. Refreshed at the top of invoke() so descriptors core
+            # opens after construction are captured before a call forks a
+            # new child.
+            parent_fds   => _snapshot_parent_fds(),
         );
+        $fork_channel = \%channel;
 
         # Reaper-ownership note (#1): the first time this fork pool forks a
         # worker, IO::Async installs ONE process-wide SIGCHLD handler whose
@@ -132,11 +146,23 @@ class Temporalio::Activity::Pool {
             # inherited parent FDs (FD hygiene), load activity modules, and open
             # the child's end of the control channel.
             init_code => sub {
+                # R30 (finding L16) FIRST, before anything in this child can
+                # open a descriptor: close EVERY descriptor inherited from
+                # the parent — the core/client gRPC sockets sdk-core holds
+                # open included — keeping only what this child itself needs
+                # (the CLAUDE.md rule: forked children must close inherited
+                # FDs). The pool channel fds survive by construction: the
+                # snapshot predates them (see _close_inherited_parent_fds),
+                # and the control socket is connected after this sweep.
+                _close_inherited_parent_fds($channel{parent_fds});
                 # Close inherited parent handles by the FILEHANDLE the fork
                 # copied (close($fh) closes the right kernel fd regardless of
                 # any fd-number renumbering IO::Async::Function did in the
                 # child). A bare POSIX::close on a stale fd number would either
                 # error or, worse, close one of the function's own channel fds.
+                # Post-R30 this is the PORTABLE fallback: on Linux the sweep
+                # above already closed these; where /proc is unavailable the
+                # snapshot is undef and these handles are all we can reach.
                 for my $fh (@{ $channel{close_fhs} }) {
                     close($fh) if defined $fh;
                 }
@@ -184,6 +210,14 @@ class Temporalio::Activity::Pool {
     async method invoke ($invocation, %opts) {
         my $token = $invocation->task_token;
         $inflight{$token} = 1;
+
+        # R30: refresh the parent-fd snapshot before the call below, which is
+        # the point where IO::Async::Function may fork a fresh child (workers
+        # fork lazily, at dispatch). Descriptors opened since construction —
+        # core/client gRPC sockets among them — land in the snapshot; the
+        # function's own channel fds are created AFTER this line, inside the
+        # call, so they are never in it.
+        $fork_channel->{parent_fds} = _snapshot_parent_fds();
 
         # Live-cancel wiring (spec R19, finding L15): the pre-R19 channel
         # conveyed cancellation exactly once, as the boolean the dispatcher
@@ -402,6 +436,53 @@ class Temporalio::Activity::Pool {
         my $payload = substr($$bufref, 4, $len);
         substr($$bufref, 0, 4 + $len) = '';
         return Storable::thaw($payload);
+    }
+
+    # --- the R30 inherited-descriptor sweep (finding L16) --------------------
+    # Forked children must close inherited FDs (the repo CLAUDE.md
+    # architecture rule): a pool child inherits every descriptor the parent
+    # held at fork — the core and client gRPC sockets sdk-core's Tokio
+    # runtime owns included — and none of them may stay open in the child.
+    # Before R30 the pool closed only the caller-supplied `inherited_fhs`
+    # handles and the closed-everything-else property held ONLY as a side
+    # effect of IO::Async's ChildManager fd sweep, a library internal the SDK
+    # neither owned nor asserted. This pair makes the guarantee ours.
+    #
+    # The whitelist works by IDENTITY, not fd number. _snapshot_parent_fds
+    # records { fd => /proc identity } for every parent descriptor except
+    # stdio; _close_inherited_parent_fds (run first thing in init_code)
+    # closes a recorded fd only when its identity still matches — so a fd
+    # number reused in the child for one of the pool's own channel fds is
+    # spared, and everything the child needs (the IO::Async::Function
+    # channel fds, created inside the call after invoke()'s refresh, and the
+    # control socket, connected after the sweep) postdates the snapshot and
+    # survives by construction. Non-Linux (no /proc/self/fd) degrades to the
+    # pre-R30 behavior: snapshot undef, sweep a no-op, close_fhs still
+    # closed by handle.
+
+    sub _snapshot_parent_fds () {
+        return undef unless -d '/proc/self/fd';
+        opendir my $dh, '/proc/self/fd' or return undef;
+        my %snapshot;
+        for my $entry (readdir $dh) {
+            next unless $entry =~ /^[0-9]+$/;
+            next if $entry <= 2;    # the stdio whitelist
+            my $identity = readlink "/proc/self/fd/$entry";
+            $snapshot{$entry} = $identity if defined $identity;
+        }
+        closedir $dh;
+        return \%snapshot;
+    }
+
+    sub _close_inherited_parent_fds ($snapshot) {
+        return 0 unless $snapshot && -d '/proc/self/fd';
+        my $closed = 0;
+        for my $fd (keys %$snapshot) {
+            my $now = readlink "/proc/self/fd/$fd";
+            next unless defined $now && $now eq $snapshot->{$fd};
+            $closed++ if defined POSIX::close($fd);
+        }
+        return $closed;
     }
 
     # --- child side ----------------------------------------------------------
@@ -663,13 +744,24 @@ blocking body cannot stall the worker's poll/completion loops.
 
 =head2 FD hygiene (the central correctness property)
 
-Each forked child runs C<init_code> exactly once before its first body, which
-C<close>s every inherited handle in C<inherited_fhs> — the runtime eventfd/pipe
-and any open core or client handles. A child that kept the parent's completion
-signal fd would corrupt the parent's completion drain. The handles are closed
+Each forked child runs C<init_code> exactly once before its first body, and the
+first thing it does there is close B<every descriptor inherited from the
+parent> (spec R30, finding L16) — the core and client gRPC sockets sdk-core's
+Tokio runtime holds open included, which no caller-supplied handle list could
+enumerate. The parent snapshots its open descriptors (C</proc/self/fd> with
+per-fd identity) at construction and again at the top of each C<invoke>, right
+before a call may fork a fresh child; the child closes exactly the snapshot
+entries whose identity still matches, so the pool's own channel fds — created
+after the snapshot — survive by construction. A child that kept the parent's
+completion signal fd would corrupt the parent's completion drain; a child
+holding a shared gRPC socket violates the repo architecture rule that forked
+children close inherited FDs.
+
+The C<inherited_fhs> handles (the runtime eventfd/pipe) are additionally closed
 B<by filehandle>, not fd number, because L<IO::Async::Function> renumbers fds
-in the child. T-act-10 verifies the parent's eventfd kernel object is gone from
-the child.
+in the child; on platforms without C</proc/self/fd> the snapshot sweep is a
+no-op and this handle list is the only close that runs. T-act-10 verifies the
+parent's eventfd kernel object is gone from the child.
 
 =head2 The per-child control channel (spec R18+R19)
 

@@ -55,10 +55,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R18+R19.4 Verify: heartbeat-before-return, no timeout for compliant activity, running child cancels; prove -lj4 t green under the memory guard
 
 ### Step R30: Close Inherited gRPC Descriptors in Pool Children
-- [ ] R30.1 RED: prove test (Linux, skip elsewhere) forks a pool child and asserts core/client gRPC sockets closed via /proc/self/fd while the pool channel fds stay open
-- [ ] R30.2 GREEN: after fork at Activity/Pool.pm:49-56 (coordinating Worker.pm:633), enumerate and close inherited core/client descriptors, keeping only channel fds
-- [ ] R30.3 REFACTOR: factor the fd-closing sweep into one whitelisting routine; comment cites L16 and the CLAUDE.md rule
-- [ ] R30.4 Verify: core/client sockets closed and channel open in the child; prove -lj4 t green under the memory guard
+- [x] R30.1 RED: prove test (Linux, skip elsewhere) forks a pool child and asserts core/client gRPC sockets closed via /proc/self/fd while the pool channel fds stay open
+- [x] R30.2 GREEN: after fork at Activity/Pool.pm:49-56 (coordinating Worker.pm:633), enumerate and close inherited core/client descriptors, keeping only channel fds
+- [x] R30.3 REFACTOR: factor the fd-closing sweep into one whitelisting routine; comment cites L16 and the CLAUDE.md rule
+- [x] R30.4 Verify: core/client sockets closed and channel open in the child; prove -lj4 t green under the memory guard
 
 ### Step R62: Stop Masking Pool and Worker Error Causes
 - [ ] R62.1 RED: unit test asserts a pool-child require failure surfaces with the module name, and a finalize die attaches to (not replaces) the saved error

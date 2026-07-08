@@ -620,8 +620,13 @@ class Temporalio::Worker {
     # Build the sync-activity fork pool (spec section 9.4) only when the worker
     # registers at least one sync activity. The forked children MUST close the
     # runtime's wakeup fd (the read end of the eventfd/pipe the shim signals) —
-    # a child holding it would corrupt the parent's completion drain. Heartbeats
-    # a child records are relayed to the real synchronous FFI heartbeat here on
+    # a child holding it would corrupt the parent's completion drain. The pool
+    # itself sweeps EVERY other inherited descriptor — the core/client gRPC
+    # sockets this worker's runtime and client hold open — via its parent-fd
+    # snapshot (spec R30, finding L16), so inherited_fhs stays what it always
+    # was: the portable by-filehandle list for the wakeup fd, and the only
+    # close that still runs where /proc/self/fd is unavailable. Heartbeats a
+    # child records are relayed to the real synchronous FFI heartbeat here on
     # the parent side.
     method _build_activity_pool () {
         return undef unless $activity_registry->has_sync_activities;
