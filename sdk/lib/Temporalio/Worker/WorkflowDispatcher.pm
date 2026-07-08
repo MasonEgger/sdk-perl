@@ -9,11 +9,22 @@ no warnings 'experimental::class';
 
 use Future ();
 use Future::AsyncAwait;
+use Protobuf::Class::Accessor ();
+use Scalar::Util ();
 
 use Temporalio::Converter::Payload ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Bridge ();
 use Temporalio::Workflow::Runner ();
+
+# The two message types the codec walker special-cases (spec R7, finding R6):
+# every temporal.api.common.v1.Payload in the tree goes through the codec
+# chain, EXCEPT those inside a SearchAttributes message — the server must be
+# able to index SA values, so they stay codec-free in both directions
+# (MUST-match sdk-python bridge/_visitor.py skip_search_attributes; the
+# step-45 Review Record sub-claim 1 verified Python keeps SAs codec-free).
+my $PAYLOAD_TYPE           = 'temporal.api.common.v1.Payload';
+my $SEARCH_ATTRIBUTES_TYPE = 'temporal.api.common.v1.SearchAttributes';
 
 class Temporalio::Worker::WorkflowDispatcher {
     # Temporalio::Worker::WorkflowRegistry: workflow type name -> backing class.
@@ -191,75 +202,100 @@ class Temporalio::Worker::WorkflowDispatcher {
         return;
     }
 
-    # --- codec boundary (spec section 8.3 steps 5 + 8) -----------------------
+    # --- codec boundary (spec section 8.3 steps 5 + 8; spec R7, finding R6) --
     # The runner converts values with the bare payload_converter; codecs are a
-    # worker-boundary concern applied here over the payloads embedded in the
-    # activation jobs (decode) and the completion commands (encode). v0.1 walks
-    # the payload-bearing fields of the job/command kinds the runner handles.
+    # worker-boundary concern applied here over EVERY payload embedded in the
+    # activation (decode) and the completion (encode). One directional walker
+    # covers the whole tree, so a future job/command kind cannot bypass the
+    # codec the way the enumerated v0.1 boundary let the v0.2 surfaces slip
+    # through (update input, child/nexus results, failure details, memo,
+    # headers, update/query responses, continue-as-new args, local-activity
+    # args, signal-external args, memo upserts — finding R6). Search
+    # attributes are the deliberate exception (see $SEARCH_ATTRIBUTES_TYPE).
 
     async method _codec_decode_activation ($activation) {
-        for my $job (($activation->jobs // [])->@*) {
-            my $variant = $job->which_variant // '';
-            if ($variant eq 'initialize_workflow') {
-                await $self->_decode_list($job->initialize_workflow->arguments);
-            }
-            elsif ($variant eq 'signal_workflow') {
-                await $self->_decode_list($job->signal_workflow->input);
-            }
-            elsif ($variant eq 'query_workflow') {
-                await $self->_decode_list($job->query_workflow->arguments);
-            }
-            elsif ($variant eq 'resolve_activity') {
-                await $self->_decode_resolve_activity($job->resolve_activity);
-            }
-        }
+        return unless @{ $data_converter->payload_codecs };
+        await $self->_apply_codec_to_message($activation, 'decode');
         return;
     }
 
     async method _codec_encode_completion ($completion) {
-        my $success = $completion->successful;
-        return unless defined $success;
-        for my $cmd (($success->commands // [])->@*) {
-            my $variant = $cmd->which_variant // '';
-            if ($variant eq 'complete_workflow_execution') {
-                my $cwe     = $cmd->complete_workflow_execution;
-                my $payload = $cwe->result;
-                if (defined $payload) {
-                    my $encoded = await $data_converter->codec_encode([$payload]);
-                    $cwe->set_result($encoded->[0]);
+        return unless @{ $data_converter->payload_codecs };
+        await $self->_apply_codec_to_message($completion, 'encode');
+        return;
+    }
+
+    # The single directional codec helper (spec R7): recursively walk a fully
+    # decoded proto message via its schema descriptor and run every embedded
+    # Payload through the codec chain in $direction, replacing it in place —
+    # singular fields through their setter, repeated fields and map values
+    # through the live reference the generated reader returns. Payloads inside
+    # a SearchAttributes message are never offered to the chain (sdk-python
+    # skip_search_attributes parity). Map keys are visited in sorted order so
+    # the codec call sequence is deterministic.
+    async method _apply_codec_to_message ($msg, $direction) {
+        my $descriptor = $msg->descriptor;
+        return if $descriptor->full_name eq $SEARCH_ATTRIBUTES_TYPE;
+
+        for my $field ($descriptor->fields->@*) {
+            next unless $field->is_message;
+            my $reader = Protobuf::Class::Accessor::accessor_name($field->name);
+
+            if ($field->is_map) {
+                my $value_message = _map_value_message($field) // next;
+                my $map = $msg->$reader;
+                next unless %$map;
+                if ($value_message->full_name eq $PAYLOAD_TYPE) {
+                    my @keys  = sort keys %$map;
+                    my $coded = await $self->_run_codec(
+                        $direction, [ @{$map}{@keys} ]);
+                    @{$map}{@keys} = @$coded;
+                }
+                else {
+                    for my $key (sort keys %$map) {
+                        next unless Scalar::Util::blessed($map->{$key});
+                        await $self->_apply_codec_to_message(
+                            $map->{$key}, $direction);
+                    }
                 }
             }
-            elsif ($variant eq 'schedule_activity') {
-                await $self->_encode_list($cmd->schedule_activity->arguments);
+            elsif ($field->is_repeated) {
+                my $type = $field->type_ref // next;
+                my $list = $msg->$reader;
+                next unless @$list;
+                if ($type->full_name eq $PAYLOAD_TYPE) {
+                    @$list = @{ await $self->_run_codec($direction, [@$list]) };
+                }
+                else {
+                    for my $item (@$list) {
+                        next unless Scalar::Util::blessed($item);
+                        await $self->_apply_codec_to_message($item, $direction);
+                    }
+                }
+            }
+            else {
+                my $type  = $field->type_ref // next;
+                my $value = $msg->$reader    // next;
+                if ($type->full_name eq $PAYLOAD_TYPE) {
+                    my $coded  = await $self->_run_codec($direction, [$value]);
+                    my $setter = "set_$reader";
+                    $msg->$setter($coded->[0]);
+                }
+                elsif (Scalar::Util::blessed($value)) {
+                    await $self->_apply_codec_to_message($value, $direction);
+                }
             }
         }
         return;
     }
 
-    # Decode the ResolveActivity result's completed payload in place (the only
-    # codec-bearing field of an ActivityResolution the runner reads).
-    async method _decode_resolve_activity ($job) {
-        my $resolution = $job->result // return;
-        return unless ($resolution->which_status // '') eq 'completed';
-        my $completed = $resolution->completed // return;
-        my $payload   = $completed->result    // return;
-        my $decoded   = await $data_converter->codec_decode([$payload]);
-        $completed->set_result($decoded->[0]);
-        return;
-    }
-
-    # Decode/encode a repeated-Payload field in place (the live arrayref the
-    # generated accessor returns). A no-codec converter leaves it untouched.
-    async method _decode_list ($payloads) {
-        return unless defined $payloads && @$payloads;
-        @$payloads = @{ await $data_converter->codec_decode([@$payloads]) };
-        return;
-    }
-
-    async method _encode_list ($payloads) {
-        return unless defined $payloads && @$payloads;
-        @$payloads = @{ await $data_converter->codec_encode([@$payloads]) };
-        return;
+    # Run one payload batch through the data converter's codec chain in the
+    # given direction (the converter applies chain ordering: list order on
+    # encode, reverse on decode).
+    async method _run_codec ($direction, $payloads) {
+        return $direction eq 'encode'
+            ? await $data_converter->codec_encode($payloads)
+            : await $data_converter->codec_decode($payloads);
     }
 
     # --- job inspection helpers ----------------------------------------------
@@ -279,6 +315,17 @@ class Temporalio::Worker::WorkflowDispatcher {
                 if ($job->which_variant // '') eq 'initialize_workflow';
         }
         return undef;
+    }
+
+    # The Schema::Message of a map field's VALUE type (field number 2 of the
+    # synthetic MapEntry the field's type_ref points at), or undef when the
+    # map's values are scalar (e.g. Payload.metadata's bytes) and the codec
+    # walker has nothing to visit.
+    sub _map_value_message ($field) {
+        my $entry = $field->type_ref // return undef;
+        my ($value_field) = grep { $_->number == 2 } $entry->fields->@*;
+        return undef unless $value_field && $value_field->is_message;
+        return $value_field->type_ref;
     }
 }
 
@@ -326,7 +373,13 @@ tolerated (cache miss).
 B<Codec boundary.> Inbound activation payloads are codec-B<decoded> and outbound
 completion payloads codec-B<encoded> (spec section 8.3 steps 5 + 8), so the
 runner only ever sees decoded payloads and does value conversion with the bare
-payload converter.
+payload converter. The boundary is a single directional walker over the whole
+proto tree (spec R7, finding R6): every embedded
+C<temporal.api.common.v1.Payload> passes through the codec chain, B<except>
+payloads inside a C<SearchAttributes> message, which stay codec-free in both
+directions so the server can index them (sdk-python C<skip_search_attributes>
+parity). See L<Temporalio::Converter::PayloadCodec/WORKER CODEC BOUNDARY> for
+the covered-surface list.
 
 =item *
 

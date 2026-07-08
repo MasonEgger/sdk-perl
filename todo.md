@@ -75,10 +75,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R6.4 Verify: acceptance criteria mapped; prove -lj4 t (and xt) green under the memory guard
 
 ### Step R7: Extend the Payload Codec Boundary to the Full v0.2 Surface
-- [ ] R7.1 RED: nine per-surface replay tests with a marker codec assert encode outbound / decode inbound, plus the SA-not-wrapped negatives
-- [ ] R7.2 GREEN: route each v2 surface through the codec in Worker/WorkflowDispatcher.pm:200-249 and :170-181, skipping search attributes
-- [ ] R7.3 REFACTOR: collapse behind one directional helper; update Converter POD to list covered surfaces; cite R6
-- [ ] R7.4 Verify: encode/decode and SA-exclusion assertions map across the nine files; prove -lj4 t and xt green under the memory guard
+- [x] R7.1 RED: nine per-surface replay tests with a marker codec assert encode outbound / decode inbound, plus the SA-not-wrapped negatives
+- [x] R7.2 GREEN: route each v2 surface through the codec in Worker/WorkflowDispatcher.pm:200-249 and :170-181, skipping search attributes
+- [x] R7.3 REFACTOR: collapse behind one directional helper; update Converter POD to list covered surfaces; cite R6
+- [x] R7.4 Verify: encode/decode and SA-exclusion assertions map across the nine files; prove -lj4 t and xt green under the memory guard
 
 ## Phase P4: Post-Cancel Corruption Cluster
 

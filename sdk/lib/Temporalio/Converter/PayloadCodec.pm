@@ -70,6 +70,41 @@ the wrapper encoding (for example C<binary/encrypted>) with the original
 payload's serialized bytes inside C<data>; C<decode> unwraps accordingly
 and must pass through payloads it does not recognize.
 
+=head1 WORKER CODEC BOUNDARY
+
+On the workflow worker, L<Temporalio::Worker::WorkflowDispatcher> applies
+the codec chain to B<every> payload crossing the worker boundary — decode
+on the inbound activation, encode on the outbound completion (spec R7,
+finding R6). The covered surfaces:
+
+=over
+
+=item * workflow, signal, query, and update inputs (arguments and headers)
+
+=item * activity, local-activity, child-workflow, and nexus operation
+results
+
+=item * failure payloads (C<details>, C<last_heartbeat_details>, and
+C<encoded_attributes>, recursively through the C<cause> chain)
+
+=item * memo and header payloads, inbound and outbound
+
+=item * workflow results, update and query responses
+
+=item * continue-as-new, activity, local-activity, child-workflow, nexus,
+and signal-external outbound arguments (with their memo and headers)
+
+=item * memo upserts (C<ModifyWorkflowProperties>)
+
+=back
+
+B<Search attributes are the deliberate exception>: payloads inside a
+C<temporal.api.common.v1.SearchAttributes> message (start-time SAs,
+child-workflow and continue-as-new SAs, and SA upserts) are never offered
+to the codec chain in either direction — the server must be able to index
+their values. This matches sdk-python's C<skip_search_attributes>
+traversal.
+
 =head1 METHODS
 
 Both methods are asynchronous (L<Future::AsyncAwait>), take an arrayref
