@@ -43,10 +43,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R4.4 Verify: two-pool dispatch correct; no main:: registry/FD/module globals; prove -lj4 t green under the memory guard
 
 ### Step R5: Preserve Error Identity Across the Pool Fork Boundary
-- [ ] R5.1 RED: prove test (adapted probe_pool_error.pl) asserts a non-retryable ApplicationError returns non-retryable with type/details, and a plain die returns retryable with message intact
-- [ ] R5.2 GREEN: serialize structured error data across the channel at Activity/Pool.pm:187 and :130; rebuild the failure at Worker/ActivityDispatcher.pm:307-314
-- [ ] R5.3 REFACTOR: route both sites through one structured encode/decode pair on the R4 channel; comment cites L14 and the Python parity source
-- [ ] R5.4 Verify: both failure shapes correct; prove -lj4 t green under the memory guard
+- [x] R5.1 RED: prove test (adapted probe_pool_error.pl) asserts a non-retryable ApplicationError returns non-retryable with type/details, and a plain die returns retryable with message intact
+- [x] R5.2 GREEN: serialize structured error data across the channel at Activity/Pool.pm:187 and :130; rebuild the failure at Worker/ActivityDispatcher.pm:307-314
+- [x] R5.3 REFACTOR: route both sites through one structured encode/decode pair on the R4 channel; comment cites L14 and the Python parity source
+- [x] R5.4 Verify: both failure shapes correct; prove -lj4 t green under the memory guard
 
 ### Step R18+R19: Pool Fork-Channel: Live Heartbeat Relay and Cancel Delivery
 - [ ] R18+R19.1 RED: unit test asserts parent sees the heartbeat before the body returns; integration test (offline-skip) asserts no heartbeat timeout for a compliant activity; unit test asserts a running child observes cancel and resolves cancelled

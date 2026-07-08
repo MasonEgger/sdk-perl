@@ -4,7 +4,8 @@
 # ABOUTME: so a child never drains the parent's completion signal; heartbeats
 # ABOUTME: called inside a child relay back to the parent, which performs the
 # ABOUTME: real FFI heartbeat; cooperative cancellation propagates parent->child
-# ABOUTME: through the serialized invocation struct.
+# ABOUTME: through the serialized invocation struct; child errors cross the
+# ABOUTME: boundary as encoded Failure protos so their identity survives (R5).
 use v5.38;
 use warnings;
 use feature 'class';
@@ -129,7 +130,10 @@ class Temporalio::Activity::Pool {
         if ($out->{ok}) {
             return $out->{result};
         }
-        die $out->{error};
+        # The child ships its error in the structured frame _freeze_error
+        # built; rebuild the blessed exception with the original failure
+        # semantics before rethrowing (spec R5, finding L14).
+        die _thaw_error($out->{error});
     }
 
     method close {
@@ -144,8 +148,10 @@ class Temporalio::Activity::Pool {
     # L12). Defined inside the class block so it is callable as a package sub
     # (a bare-class file otherwise puts file-scope subs in main:: —
     # lessons.md). Returns a frozen { ok, result, heartbeats } or
-    # { ok=0, error, heartbeats } so the parent can re-raise across the fork
-    # boundary and relay heartbeats.
+    # { ok=0, error => STRUCTURED_FRAME, heartbeats }; the error is the
+    # _freeze_error carrier (spec R5), not a bare string, so the parent can
+    # re-raise the ORIGINAL failure semantics across the fork boundary and
+    # relay heartbeats.
     sub _child_dispatch ($registry, $frozen) {
         # Per-invocation in-child heartbeat collector. A child cannot touch
         # the parent's core, and IO::Async::Function renumbers/closes spare
@@ -179,7 +185,7 @@ class Temporalio::Activity::Pool {
                 # The child has no codec chain; heartbeat() uses the synchronous
                 # payload converter only, so a default converter suffices for
                 # detail encoding. The parent does all real conversion.
-                data_converter     => _child_data_converter(),
+                data_converter     => _pool_data_converter(),
                 heartbeat_recorder => sub ($hb_bytes) {
                     push @child_heartbeats, { token => $token, bytes => $hb_bytes };
                     return undef;
@@ -195,7 +201,7 @@ class Temporalio::Activity::Pool {
         };
         my %frame;
         if (!defined $out) {
-            %frame = ( ok => 0, error => "$@" );
+            %frame = ( ok => 0, error => _freeze_error($@) );
         }
         else {
             %frame = %$out;
@@ -204,10 +210,65 @@ class Temporalio::Activity::Pool {
         return Storable::freeze(\%frame);
     }
 
-    # A default data converter for the child's Context heartbeat detail
-    # encoding. Required lazily so the child does not load it unless heartbeats
-    # are used. Defined inside the class block (callable in-child).
-    sub _child_data_converter {
+    # --- the structured-error leg of the R4 fork channel (spec R5) ----------
+    # _freeze_error (child) and _thaw_error (parent) are the ONE encode/decode
+    # pair for errors crossing the fork boundary. Finding L14: the pre-R5
+    # channel stringified the child's $@ and the dispatcher's _as_exception
+    # rewrapped the string as a generic RETRYABLE ApplicationError, so a
+    # non-retryable failure retried forever. `feature 'class'` exception
+    # objects cannot cross Storable, so the carrier is the failure-converter
+    # shape: the child converts the exception into a
+    # temporal.api.failure.v1.Failure proto (class -> failure_info variant
+    # plus type, non_retryable, details, category, and the cause chain) and
+    # ships its encoded bytes; the parent decodes the bytes and rebuilds the
+    # equivalent blessed exception. Python parity: sdk-python's process-pool
+    # executor pickles the ORIGINAL exception back to the parent, so the
+    # parent-side encode_failure sees the original identity
+    # (temporalio/worker/_activity.py); this pair is the Perl analog for
+    # objects pickle-equivalent serialization cannot carry.
+    sub _freeze_error ($error) {
+        my $string = "$error";
+        chomp $string;
+        my $bytes = eval {
+            my $dc = _pool_data_converter();
+            $dc->failure_converter
+                ->to_failure($error, $dc->payload_converter)->encode;
+        };
+        # An error the converter cannot carry (e.g. details the default
+        # payload converter cannot encode) degrades to the stringified form;
+        # the parent then rethrows the string and the dispatcher wraps it as
+        # a generic retryable failure (the pre-R5 behavior, worst case).
+        return defined $bytes
+            ? { failure => $bytes, string => $string }
+            : { string => $string };
+    }
+
+    sub _thaw_error ($frame) {
+        # A pre-structured (plain string) frame rethrows as-is.
+        return $frame if !ref $frame;
+        if (defined(my $bytes = $frame->{failure})) {
+            my $exception = eval {
+                require Temporalio::Core::Proto;
+                my $failure = Temporalio::Core::Proto::resolve(
+                    'temporal.api.failure.v1.Failure')->decode($bytes);
+                my $dc = _pool_data_converter();
+                $dc->failure_converter
+                    ->from_failure($failure, $dc->payload_converter);
+            };
+            return $exception if defined $exception;
+        }
+        return ($frame->{string} // 'activity pool child failed') . "\n";
+    }
+
+    # A default data converter used symmetrically on BOTH sides of the fork
+    # boundary: the child's Context heartbeat detail encoding and the child
+    # half of _freeze_error, and the parent half of _thaw_error (decode must
+    # mirror the child's encode, so both sides use the same default; the
+    # worker's real converter, which may carry a codec chain, re-encodes the
+    # rebuilt exception later at the completion boundary). Required lazily so
+    # the child does not load it unless heartbeats or errors occur. Defined
+    # inside the class block (callable in-child).
+    sub _pool_data_converter {
         require Temporalio::Converter::Data;
         return Temporalio::Converter::Data->new;
     }
@@ -279,6 +340,18 @@ L<Temporalio::Activity::Invocation> — plain data with the activity type,
 B<already-converted> args, the info hashref, the task token, and the cancelled
 flag. No live core pointers, cancellation tokens, or data converters cross the
 fork boundary.
+
+=head2 Error identity across the fork (spec R5)
+
+A child body's thrown error crosses the boundary as an encoded
+C<temporal.api.failure.v1.Failure> proto (the failure-converter shape), not a
+stringified C<$@>: the child converts the exception via
+L<Temporalio::Converter::Failure> and the parent rebuilds the equivalent
+blessed L<Temporalio::Exception> before C<invoke> rethrows it. A non-retryable
+L<Temporalio::Exception::Application> therefore stays non-retryable, with its
+type, details, category, and cause chain intact (finding L14); a plain die
+arrives as a retryable ApplicationError with the message preserved. An error
+the default converter cannot carry degrades to the stringified form.
 
 =head2 Per-instance fork state (spec R4)
 

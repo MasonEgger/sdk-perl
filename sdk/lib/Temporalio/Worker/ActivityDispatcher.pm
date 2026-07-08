@@ -304,6 +304,15 @@ class Temporalio::Worker::ActivityDispatcher {
     # Normalize a thrown value into a Temporalio::Exception so the failure
     # converter has something to map. A plain string death becomes an
     # ApplicationError (mirrors the reference SDKs wrapping arbitrary errors).
+    # Pooled sync-activity failures arrive here as blessed exceptions the
+    # pool's structured-error channel rebuilt (Activity/Pool.pm _thaw_error,
+    # spec R5 / finding L14), so the pass-through branch preserves their
+    # original class, type, non_retryable, details, and cause chain. The
+    # pre-R5 channel delivered a stringified $@ that fell into the wrapper
+    # branch below and came back generic and RETRYABLE: a permanently
+    # failing pooled activity retried forever. The string branch remains for
+    # in-process plain deaths and the pool channel's degraded string
+    # fallback.
     sub _as_exception ($error) {
         return $error
             if Scalar::Util::blessed($error)
