@@ -117,10 +117,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P5: Cancellation Semantics
 
 ### Step R12+R52+R53: Cancellation-Type Test File
-- [ ] R12+R52+R53.1 RED: replay cancellation_types.t covers WAIT vs TRY_CANCEL regular activity, evict of wait-type LA, and double-cancel LA
-- [ ] R12+R52+R53.2 GREEN: honor WAIT_CANCELLATION_COMPLETED on the regular-activity arm, make evict cancel LAs unconditionally, add at-most-once LA cancel guard
-- [ ] R12+R52+R53.3 REFACTOR: share one wait-type helper across both activity arms; cite R7/L8/L10 + Python parity
-- [ ] R12+R52+R53.4 Verify: pending-until-resolution, TRY_CANCEL-unchanged, eviction-completes, exactly-one-cancel assertions pass; prove -lj4 t green
+- [x] R12+R52+R53.1 RED: replay cancellation_types.t covers WAIT vs TRY_CANCEL regular activity, evict of wait-type LA, and double-cancel LA
+- [x] R12+R52+R53.2 GREEN: honor WAIT_CANCELLATION_COMPLETED on the regular-activity arm, make evict cancel LAs unconditionally, add at-most-once LA cancel guard
+- [x] R12+R52+R53.3 REFACTOR: share one wait-type helper across both activity arms; cite R7/L8/L10 + Python parity
+- [x] R12+R52+R53.4 Verify: pending-until-resolution, TRY_CANCEL-unchanged, eviction-completes, exactly-one-cancel assertions pass; prove -lj4 t green
 
 ### Step R13: Keep Query and Update Responses on Failure Completions
 - [ ] R13.1 RED: replay failure_keeps_responses.t asserts query and update responses survive a same-activation failure; mutating commands dropped

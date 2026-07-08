@@ -206,6 +206,14 @@ class Temporalio::Workflow::Runner {
     # tolerates a stale FireTimer for a cancelled timer). Run-scoped.
     field %cancelled_activity_seqs;
 
+    # Activity seqs (regular or local; they share one seq space) whose
+    # RequestCancel command has already been emitted, so any further cancel of
+    # the same seq is a command-level no-op (spec R53 / finding L10: at most
+    # one RequestCancelLocalActivity per LA seq; the same guard protects the
+    # regular arm and the wait-then-force overlap on evict). Cleared when the
+    # seq de-registers (resolve-now cancel or terminal resolution). Run-scoped.
+    field %activity_cancel_requested;
+
     # Local-activity bookkeeping (spec section 21). LAs share the activity seq
     # space and %pending_activities with regular activities (a single map by
     # seq), but the backoff -> server-timer -> re-schedule loop is runner-owned
@@ -520,23 +528,23 @@ class Temporalio::Workflow::Runner {
         # RequestCancelActivity so core forwards the cancel to the running
         # activity (MUST-match sdk-python _ActivityHandle._apply_cancel_command).
         my $is_abandon = $fields{cancellation_type} == 2 ? 1 : 0;
+        my $wait       = $fields{cancellation_type} == 1 ? 1 : 0;
 
         # Register the pending Future the body awaits; the runner resolves it
         # imperatively from the ResolveActivity job (never via IO::Async). The
-        # _ActivityFuture cancel hook emits RequestCancelActivity (unless
-        # abandon), records the seq as cancelled (so a later stale
-        # ResolveActivity{cancelled} from core is tolerated, not flagged as
-        # non-determinism), de-registers the pending entry, and fails the Future
-        # with Cancelled — the await raises Cancelled in the same activation.
+        # _ActivityFuture cancel hook delegates to _on_activity_cancel, which
+        # honours the cancellation_type exactly as the local-activity arm does
+        # (spec R12 / finding R7): try_cancel/abandon resolve Cancelled now
+        # (try_cancel also emits RequestCancelActivity and records the seq so
+        # the later stale ResolveActivity{cancelled} from core is tolerated);
+        # wait_cancellation_completed emits the cancel but PARKS — the future
+        # stays registered and resolves only from the delivered ResolveActivity,
+        # carrying the real outcome.
         my $future = Temporalio::Workflow::Runner::_ActivityFuture->_new_activity(
-            seq       => $seq,
-            on_cancel => sub {
-                return unless delete $pending_activities{$seq};
-                $cancelled_activity_seqs{$seq} = 1;
-                push @commands,
-                    Temporalio::Workflow::Commands::request_cancel_activity($seq)
-                    unless $is_abandon;
-            },
+            seq        => $seq,
+            runner     => $self,
+            is_abandon => $is_abandon,
+            wait       => $wait,
         );
         $pending_activities{$seq} = $future;
         return $future;
@@ -678,6 +686,79 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
+    # _activity_cancel_core($seq, %opt) — the ONE wait-type cancel arm shared by
+    # regular activities and local activities (spec R12+R52+R53; findings
+    # R7/L8/L10). Emits the arm's RequestCancel command AT MOST ONCE per seq
+    # (%activity_cancel_requested, the R53 sent-flag; abandon never emits), then
+    # decides park-vs-resolve:
+    #   * wait_cancellation_completed PARKS (returns 0): the seq stays
+    #     registered in %pending_activities so the later ResolveActivity is
+    #     matched and delivers the REAL outcome — cancelled, completed, or
+    #     failed. Python parity (../sdk-python worker/_workflow_instance.py,
+    #     run_activity): on cancel Python emits the command and keeps awaiting
+    #     the shielded result future; core, not lang, differentiates the types.
+    #   * try_cancel / abandon resolve now (returns 1): de-register, and record
+    #     the seq per %opt{record_stale} so the later stale
+    #     ResolveActivity{cancelled} from core is tolerated.
+    #   * force => 1 (the whole-workflow cancel chain and evict, spec R52 /
+    #     finding L8) ignores the wait type: cancellation always resolves now,
+    #     so a parked frame unwinds and the run is always releasable.
+    # %opt: is_local, is_abandon, wait, force, record_stale.
+    method _activity_cancel_core ($seq, %opt) {
+        unless ($opt{is_abandon} || $activity_cancel_requested{$seq}++) {
+            push @commands, $opt{is_local}
+                ? Temporalio::Workflow::Commands::request_cancel_local_activity(
+                    $seq)
+                : Temporalio::Workflow::Commands::request_cancel_activity($seq);
+        }
+        return 0 if $opt{wait} && !$opt{is_abandon} && !$opt{force};
+        delete $pending_activities{$seq};
+        delete $local_activity_state{$seq} if $opt{is_local};
+        delete $activity_cancel_requested{$seq};
+        $cancelled_activity_seqs{$seq} = 1 if $opt{record_stale};
+        return 1;
+    }
+
+    # _on_activity_cancel($seq, $is_abandon, $wait) — the runner side of a
+    # REGULAR activity's Future ->cancel (spec R12 / finding R7). Returns true
+    # when the caller (the _ActivityFuture) should resolve Cancelled
+    # IMMEDIATELY (try_cancel/abandon), or false when it should PARK
+    # (wait_cancellation_completed: the cancel command is emitted now, but the
+    # future stays pending until the delivered ResolveActivity resolves it with
+    # the real outcome — matching the local-activity arm and Python).
+    method _on_activity_cancel ($seq, $is_abandon, $wait) {
+        # Already de-registered (evict cleared the maps, or a late cancel after
+        # resolve-now): nothing to emit; resolve Cancelled so the awaiting
+        # frame always unwinds.
+        return 1 unless $pending_activities{$seq};
+        return $self->_activity_cancel_core($seq,
+            is_local     => 0,
+            is_abandon   => $is_abandon,
+            wait         => $wait,
+            # The regular arm records the stale-resolve tolerance for abandon
+            # too (core reports an abandoned activity cancelled immediately and
+            # still sends the resolution).
+            record_stale => 1,
+        );
+    }
+
+    # _force_activity_cancel($seq, $is_abandon) — the whole-workflow cancel
+    # chain / evict path for a REGULAR activity (spec section 10.3; spec R52
+    # convention shared with _force_local_activity_cancel): ignore the wait
+    # type, emit RequestCancelActivity at most once (unless abandon), record
+    # the cancelled seq, de-register. The future itself is failed Cancelled by
+    # the caller (_ActivityFuture::_force_cancel).
+    method _force_activity_cancel ($seq, $is_abandon) {
+        return unless $pending_activities{$seq};
+        $self->_activity_cancel_core($seq,
+            is_local     => 0,
+            is_abandon   => $is_abandon,
+            force        => 1,
+            record_stale => 1,
+        );
+        return;
+    }
+
     # _on_local_activity_cancel($future, $seq, $is_abandon, $wait) — the runner
     # side of a local activity's Future ->cancel (spec section 21.2). Returns
     # true when the caller (the _LocalActivityFuture) should resolve Cancelled
@@ -693,8 +774,9 @@ class Temporalio::Workflow::Runner {
     #     regardless of cancellation_type — no running activity to wait for
     #     (T-local-13).
     #   * In-flight, abandon: emit NO command; resolve Cancelled now (T-local-12).
-    #   * In-flight, try_cancel/wait: emit RequestCancelLocalActivity; try_cancel
-    #     resolves now (T-local-10), wait parks (T-local-11).
+    #   * In-flight, try_cancel/wait: emit RequestCancelLocalActivity AT MOST
+    #     ONCE (spec R53 / finding L10); try_cancel resolves now (T-local-10),
+    #     wait parks (T-local-11).
     method _on_local_activity_cancel ($future, $seq, $is_abandon, $wait) {
         # Backing off? A backoff-timer entry whose stashed state's future is THIS
         # future means the LA is parked on its server timer.
@@ -707,45 +789,36 @@ class Temporalio::Workflow::Runner {
             return 1;   # resolve Cancelled now.
         }
 
-        # In-flight. wait_cancellation_completed PARKS: emit the cancel command,
-        # leave the LA registered (so the later ResolveActivity{cancelled} is
-        # matched, not flagged unknown), and tell the future to stay pending.
-        if ($wait && !$is_abandon) {
-            push @commands,
-                Temporalio::Workflow::Commands::request_cancel_local_activity(
-                    $seq);
-            return 0;
-        }
+        # Already de-registered (evict cleared the maps, or a late cancel after
+        # resolve-now): nothing to emit; resolve Cancelled so the awaiting
+        # frame always unwinds (pre-fix this fell through to the wait branch
+        # and parked forever — spec R52 / finding L8).
+        return 1 unless $pending_activities{$seq};
 
-        # try_cancel / abandon: de-register and resolve Cancelled now. try_cancel
-        # emits RequestCancelLocalActivity and records the cancelled seq so a
-        # later stale ResolveActivity{cancelled} from core is tolerated; abandon
-        # emits no command.
-        delete $local_activity_state{$seq};
-        delete $pending_activities{$seq};
-        unless ($is_abandon) {
-            $cancelled_activity_seqs{$seq} = 1;
-            push @commands,
-                Temporalio::Workflow::Commands::request_cancel_local_activity(
-                    $seq);
-        }
-        return 1;
+        return $self->_activity_cancel_core($seq,
+            is_local   => 1,
+            is_abandon => $is_abandon,
+            wait       => $wait,
+            # The LA arm records the stale-resolve tolerance only for the
+            # emitting types (abandon LAs get no later resolution to tolerate).
+            record_stale => !$is_abandon,
+        );
     }
 
-    # _force_local_activity_cancel($seq, $is_abandon) — the runner side of the
-    # whole-workflow cancel chain for an IN-FLIGHT LA (spec section 10.3): emit
-    # RequestCancelLocalActivity (unless abandon), record the cancelled seq, and
-    # de-register. The future itself is failed Cancelled by the caller. (Backing-
-    # off LAs are handled separately in _apply_cancel_workflow.)
+    # _force_local_activity_cancel($seq, $is_abandon) — the whole-workflow
+    # cancel chain / evict path for an IN-FLIGHT LA (spec section 10.3): ignore
+    # the wait type, emit RequestCancelLocalActivity at most once (unless
+    # abandon; the sent-flag also suppresses a duplicate after an earlier
+    # wait-type ->cancel — spec R53), record the cancelled seq, and de-register.
+    # The future itself is failed Cancelled by the caller. (Backing-off LAs are
+    # handled separately in _apply_cancel_workflow.)
     method _force_local_activity_cancel ($seq, $is_abandon) {
-        delete $local_activity_state{$seq};
-        delete $pending_activities{$seq};
-        unless ($is_abandon) {
-            $cancelled_activity_seqs{$seq} = 1;
-            push @commands,
-                Temporalio::Workflow::Commands::request_cancel_local_activity(
-                    $seq);
-        }
+        $self->_activity_cancel_core($seq,
+            is_local     => 1,
+            is_abandon   => $is_abandon,
+            force        => 1,
+            record_stale => !$is_abandon,
+        );
         return;
     }
 
@@ -1599,8 +1672,20 @@ class Temporalio::Workflow::Runner {
         # (pre-fix trace :2199, :2212, in _apply_cancel_workflow below). The
         # array copies hold their own references, so continuations may delete
         # any entry and eviction always completes.
+        # Activities (regular AND local) are FORCE-cancelled: eviction ignores
+        # the cancellation type (spec R52 / finding L8). The wait-honouring
+        # ->cancel parked a wait_cancellation_completed future forever — the
+        # cancel command was emitted but the future stayed pending, so the
+        # frame parked on the await was abandoned without ever unwinding.
+        # _force_cancel always fails the future Cancelled: the awaiting frame
+        # resumes synchronously (its catch/cleanup runs) and the run is always
+        # releasable. Same snapshot-copy rule as below.
+        my @pending_activity_futures = values %pending_activities;
+        for my $future (@pending_activity_futures) {
+            $future->_force_cancel unless $future->is_ready;
+        }
         my @pending_futures = (
-            values %pending_activities, values %pending_timers,
+            values %pending_timers,
             values %in_progress_handlers, values %pending_external_signals,
             values %pending_external_cancels,
             map { $_->{future} } @conditions,
@@ -1806,6 +1891,9 @@ class Temporalio::Workflow::Runner {
     # (Future::AsyncAwait on_ready), so progress is observed in the pump.
     method _apply_resolve_activity ($job) {
         my $seq    = $job->seq;
+        # The resolution retires the seq; drop the at-most-once cancel
+        # sent-flag with it (spec R53) so the run-scoped map does not grow.
+        delete $activity_cancel_requested{$seq};
         my $future = delete $pending_activities{$seq};
         unless (defined $future) {
             # A seq we already cancelled (its Future was failed Cancelled when
@@ -2279,28 +2367,23 @@ class Temporalio::Workflow::Runner {
                     ));
                 }
             } ],
-            # Cancel every pending activity Future via its own cancel hook:
-            # that emits RequestCancelActivity (so core forwards the cancel to
-            # the running activity — unless the activity is ABANDON-typed,
-            # which never asks core to cancel) and then fails the Future with
-            # Cancelled, so the awaiting body raises a proper Temporal
-            # cancellation (a natively-cancelled Future would surface a bare
-            # "was cancelled" string, losing the exception identity).
+            # FORCE-cancel every pending activity Future (regular AND local):
+            # that emits the arm's RequestCancel command (so core forwards the
+            # cancel to the running activity — unless the activity is
+            # ABANDON-typed, which never asks core to cancel) and then fails
+            # the Future with Cancelled, so the awaiting body raises a proper
+            # Temporal cancellation (a natively-cancelled Future would surface
+            # a bare "was cancelled" string, losing the exception identity).
+            # The primary-task cancel always raises — it does not honour
+            # wait_cancellation_completed on either arm (the shared _force
+            # convention, spec R12+R52) — so both future classes route through
+            # _force_cancel here, never the wait-honouring ->cancel.
             # Continuations run synchronously at resolve time, so the body
             # observes the cancellation before _pump/_build_completion.
             [ [keys %pending_activities] => sub ($seq) {
                 my $future = $pending_activities{$seq};
                 return if !defined $future || $future->is_ready;
-                # A local-activity future's whole-workflow cancel always raises
-                # (the primary-task cancel does not honour
-                # wait_cancellation_completed), so use _force_cancel rather
-                # than the wait-honouring ->cancel.
-                if ($future->isa('Temporalio::Workflow::Runner::_LocalActivityFuture')) {
-                    $future->_force_cancel;
-                }
-                else {
-                    $future->cancel;
-                }
+                $future->_force_cancel;
             } ],
             # Timer Futures carry the analogous override (emit CancelTimer +
             # fail Cancelled).
@@ -3433,40 +3516,64 @@ package Temporalio::Workflow::Runner::_ConditionFuture {
     }
 }
 
-# A Workflow::Future for activities whose ->cancel maps to a Temporalio::
-# Exception::Cancelled FAILURE (not Future's native cancelled state), mirroring
-# _TimerFuture. The on_cancel callback (supplied by schedule_activity) emits
-# RequestCancelActivity (unless the activity is ABANDON-typed), records the seq
-# as cancelled so a later stale ResolveActivity{cancelled} is tolerated, and
-# de-registers the pending entry. The cancel then fails the Future with
-# Cancelled so the awaiting body raises a proper Temporal cancellation
-# (a natively-cancelled CPAN Future would surface a bare "was cancelled" string,
-# losing the exception identity — same reasoning as the timer override). This
-# is the activity end of the spec section 10.3 cancel chain (T-act-9).
+# A Workflow::Future for REGULAR activities whose ->cancel maps to a
+# Temporalio::Exception::Cancelled FAILURE (not Future's native cancelled
+# state), mirroring _TimerFuture. Like _LocalActivityFuture below, the cancel
+# BEHAVIOUR is delegated to the runner (Runner::_on_activity_cancel) so it
+# honours the cancellation type (spec R12 / finding R7): try_cancel/abandon
+# resolve Cancelled now, wait_cancellation_completed parks until the delivered
+# ResolveActivity resolves the future with the real outcome. Failing (never
+# natively cancelling) preserves the Temporal exception identity at the await
+# (a natively-cancelled CPAN Future would surface a bare "was cancelled"
+# string). This is the activity end of the spec section 10.3 cancel chain
+# (T-act-9).
 package Temporalio::Workflow::Runner::_ActivityFuture {
     use v5.38;
     use warnings;
 
     use parent -norequire, 'Temporalio::Workflow::Future';
+    use Scalar::Util ();
     use Temporalio::Exception::Cancelled ();
 
-    # _new_activity(seq => $seq, on_cancel => $cb) -> a pending activity future.
-    # The on_cancel callback runs exactly once, on the first ->cancel of a
-    # still-pending activity.
+    # _new_activity(seq, runner, is_abandon, wait) -> a pending activity future.
     sub _new_activity ($class, %args) {
         my $self = $class->new;
-        $self->{_activity_on_cancel} = $args{on_cancel};
+        $self->{_act_seq}        = $args{seq};
+        $self->{_act_runner}     = $args{runner};
+        Scalar::Util::weaken($self->{_act_runner});
+        $self->{_act_is_abandon} = $args{is_abandon} ? 1 : 0;
+        $self->{_act_wait}       = $args{wait} ? 1 : 0;
         return $self;
     }
 
-    # cancel: run the stored callback (emit RequestCancelActivity unless abandon,
-    # record the cancelled seq, de-register) then fail the future with Cancelled.
-    # A no-op once the future is ready (already resolved or already cancelled).
+    # cancel: explicit handle cancellation. Delegate to the runner, which emits
+    # RequestCancelActivity at most once (unless abandon) and returns whether to
+    # resolve Cancelled now (try_cancel/abandon) or PARK
+    # (wait_cancellation_completed — spec R12). A no-op once the future is
+    # ready.
     sub cancel ($self) {
         return $self if $self->is_ready;
-        if (my $cb = delete $self->{_activity_on_cancel}) {
-            $cb->();
+        my $runner = $self->{_act_runner} or return $self;
+        my $resolve_now = $runner->_on_activity_cancel(
+            $self->{_act_seq}, $self->{_act_is_abandon}, $self->{_act_wait});
+        if ($resolve_now) {
+            $self->fail(Temporalio::Exception::Cancelled->new(
+                message => 'Activity cancelled',
+            ));
         }
+        return $self;
+    }
+
+    # _force_cancel: whole-workflow cancel / evict (the primary-task cancel
+    # always raises, spec section 10.3 cancel chain; evict per spec R52 —
+    # unlike an explicit ->cancel it does not honour
+    # wait_cancellation_completed). Emits the cancel command at most once
+    # (unless abandon) and fails the future Cancelled now.
+    sub _force_cancel ($self) {
+        return $self if $self->is_ready;
+        my $runner = $self->{_act_runner};
+        $runner->_force_activity_cancel(
+            $self->{_act_seq}, $self->{_act_is_abandon}) if $runner;
         $self->fail(Temporalio::Exception::Cancelled->new(
             message => 'Activity cancelled',
         ));

@@ -496,6 +496,13 @@ Async. Durably sleeps for the given duration via a workflow timer; returns an aw
 =head2 start_activity
 
 Schedules an activity and returns its awaitable handle without awaiting it.
+The handle's C<cancel> honours the activity's C<cancellation_type>:
+C<try_cancel> (the default) and C<abandon> resolve the handle Cancelled
+immediately (C<abandon> without asking the server to cancel), while
+C<wait_cancellation_completed> emits the cancel request and leaves the handle
+pending until the activity's real resolution arrives, which may be a
+successful completion if the activity ignores the cancel. The same contract
+applies to C<start_local_activity> handles.
 
 =head2 start_timer
 
