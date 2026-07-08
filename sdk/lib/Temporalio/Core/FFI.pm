@@ -519,9 +519,33 @@ $ffi->type('record(Temporalio::Core::FFI::ClientEnvConfigOrFail)'             =>
 # keep_buffer(\@keep, $scalar) — returns the (data, size) pair for a copy of
 # $scalar, pushing the copy onto @$keep so the pointer stays valid. Returns
 # (undef, 0) for undef (a NULL TemporalCoreByteArrayRef).
+#
+# Character-vs-byte audit (spec R6, finding L21) of every scalar_to_buffer
+# site; R28 owns the COW-write variant:
+# - keep_buffer (below): normalized to pure bytes before the pointer is
+#   taken; the framed-length == bytes-written invariant lives here.
+# - private_write_buffer (below): fills a grown private PV with NUL bytes;
+#   never UTF8-flagged, no character semantics involved.
+# - Core/Callback.pm drain + _drain_meter_records: buffers built with
+#   '"\0" x N' on runtime operands, pure bytes by construction.
+# - Runtime/LoggingConfig.pm to_ffi: pointer and size both come from the
+#   same PV with no independent length math, and the bridge expects a
+#   UTF-8 filter string, so the UTF-8 PV of a flagged scalar is correct.
 sub keep_buffer ($keep, $scalar) {
     return (undef, 0) unless defined $scalar;
     my $copy = $scalar;    # private copy: caller's SV may be modified/freed
+    # Byte purity at the FFI boundary (spec R6, finding L21). For a
+    # UTF8-flagged scalar, scalar_to_buffer exposes the UTF-8-encoded PV,
+    # so the bridge would receive MORE bytes than any character-semantics
+    # length() computed upstream (probe: 34 framed vs 36 written).
+    # Normalize before taking the pointer: downgrade when every codepoint
+    # fits a byte (byte-identical), else encode to UTF-8 deterministically
+    # (a wide string here is text for the bridge, which expects UTF-8).
+    # After either branch the invariant holds: framed length == bytes
+    # written == length($copy).
+    if (utf8::is_utf8($copy)) {
+        utf8::downgrade($copy, 1) or utf8::encode($copy);
+    }
     push @$keep, \$copy;
     return FFI::Platypus::Buffer::scalar_to_buffer($copy);
 }

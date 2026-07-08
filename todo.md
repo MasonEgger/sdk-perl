@@ -69,10 +69,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P3: Wire Format and Codec
 
 ### Step R6: Fix Wide-Character Corruption in RawBytes at the FFI Boundary
-- [ ] R6.1 RED: t/unit/rawbytes_ffi_bytes.t asserts frame length == bytes written for wide, latin-1, ASCII, and embedded-NUL scalars
-- [ ] R6.2 GREEN: enforce byte purity in Payload/RawBytes.pm:13-18 and byte-based framing in Core/FFI.pm:522-527
-- [ ] R6.3 REFACTOR: audit every scalar_to_buffer call site in Core/FFI.pm; add the framed==written comment citing L21
-- [ ] R6.4 Verify: acceptance criteria mapped; prove -lj4 t (and xt) green under the memory guard
+- [x] R6.1 RED: t/unit/rawbytes_ffi_bytes.t asserts frame length == bytes written for wide, latin-1, ASCII, and embedded-NUL scalars
+- [x] R6.2 GREEN: enforce byte purity in Payload/RawBytes.pm:13-18 and byte-based framing in Core/FFI.pm:522-527
+- [x] R6.3 REFACTOR: audit every scalar_to_buffer call site in Core/FFI.pm; add the framed==written comment citing L21
+- [x] R6.4 Verify: acceptance criteria mapped; prove -lj4 t (and xt) green under the memory guard
 
 ### Step R7: Extend the Payload Codec Boundary to the Full v0.2 Surface
 - [ ] R7.1 RED: nine per-surface replay tests with a marker codec assert encode outbound / decode inbound, plus the SA-not-wrapped negatives
