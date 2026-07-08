@@ -29,9 +29,16 @@ class Temporalio::Test::DevServer {
 
     # Await $future on $loop, but never hang: a bridge that fails to call
     # back raises Exception::Runtime instead of wedging the test suite.
+    # The caller's future rides inside ->without_cancel: wait_any cancels
+    # its losing components (Future 0.52), and a cancelled bridge future
+    # could never report the late completion that tells us core released
+    # its borrows (finding L3 / spec R3). The shield leaves the caller's
+    # future PENDING on the timeout arm, so a settle continuation can still
+    # observe the trampoline firing.
     sub _await ($loop, $future, $timeout, $what) {
-        $loop->await(
-            Future->wait_any($future, $loop->timeout_future(after => $timeout)));
+        $loop->await(Future->wait_any(
+            $future->without_cancel,
+            $loop->timeout_future(after => $timeout)));
         Temporalio::Exception::Runtime->throw(
             message => "$what did not complete within ${timeout}s")
             unless $future->is_ready;
@@ -194,8 +201,40 @@ class Temporalio::Test::DevServer {
         );
     }
 
+    # Finding L3 (spec R3): per testing.rs / Core/FFI.pm:625-628, core's
+    # shutdown async block borrows the server handle until its callback
+    # fires, so the shutdown-timeout arm must NOT free a handle whose bridge
+    # future is still pending — the late completion would touch freed memory
+    # (the pre-fix code freed unconditionally right after the await). Defer
+    # the free to the pending future's settle continuation, with a logged
+    # warning. Two settle shapes exist:
+    #   - done, or failed with Temporalio::Exception::Bridge: the trampoline
+    #     fired (success or fail path), core's borrow is over — free.
+    #   - failed with anything else: the runtime's fail_all_pending settled
+    #     it at runtime shutdown (spec R21) and no callback ever fired, so
+    #     core may still hold the borrow — skip the free and leak the handle
+    #     by design (bounded: one dev-server box near process end).
+    # If the callback never fires at all, the handle leaks the same way.
+    # Related but distinct: R46 (the $is_shutdown flag order) and R33
+    # (abandoned futures leaking the CLI subprocess) share this shutdown
+    # path and land with the Phase P7 test-helper fixes.
+    sub _free_handle_when_settled ($future, $server_handle) {
+        warn 'Temporalio::Test::DevServer: shutdown timed out; deferring'
+           . " server handle free until the bridge callback settles\n";
+        $future->on_ready(sub ($f) {
+            if ($f->is_failed) {
+                my $error = $f->failure;
+                return unless Scalar::Util::blessed($error)
+                    && $error->isa('Temporalio::Exception::Bridge');
+            }
+            Temporalio::Core::FFI::ephemeral_server_free($server_handle);
+        });
+        return;
+    }
+
     # Idempotent (spec section 12.2). Frees the C server handle only after
-    # the shutdown callback fires — the bridge's async block borrows it.
+    # the shutdown callback fires — the bridge's async block borrows it; on
+    # the timeout arm the free is deferred via _free_handle_when_settled.
     #
     # Shutdown-time transport tolerance (P10.0.4): the ephemeral-server shutdown
     # drives RPCs to its own process. If the connection is reset / closed while
@@ -229,7 +268,16 @@ class Temporalio::Test::DevServer {
             } or $err = $@;
         }
         $restore_reaper->();
-        Temporalio::Core::FFI::ephemeral_server_free($handle);
+        if ($future->is_ready) {
+            # done or Bridge-failed: the shutdown callback fired, core's
+            # borrow is over (P10.0.4 frees on tolerable transport errors).
+            Temporalio::Core::FFI::ephemeral_server_free($handle);
+        }
+        else {
+            # Timeout arm, future still pending: core still borrows the
+            # handle (finding L3 / spec R3) — never free it here.
+            _free_handle_when_settled($future, $handle);
+        }
         $handle = undef;
         if (defined $err) {
             # Loaded lazily on the error path only: the classifier lives in
@@ -310,8 +358,12 @@ The C<host:port> string the server is listening on.
 =head2 shutdown
 
 Stops the server via C<temporal_core_ephemeral_server_shutdown> (awaited
-through the callback bridge) and frees the C handle. Idempotent: repeat
-calls return immediately.
+through the callback bridge) and frees the C handle once the shutdown
+callback has fired. Idempotent: repeat calls return immediately. If the
+shutdown times out while the bridge call is still in flight, the timeout
+error is raised but the handle free is deferred until the bridge callback
+settles (core still borrows the handle); when the callback never fires,
+the handle is deliberately leaked with a logged warning.
 
 =head2 is_shutdown
 

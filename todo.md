@@ -17,10 +17,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R2.4 Verify: guard present on both paths; both after-shutdown cases skip client_free without crashing; prove -lj4 t green under the memory guard
 
 ### Step R3: Stop Freeing the DevServer Handle on the Timeout Path
-- [ ] R3.1 RED: unit test forces the timeout arm (stalled future) and asserts the handle free is deferred or skipped while the bridge future is pending; comments cite Test/DevServer.pm:232, Core/FFI.pm:625-628
-- [ ] R3.2 GREEN: attach the free to the pending bridge future's continuation, or leak with a logged warning on timeout
-- [ ] R3.3 REFACTOR: isolate the deferred-free continuation into a helper; comment cites L3 and the R46/R33 relationship
-- [ ] R3.4 Verify: no free while the bridge future is pending; forced-timeout test shows deferral/skip; prove -lj4 t green under the memory guard
+- [x] R3.1 RED: unit test forces the timeout arm (stalled future) and asserts the handle free is deferred or skipped while the bridge future is pending; comments cite Test/DevServer.pm:232, Core/FFI.pm:625-628
+- [x] R3.2 GREEN: attach the free to the pending bridge future's continuation, or leak with a logged warning on timeout
+- [x] R3.3 REFACTOR: isolate the deferred-free continuation into a helper; comment cites L3 and the R46/R33 relationship
+- [x] R3.4 Verify: no free while the bridge future is pending; forced-timeout test shows deferral/skip; prove -lj4 t green under the memory guard
 
 ### Step R28: Stop Writing Through a COW-Shared Tag Buffer
 - [ ] R28.1 RED: unit test (adapted cow_tag.pl) asserts a shim write through the tag slot leaves an independent "\0" scalar untouched; audit note lists the scalar_to_buffer write sites
