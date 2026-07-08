@@ -123,10 +123,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R12+R52+R53.4 Verify: pending-until-resolution, TRY_CANCEL-unchanged, eviction-completes, exactly-one-cancel assertions pass; prove -lj4 t green
 
 ### Step R13: Keep Query and Update Responses on Failure Completions
-- [ ] R13.1 RED: replay failure_keeps_responses.t asserts query and update responses survive a same-activation failure; mutating commands dropped
-- [ ] R13.2 GREEN: partition @commands at Runner.pm:3054, retain handler responses, correct the false Python comment
-- [ ] R13.3 REFACTOR: extract is_handler_response_command predicate; cite R9 + Python source
-- [ ] R13.4 Verify: response-present and mutating-dropped assertions pass; prove -lj4 t green
+- [x] R13.1 RED: replay failure_keeps_responses.t asserts query and update responses survive a same-activation failure; mutating commands dropped
+- [x] R13.2 GREEN: partition @commands at Runner.pm:3054, retain handler responses, correct the false Python comment
+- [x] R13.3 REFACTOR: extract is_handler_response_command predicate; cite R9 + Python source
+- [x] R13.4 Verify: response-present and mutating-dropped assertions pass; prove -lj4 t green
 
 ### Step R14+R15: Route workflow_failure_exception_types and nondeterminism_as_workflow_fail to Live Runners
 - [ ] R14+R15.1 RED: unit dispatcher_failure_options.t asserts both options reach the live Runner; replay failure_exception_types.t asserts workflow vs task failure

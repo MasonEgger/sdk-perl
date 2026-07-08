@@ -3278,6 +3278,18 @@ class Temporalio::Workflow::Runner {
         return ($cmd->which_variant // '') eq 'respond_to_query';
     }
 
+    # True when $cmd is a handler RESPONSE (a RespondToQuery or an
+    # UpdateResponse) rather than a state-mutating workflow command. The
+    # failure-completion partition (spec R13 / finding R9) keeps exactly these:
+    # sdk-python (_set_workflow_failure, worker/_workflow_instance.py) never
+    # clears its command buffer on workflow failure, so its query/update
+    # responses always survive; this predicate is the Perl equivalent's
+    # keep-list.
+    sub _is_handler_response_command ($cmd) {
+        my $variant = $cmd->which_variant // '';
+        return $variant eq 'respond_to_query' || $variant eq 'update_response';
+    }
+
     # True when the command list contains a RespondToQuery whose query_id is the
     # sentinel "legacy_query" (sdk-core LEGACY_QUERY_ID).
     sub _has_legacy_query_response ($cmds) {
@@ -3292,17 +3304,25 @@ class Temporalio::Workflow::Runner {
         return 0;
     }
 
-    # A workflow-FAILURE completion: a successful completion whose sole command
-    # is FailWorkflowExecution carrying the converted failure (T-wf-15b/c). The
-    # workflow execution itself fails (vs the task). Any commands already
-    # buffered this activation are discarded — a failing run does not also emit
-    # its earlier partial commands (sdk-python adds only the fail command).
+    # A workflow-FAILURE completion: FailWorkflowExecution carrying the
+    # converted failure (T-wf-15b/c), plus any HANDLER RESPONSES buffered this
+    # activation. The workflow execution itself fails (vs the task). Spec R13
+    # (finding R9): query and update responses answered in the same activation
+    # MUST survive the failure completion; only state-mutating workflow
+    # commands (StartTimer, ScheduleActivity, ...) are dropped. Python ground
+    # truth (../sdk-python temporalio/worker/_workflow_instance.py,
+    # _set_workflow_failure): Python APPENDS fail_workflow_execution via
+    # _add_command() to the already-accumulated successful.commands and clears
+    # NOTHING — responses ride along. We additionally drop the mutating
+    # commands, which the server never acts on past the fail. (An earlier
+    # comment here claimed Python "adds only the fail command"; that was
+    # false — finding R9.)
     method _workflow_failed_completion ($err) {
-        # A failing run discards any partial commands buffered this activation
-        # (sdk-python adds only the fail command). Routed through the shared
-        # terminal-command guard (#6/#7) so a post-terminal activation cannot
-        # re-emit a second Fail; when already terminal, leave the buffer empty.
-        @commands = ();
+        # Partition, don't clear: keep the handler responses, drop the
+        # state-mutating commands. Routed through the shared terminal-command
+        # guard (#6/#7) so a post-terminal activation cannot re-emit a second
+        # Fail; when already terminal, only the surviving responses remain.
+        @commands = grep { _is_handler_response_command($_) } @commands;
         my $failure = $failure_converter->to_failure($err, $payload_converter);
         $self->_emit_terminal_command(
             Temporalio::Workflow::Commands::fail_workflow_execution($failure));
@@ -3741,7 +3761,9 @@ C<CancelWorkflowExecution> (NOT a failure) (T-wf-12).
 
 A Temporal failure exception (any C<Temporalio::Exception::*>) or a class
 listed in C<workflow_failure_exception_types> — C<FailWorkflowExecution>
-(T-wf-15b/c).
+(T-wf-15b/c). Query and update responses buffered in the same activation
+survive alongside the fail command; only state-mutating commands are dropped
+(spec R13, sdk-python parity).
 
 =item *
 
