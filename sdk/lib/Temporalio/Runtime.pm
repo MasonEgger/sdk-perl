@@ -6,6 +6,7 @@ use feature 'class';
 no warnings 'experimental::class';
 
 use Scalar::Util ();
+use Time::HiRes ();
 use FFI::Platypus::Buffer ();
 use IO::Async::Loop ();
 use IO::Async::Handle ();
@@ -16,6 +17,13 @@ use Temporalio::Exception::Runtime ();
 use Temporalio::Runtime::LogForwardingConfig ();
 use Temporalio::Runtime::MetricMeter ();
 use Temporalio::Runtime::TelemetryConfig ();
+
+# Upper bound (seconds) on the shutdown drain barrier: how long shutdown
+# keeps draining the completion queue waiting for outstanding async bridge
+# calls to deliver before failing whatever is still pending (findings L1 and
+# L18; spec R1 + R21). Package variable so tests (and unusual embedders) can
+# shrink or stretch the window.
+our $SHUTDOWN_DRAIN_TIMEOUT = 2;
 
 class Temporalio::Runtime {
     field $telemetry                 :param = undef;
@@ -249,9 +257,10 @@ class Temporalio::Runtime {
             require Temporalio::Worker::SlotSupplierRegistry;
             Temporalio::Worker::SlotSupplierRegistry->_clear_active;
         }
-        # 2. Free the shim callback queue (drops undrained entries).
-        Temporalio::Core::FFI::queue_free($queue_ptr) if defined $queue_ptr;
-        $queue_ptr = undef;
+        # 2. Ordered completion-channel teardown (findings L1 and L18; spec
+        # R1 + R21): barrier -> fail-pending -> queue-free, centralized in
+        # one helper so every shutdown path sequences it identically.
+        $self->_settle_callbacks_and_free_queue;
         # 3. Free the core runtime (flushes telemetry on drop, and invokes the
         # custom meter's meter_free callback if one was configured).
         Temporalio::Core::FFI::runtime_free($core_ptr) if defined $core_ptr;
@@ -269,6 +278,46 @@ class Temporalio::Runtime {
             && Scalar::Util::refaddr($_DEFAULT) == Scalar::Util::refaddr($self);
         # 5. Flag: subsequent operations raise "Runtime is shut down".
         $is_shutdown = 1;
+        return;
+    }
+
+    # The one ordered shutdown sequence for the completion channel (findings
+    # L1 and L18; spec R1 + R21). Steps, in a fixed order every shutdown
+    # path shares:
+    #
+    # (a) BARRIER (L1/R1): while async bridge calls are outstanding, keep
+    #     draining the completion queue on the main thread so in-flight
+    #     completions land and settle their futures with real results. The
+    #     shim trampolines (ext:206-227 single-shot completion, ext:368-392
+    #     forwarded logs) push into this queue from Tokio threads, and
+    #     queue_free's contract (ext:1684-1689) requires no further pushes;
+    #     freeing without this barrier (the old Runtime.pm:252-253) raced
+    #     them. Bounded by $SHUTDOWN_DRAIN_TIMEOUT so a callback that will
+    #     never complete (for example an abandoned poll) cannot hang
+    #     shutdown.
+    # (b) FAIL-PENDING (L18/R21): settle every future still registered in
+    #     Core/Callback.pm's $pending with a typed shutdown error, so code
+    #     awaiting across shutdown gets a prompt, catchable failure instead
+    #     of hanging forever.
+    # (c) FREE: only after (a) and (b) may the queue be freed.
+    method _settle_callbacks_and_free_queue () {
+        if (defined $callback && defined $queue_ptr) {
+            my $deadline = Time::HiRes::time() + $SHUTDOWN_DRAIN_TIMEOUT;
+            while ($callback->outstanding_count) {
+                $callback->drain($self);
+                last unless $callback->outstanding_count;
+                last if Time::HiRes::time() >= $deadline;
+                Time::HiRes::sleep(0.01);
+            }
+            if (my $count = $callback->outstanding_count) {
+                $callback->fail_all_pending(
+                    Temporalio::Exception::Runtime->new(
+                        message => 'Runtime shut down with '
+                                 . "$count callback(s) still pending"));
+            }
+        }
+        Temporalio::Core::FFI::queue_free($queue_ptr) if defined $queue_ptr;
+        $queue_ptr = undef;
         return;
     }
 
@@ -323,10 +372,17 @@ raises C<"Default runtime already set"> unless called with
 C<< error_if_already_set => 0 >>, which shuts down and replaces the
 previous default.
 
-C<shutdown> unregisters the wakeup fd, frees the queue, frees the core
-runtime, clears the process default if applicable, and flags the instance:
-subsequent operations raise C<"Runtime is shut down">. It is idempotent.
-C<DESTROY> shuts down with a warning - call C<shutdown> explicitly.
+C<shutdown> unregisters the wakeup fd, then tears the completion channel
+down in a fixed order (findings L1 and L18): first a drain barrier keeps
+popping the completion queue so outstanding async bridge calls can deliver
+and settle their Futures with real results (bounded by
+C<$Temporalio::Runtime::SHUTDOWN_DRAIN_TIMEOUT>, default 2 seconds), then
+every Future still pending fails with a typed
+L<Temporalio::Exception::Runtime> shutdown error so no awaiter hangs, and
+only then is the queue freed. It then frees the core runtime, clears the
+process default if applicable, and flags the instance: subsequent
+operations raise C<"Runtime is shut down">. It is idempotent. C<DESTROY>
+shuts down with a warning - call C<shutdown> explicitly.
 
 =head1 METHODS
 
@@ -386,5 +442,7 @@ Class method installing a runtime as the process-wide default.
 =head2 shutdown
 
 Shuts the runtime down, stopping its IO::Async loop and freeing the sdk-core runtime.
+The completion channel is torn down in order: drain barrier, fail every
+pending callback Future with a typed shutdown error, free the queue.
 
 =cut

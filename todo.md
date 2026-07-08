@@ -5,10 +5,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P1: Memory Safety and Shutdown
 
 ### Step R1+R21: Runtime Shutdown Drain Barrier and Pending-Future Failure
-- [ ] R1+R21.1 RED: unit test asserts order barrier -> fail-pending -> queue-free, deferred free until the synthetic callback settles, pending future fails with shutdown error within timeout; comments carry the L1/L18 code trace
-- [ ] R1+R21.2 GREEN: add outstanding-callback barrier + fail_all_pending in Core/Callback.pm; sequence barrier->fail->free at Runtime.pm:252-253 with a typed shutdown error
-- [ ] R1+R21.3 REFACTOR: centralize the ordered shutdown sequence into one helper; comment cites L1 and L18
-- [ ] R1+R21.4 Verify: barrier-before-free and fail-within-timeout asserted; cargo test green for the shim counterpart; prove -lj4 t green under the memory guard
+- [x] R1+R21.1 RED: unit test asserts order barrier -> fail-pending -> queue-free, deferred free until the synthetic callback settles, pending future fails with shutdown error within timeout; comments carry the L1/L18 code trace
+- [x] R1+R21.2 GREEN: add outstanding-callback barrier + fail_all_pending in Core/Callback.pm; sequence barrier->fail->free at Runtime.pm:252-253 with a typed shutdown error
+- [x] R1+R21.3 REFACTOR: centralize the ordered shutdown sequence into one helper; comment cites L1 and L18
+- [x] R1+R21.4 Verify: barrier-before-free and fail-within-timeout asserted; cargo test green for the shim counterpart; prove -lj4 t green under the memory guard
 
 ### Step R2: Guard Connection Free Against a Dead Runtime
 - [ ] R2.1 RED: unit test destroys the runtime first, then close and (separately) DESTROY the connection; assert no client_free and no crash; comments cite Client/Connection.pm:50-66, Core/FFI.pm:606-608

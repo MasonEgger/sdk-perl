@@ -273,6 +273,29 @@ class Temporalio::Core::Callback {
     method read_handle () { $read_handle }
     method signal_fd ()   { $signal_fd }
 
+    # Outstanding async bridge calls: futures registered by issue_async that
+    # no drain has settled yet. The runtime shutdown barrier (findings L1 and
+    # L18) polls this to decide whether in-flight completions may still push
+    # into the completion queue.
+    method outstanding_count () { scalar keys %$pending }
+
+    # Settle every still-pending future with $error (finding L18 / spec R21):
+    # runtime shutdown tears down the delivery mechanism, so any future left
+    # in $pending would otherwise hang its awaiter forever. Clears the
+    # registry; returns the number of futures failed.
+    method fail_all_pending ($error) {
+        my @records = values %$pending;
+        %$pending = ();
+        my $failed = 0;
+        for my $record (@records) {
+            my $future = $record->{future};
+            next unless defined $future && !$future->is_ready;
+            $future->fail($error);
+            $failed++;
+        }
+        return $failed;
+    }
+
     # Class method (spec section 4.5 public API): issue an async bridge call
     # on $runtime. Registers a pending Future under a fresh callback id,
     # allocates the shim (queue, id) user_data pair, and calls
@@ -548,9 +571,20 @@ Tears down the callback dispatcher and its signal handle.
 
 Drains the runtime's completion queue, resolving the Futures of any callbacks the shim has signalled.
 
+=head2 fail_all_pending
+
+Settles every still-pending callback Future with the given error and clears
+the registry; returns the number failed. Called by the runtime shutdown
+sequence (findings L1 and L18) so no awaiter hangs across shutdown.
+
 =head2 issue_async
 
 Issues an async bridge call, registering a callback that the shim trampoline will resolve by pushing onto the runtime queue; returns a L<Future>.
+
+=head2 outstanding_count
+
+Returns the number of async bridge calls whose Futures are still pending.
+The runtime shutdown drain barrier polls this before freeing the queue.
 
 =head2 read_handle
 
