@@ -21,22 +21,6 @@ use Temporalio::Activity::ChildCancellation ();
 use Temporalio::Activity::Context ();
 use Temporalio::Activity::Invocation ();
 
-# Package-scoped state the forked child's `code`/`init_code` closures read.
-# A bare `class` file compiles file-scope `our` vars into main:: (lessons.md);
-# the parent SET and the child READ both resolve them through the SAME `our`
-# alias inside the class block, and fork copies main::, so the values are
-# visible across the fork. (We never use the package-qualified name.)
-our @_INHERITED_FHS_TO_CLOSE;   # parent filehandles the child must close (FD hygiene)
-our @_ACTIVITY_MODULES;         # modules the child requires before dispatch
-our $_REGISTRY;                 # the activity registry (looked up in-child)
-# Per-invocation in-child heartbeat collector. A child cannot touch the
-# parent's core, and IO::Async::Function renumbers/closes spare fds in the
-# worker, so a live pipe back to the parent is not reliable. Instead each child
-# COLLECTS its heartbeat frames here during the body; _child_dispatch returns
-# them with the result and the PARENT relays each to the real FFI heartbeat
-# (spec section 9.4 — the parent performs the actual heartbeat call).
-our @_CHILD_HEARTBEATS;
-
 class Temporalio::Activity::Pool {
     field $loop :param;
     field $max_workers :param = 4;
@@ -69,10 +53,26 @@ class Temporalio::Activity::Pool {
     field $function;
 
     ADJUST {
-        # Publish the child-visible globals just before the fork.
-        @_INHERITED_FHS_TO_CLOSE = @$inherited_fhs;
-        @_ACTIVITY_MODULES       = @$activity_modules;
-        $_REGISTRY               = $registry;
+        # --- the per-instance fork channel (spec R4, finding L12) -----------
+        # Everything a forked child needs from THIS pool is captured here, in
+        # lexicals closed over by the `init_code`/`code` closures below. fork
+        # copies the closure pads, so each pool's children read that pool's
+        # own registry, FD list, and module list no matter how many pools
+        # exist in the process. (The pre-R4 design published these through
+        # file-scope `our` vars, which a bare `class` file compiles into
+        # main:: (lessons.md); a second pool's ADJUST clobbered the first
+        # pool's state before its lazy children forked, so pool A dispatched
+        # through pool B's registry.)
+        #
+        # This %channel is the single fork-state hand-off that later steps
+        # extend: R5 adds structured error data to the reply frame, R18/R19
+        # add the bidirectional side channel (live heartbeat up, live cancel
+        # down) alongside it.
+        my %channel = (
+            registry  => $registry,           # in-child activity lookup
+            close_fhs => [@$inherited_fhs],   # FD hygiene: close in init_code
+            modules   => [@$activity_modules],# require before first dispatch
+        );
 
         # Reaper-ownership note (#1): the first time this fork pool forks a
         # worker, IO::Async installs ONE process-wide SIGCHLD handler whose
@@ -92,16 +92,18 @@ class Temporalio::Activity::Pool {
                 # any fd-number renumbering IO::Async::Function did in the
                 # child). A bare POSIX::close on a stale fd number would either
                 # error or, worse, close one of the function's own channel fds.
-                for my $fh (@_INHERITED_FHS_TO_CLOSE) {
+                for my $fh (@{ $channel{close_fhs} }) {
                     close($fh) if defined $fh;
                 }
-                for my $mod (@_ACTIVITY_MODULES) {
+                for my $mod (@{ $channel{modules} }) {
                     my $path = ($mod =~ s{::}{/}gr) . '.pm';
                     eval { require $path; 1 };
                 }
                 return;
             },
-            code => \&_child_dispatch,
+            code => sub ($frozen) {
+                return _child_dispatch($channel{registry}, $frozen);
+            },
         );
         $loop->add($function);
     }
@@ -137,18 +139,27 @@ class Temporalio::Activity::Pool {
 
     # --- child side --------------------------------------------------------
 
-    # Runs in the forked child once per invocation. Defined inside the class
-    # block so it is callable as a package sub (a bare-class file otherwise puts
-    # file-scope subs in main:: — lessons.md). Returns a frozen
-    # { ok, result, heartbeats } or { ok=0, error, heartbeats } so the parent
-    # can re-raise across the fork boundary and relay heartbeats.
-    sub _child_dispatch ($frozen) {
-        local @_CHILD_HEARTBEATS = ();
+    # Runs in the forked child once per invocation, with the pool's OWN
+    # registry passed in by the per-instance `code` closure (spec R4, finding
+    # L12). Defined inside the class block so it is callable as a package sub
+    # (a bare-class file otherwise puts file-scope subs in main:: —
+    # lessons.md). Returns a frozen { ok, result, heartbeats } or
+    # { ok=0, error, heartbeats } so the parent can re-raise across the fork
+    # boundary and relay heartbeats.
+    sub _child_dispatch ($registry, $frozen) {
+        # Per-invocation in-child heartbeat collector. A child cannot touch
+        # the parent's core, and IO::Async::Function renumbers/closes spare
+        # fds in the worker, so a live pipe back to the parent is not
+        # reliable. Instead the child COLLECTS its heartbeat frames during
+        # the body; they return with the result and the PARENT relays each to
+        # the real FFI heartbeat (spec section 9.4 — the parent performs the
+        # actual heartbeat call).
+        my @child_heartbeats;
         my $out = eval {
             my $inv = Temporalio::Activity::Invocation->thaw($frozen);
 
-            my $def = defined $_REGISTRY
-                ? $_REGISTRY->definition($inv->activity_type)
+            my $def = defined $registry
+                ? $registry->definition($inv->activity_type)
                 : undef;
             die "Activity type '" . $inv->activity_type
                 . "' is not registered in the activity pool\n"
@@ -170,7 +181,7 @@ class Temporalio::Activity::Pool {
                 # detail encoding. The parent does all real conversion.
                 data_converter     => _child_data_converter(),
                 heartbeat_recorder => sub ($hb_bytes) {
-                    push @_CHILD_HEARTBEATS, { token => $token, bytes => $hb_bytes };
+                    push @child_heartbeats, { token => $token, bytes => $hb_bytes };
                     return undef;
                 },
             );
@@ -189,7 +200,7 @@ class Temporalio::Activity::Pool {
         else {
             %frame = %$out;
         }
-        $frame{heartbeats} = [ @_CHILD_HEARTBEATS ];
+        $frame{heartbeats} = [ @child_heartbeats ];
         return Storable::freeze(\%frame);
     }
 
@@ -268,6 +279,14 @@ L<Temporalio::Activity::Invocation> — plain data with the activity type,
 B<already-converted> args, the info hashref, the task token, and the cancelled
 flag. No live core pointers, cancellation tokens, or data converters cross the
 fork boundary.
+
+=head2 Per-instance fork state (spec R4)
+
+The registry, FD list, and module list a forked child reads are captured
+per pool instance in the closures handed to L<IO::Async::Function>; fork
+copies the closure pads, so each pool's children see that pool's own state.
+Nothing is published through package globals: two pools with distinct
+registries in one process dispatch independently (finding L12).
 
 =head1 CONSTRUCTOR
 

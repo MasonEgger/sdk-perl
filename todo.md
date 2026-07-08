@@ -37,10 +37,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P2: Pool Fork-Channel Rework
 
 ### Step R4: Make Activity Pool State Per-Instance
-- [ ] R4.1 RED: prove test (adapted probe_pool_globals.pl) builds two pools with distinct registries and asserts pool A dispatch runs pool A's activity; grep-probe asserts no main:: globals remain
-- [ ] R4.2 GREEN: replace the ADJUST-block main:: globals at Activity/Pool.pm:29-38, 71-75, 150-151 with per-instance state (the one-time fork-channel redesign)
-- [ ] R4.3 REFACTOR: name/document the per-instance channel for R5/R18/R19 to extend; comment cites L12
-- [ ] R4.4 Verify: two-pool dispatch correct; no main:: registry/FD/module globals; prove -lj4 t green under the memory guard
+- [x] R4.1 RED: prove test (adapted probe_pool_globals.pl) builds two pools with distinct registries and asserts pool A dispatch runs pool A's activity; grep-probe asserts no main:: globals remain
+- [x] R4.2 GREEN: replace the ADJUST-block main:: globals at Activity/Pool.pm:29-38, 71-75, 150-151 with per-instance state (the one-time fork-channel redesign)
+- [x] R4.3 REFACTOR: name/document the per-instance channel for R5/R18/R19 to extend; comment cites L12
+- [x] R4.4 Verify: two-pool dispatch correct; no main:: registry/FD/module globals; prove -lj4 t green under the memory guard
 
 ### Step R5: Preserve Error Identity Across the Pool Fork Boundary
 - [ ] R5.1 RED: prove test (adapted probe_pool_error.pl) asserts a non-retryable ApplicationError returns non-retryable with type/details, and a plain die returns retryable with message intact
