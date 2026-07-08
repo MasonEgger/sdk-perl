@@ -1186,10 +1186,23 @@ class Temporalio::Workflow::Runner {
         $pending_nexus_operations{$seq} = $handle;
 
         # Pre-scheduled cancel (spec section 26.3): if the run is already
-        # cancel-requested, raise Cancelled on the start await immediately
-        # (mirrors the activity/child pre-scheduled-cancel behaviour).
+        # cancel-requested, raise Cancelled on the start await immediately.
+        # $handle->cancel alone honours the wait_* cancellation types and would
+        # stay parked, so force-report exactly as the whole-workflow cancel
+        # sweep does: emit the cancel command (unless abandon), de-register,
+        # and fail the pending awaits with Cancelled. (Pre-R8 this relied on
+        # the _apply_cancel_workflow nexus sweep re-reading the map keys after
+        # the body had resumed; the R4/R8 fix snapshots every map before
+        # sweeping, so the pre-scheduled path must report on its own.)
         if ($cancel_requested) {
-            $handle->cancel;
+            $handle->cancel;   # emit the cancel command (honours abandon).
+            delete $pending_nexus_operations{$seq};
+            for my $f ($start_future, $result_future) {
+                next if $f->is_ready;
+                $f->fail(Temporalio::Exception::Cancelled->new(
+                    message => 'Nexus operation cancelled (workflow cancelled)',
+                ));
+            }
         }
 
         return $start_future;
@@ -2193,113 +2206,188 @@ class Temporalio::Workflow::Runner {
         # Propagate the cancellation down the tree (spec section 10.3 cancel
         # chain / T-act-9; MUST-match sdk-python _apply_cancel_workflow ->
         # primary task cancel -> the await in each child op raises CancelledError
-        # and its handle emits the per-op cancel command). Cancel every pending
-        # activity Future via its own cancel hook: that emits RequestCancelActivity
-        # (so core forwards the cancel to the running activity — unless the
-        # activity is ABANDON-typed, which never asks core to cancel) and then
-        # fails the Future with Cancelled, so the awaiting body raises a proper
-        # Temporal cancellation (a natively-cancelled Future would surface a bare
-        # "was cancelled" string, losing the exception identity). Timer Futures
-        # carry the analogous override (emit CancelTimer + fail Cancelled).
-        # Continuations run synchronously at resolve time, so the body observes
-        # the cancellation before _pump/_build_completion.
-        # Backing-off local activities (spec section 21.2 / T-local-13) are NOT
-        # in %pending_activities — their state is stashed on a backoff timer
-        # while parked. Cancel each pending backoff timer (CancelTimer, dropping
-        # its re-schedule) and fail the LA's outer future Cancelled. Do this
-        # before the generic timer loop so the re-schedule on_done never fires.
-        for my $tseq (keys %local_activity_backoff_timers) {
-            my $info  = delete $local_activity_backoff_timers{$tseq};
-            my $timer = $pending_timers{$tseq};
-            $timer->cancel if defined $timer && !$timer->is_ready;
-            my $la_future = $info->{state}{future};
-            if (defined $la_future && !$la_future->is_ready) {
-                $la_future->fail(Temporalio::Exception::Cancelled->new(
-                    message => 'Local activity cancelled (workflow cancelled)',
+        # and its handle emits the per-op cancel command). Every pending map is
+        # swept from the ONE list below (findings R4/R4b/R4c) so a map cannot be
+        # missed the way %pending_external_signals / %pending_external_cancels
+        # were (R4c). Each list entry pairs a SNAPSHOT of the map's current
+        # entries with that map's cancel action, and every snapshot is taken
+        # when the list is built — before any sweep runs. That ordering is the
+        # deliver-cancellation-then-continue mechanism (R4 / spec R8, Python
+        # parity): failing a pending Future resumes the awaiting frame
+        # synchronously, and a body that catches the Cancelled may immediately
+        # schedule NEW post-cancel cleanup work into any of these maps. Only
+        # entries pending at the moment the cancel arrived are swept; the
+        # post-cancel work survives every remaining sweep (and the guarded
+        # main-run-future fallback below) and runs to completion.
+        my @sweeps = (
+            # Backing-off local activities (spec section 21.2 / T-local-13) are
+            # NOT in %pending_activities — their state is stashed on a backoff
+            # timer while parked. Cancel each pending backoff timer
+            # (CancelTimer, dropping its re-schedule) and fail the LA's outer
+            # future Cancelled. Listed before the generic timer sweep so the
+            # re-schedule on_done never fires (the timer sweep then sees the
+            # backoff timer already ready and skips it).
+            [ [keys %local_activity_backoff_timers] => sub ($tseq) {
+                my $info  = delete $local_activity_backoff_timers{$tseq};
+                my $timer = $pending_timers{$tseq};
+                $timer->cancel if defined $timer && !$timer->is_ready;
+                my $la_future = $info->{state}{future};
+                if (defined $la_future && !$la_future->is_ready) {
+                    $la_future->fail(Temporalio::Exception::Cancelled->new(
+                        message => 'Local activity cancelled (workflow cancelled)',
+                    ));
+                }
+            } ],
+            # Cancel every pending activity Future via its own cancel hook:
+            # that emits RequestCancelActivity (so core forwards the cancel to
+            # the running activity — unless the activity is ABANDON-typed,
+            # which never asks core to cancel) and then fails the Future with
+            # Cancelled, so the awaiting body raises a proper Temporal
+            # cancellation (a natively-cancelled Future would surface a bare
+            # "was cancelled" string, losing the exception identity).
+            # Continuations run synchronously at resolve time, so the body
+            # observes the cancellation before _pump/_build_completion.
+            [ [keys %pending_activities] => sub ($seq) {
+                my $future = $pending_activities{$seq};
+                return if !defined $future || $future->is_ready;
+                # A local-activity future's whole-workflow cancel always raises
+                # (the primary-task cancel does not honour
+                # wait_cancellation_completed), so use _force_cancel rather
+                # than the wait-honouring ->cancel.
+                if ($future->isa('Temporalio::Workflow::Runner::_LocalActivityFuture')) {
+                    $future->_force_cancel;
+                }
+                else {
+                    $future->cancel;
+                }
+            } ],
+            # Timer Futures carry the analogous override (emit CancelTimer +
+            # fail Cancelled).
+            [ [keys %pending_timers] => sub ($seq) {
+                my $future = $pending_timers{$seq};
+                $future->cancel if defined $future && !$future->is_ready;
+            } ],
+            # Child workflows join the cancel chain (spec section 18.2 /
+            # T-child-11): each pending child handle is cancelled (emitting
+            # CancelChildWorkflowExecution unless abandon) AND its pending
+            # start/result awaits are failed with Cancelled so the awaiting
+            # body observes the cancellation in this activation (mirrors
+            # T-act-9 for activities). Unlike an explicit $handle->cancel —
+            # which honours the wait_* cancellation_type and may stay parked —
+            # the primary-task cancel always raises at the await. The handle's
+            # cancel de-registers the seq, hence the snapshot.
+            [ [keys %pending_child_workflows] => sub ($seq) {
+                my $handle = $pending_child_workflows{$seq} // return;
+                $handle->cancel;   # emit the cancel command (honours abandon).
+                delete $pending_child_workflows{$seq};
+                for my $f ($handle->start_future, $handle->result_future) {
+                    next if $f->is_ready;
+                    $f->fail(Temporalio::Exception::Cancelled->new(
+                        message => 'Child workflow cancelled (workflow cancelled)',
+                    ));
+                }
+            } ],
+            # Nexus operations join the cancel chain (spec section 26.3)
+            # exactly as child workflows above: cancel the handle (emitting
+            # RequestCancelNexusOperation unless abandon), then fail its
+            # pending start/result awaits with Cancelled.
+            [ [keys %pending_nexus_operations] => sub ($seq) {
+                my $handle = $pending_nexus_operations{$seq} // return;
+                $handle->cancel;   # emit the cancel command (honours abandon).
+                delete $pending_nexus_operations{$seq};
+                for my $f ($handle->start_future, $handle->result_future) {
+                    next if $f->is_ready;
+                    $f->fail(Temporalio::Exception::Cancelled->new(
+                        message => 'Nexus operation cancelled (workflow cancelled)',
+                    ));
+                }
+            } ],
+            # External-signal and external-cancel acknowledgement Futures join
+            # the cancel chain (finding R4c / spec R10): a body parked on
+            # signal_external_workflow_execution or on a
+            # request_cancel_external_workflow_execution acknowledgement must
+            # observe Cancelled exactly as the activity/timer/child maps
+            # deliver it. Fail (never natively cancel) each pending Future so
+            # the awaiting frame raises a throwable
+            # Temporalio::Exception::Cancelled; the seq stays mapped so a late
+            # Resolve* from core is dropped cleanly by the is_ready guard (the
+            # spec section 20.2 in-flight-cancel convention).
+            [ [keys %pending_external_signals] => sub ($seq) {
+                my $future = $pending_external_signals{$seq};
+                return if !defined $future || $future->is_ready;
+                $future->fail(Temporalio::Exception::Cancelled->new(
+                    message => 'External signal cancelled (workflow cancelled)',
                 ));
-            }
-        }
-        for my $seq (keys %pending_activities) {
-            my $future = $pending_activities{$seq};
-            next if !defined $future || $future->is_ready;
-            # A local-activity future's whole-workflow cancel always raises (the
-            # primary-task cancel does not honour wait_cancellation_completed),
-            # so use _force_cancel rather than the wait-honouring ->cancel.
-            if ($future->isa('Temporalio::Workflow::Runner::_LocalActivityFuture')) {
-                $future->_force_cancel;
-            }
-            else {
+            } ],
+            [ [keys %pending_external_cancels] => sub ($seq) {
+                my $future = $pending_external_cancels{$seq};
+                return if !defined $future || $future->is_ready;
+                $future->fail(Temporalio::Exception::Cancelled->new(
+                    message => 'External cancel request cancelled (workflow cancelled)',
+                ));
+            } ],
+            # wait_condition awaitables join the cancel chain (#5, #8). The
+            # :Run body parked on a never-true wait_condition — and any
+            # in-flight :Update / :Signal handler parked on its own
+            # wait_condition — must raise a throwable
+            # Temporalio::Exception::Cancelled, NOT a native Future cancel.
+            # Each entry's future is a _ConditionFuture whose ->cancel fails it
+            # Cancelled (and drops any racing wait timer); the awaiting frame
+            # then resumes synchronously and propagates Cancelled, so the :Run
+            # body unwinds to CancelWorkflowExecution and a mid-update handler
+            # settles cleanly rather than leaking a raw cancelled Future that
+            # hangs the workflow task. The snapshot matters here too: a
+            # satisfied/cancelled entry is dropped from @conditions by the next
+            # _check_conditions pass, and the resuming continuation may mutate
+            # @conditions. Swept BEFORE the main_run_future fallback so the
+            # body has already unwound by the time the fallback runs (it then
+            # no-ops).
+            [ [map { $_->{future} } @conditions] => sub ($future) {
+                return if !defined $future || $future->is_ready;
                 $future->cancel;
-            }
-        }
-        for my $seq (keys %pending_timers) {
-            my $future = $pending_timers{$seq};
-            $future->cancel if defined $future && !$future->is_ready;
-        }
-        # Child workflows join the cancel chain (spec section 18.2 / T-child-11):
-        # a whole-workflow CancelWorkflow cancels the primary task, so each
-        # pending child handle is cancelled (emitting CancelChildWorkflowExecution
-        # unless abandon) AND its pending start/result awaits are failed with
-        # Cancelled so the awaiting body observes the cancellation in this
-        # activation (mirrors T-act-9 for activities). Unlike an explicit
-        # $handle->cancel — which honours the wait_* cancellation_type and may
-        # stay parked — the primary-task cancel always raises at the await. The
-        # handle's cancel de-registers the seq, so snapshot the keys first.
-        for my $seq (keys %pending_child_workflows) {
-            my $handle = $pending_child_workflows{$seq} // next;
-            $handle->cancel;   # emit the cancel command (honours abandon).
-            delete $pending_child_workflows{$seq};
-            for my $f ($handle->start_future, $handle->result_future) {
-                next if $f->is_ready;
-                $f->fail(Temporalio::Exception::Cancelled->new(
-                    message => 'Child workflow cancelled (workflow cancelled)',
-                ));
-            }
-        }
-        # Nexus operations join the cancel chain (spec section 26.3): a
-        # whole-workflow CancelWorkflow cancels the primary task, so each pending
-        # nexus handle is cancelled (emitting RequestCancelNexusOperation unless
-        # abandon) AND its pending start/result awaits are failed with Cancelled
-        # so the awaiting body observes the cancellation in this activation —
-        # unlike an explicit $handle->cancel, which honours the wait_*
-        # cancellation_type and may stay parked. The handle's cancel de-registers
-        # the seq, so snapshot the keys first.
-        for my $seq (keys %pending_nexus_operations) {
-            my $handle = $pending_nexus_operations{$seq} // next;
-            $handle->cancel;   # emit the cancel command (honours abandon).
-            delete $pending_nexus_operations{$seq};
-            for my $f ($handle->start_future, $handle->result_future) {
-                next if $f->is_ready;
-                $f->fail(Temporalio::Exception::Cancelled->new(
-                    message => 'Nexus operation cancelled (workflow cancelled)',
-                ));
-            }
-        }
-        # wait_condition awaitables join the cancel chain (#5, #8). The :Run body
-        # parked on a never-true wait_condition — and any in-flight :Update /
-        # :Signal handler parked on its own wait_condition — must raise a
-        # throwable Temporalio::Exception::Cancelled, NOT a native Future cancel.
-        # Each entry's future is a _ConditionFuture whose ->cancel fails it
-        # Cancelled (and drops any racing wait timer); the awaiting frame then
-        # resumes synchronously and propagates Cancelled, so the :Run body unwinds
-        # to CancelWorkflowExecution and a mid-update handler settles cleanly
-        # rather than leaking a raw cancelled Future that hangs the workflow task.
-        # Snapshot first: a satisfied/cancelled entry is dropped from @conditions
-        # by the next _check_conditions pass, and the resuming continuation may
-        # mutate @conditions. Done BEFORE the main_run_future fallback so the body
-        # has already unwound by the time the fallback runs (it then no-ops).
-        for my $cond (@{[ @conditions ]}) {
-            my $future = $cond->{future};
-            next if !defined $future || $future->is_ready;
-            $future->cancel;
+            } ],
+        );
+        for my $sweep (@sweeps) {
+            my ($entries, $action) = @$sweep;
+            $action->($_) for @$entries;
         }
         # Fallback: cancel the main run Future in case the body parked on
         # something other than a tracked pending Future / wait_condition. A no-op
-        # once the body already unwound (Cancelled) above.
-        if (defined $main_run_future && !$main_run_future->is_ready) {
+        # once the body already unwound (Cancelled) above. Guarded (finding R4 /
+        # spec R8): every pre-cancel pending entry was just swept, so any LIVE
+        # tracked Future remaining here is NEW post-cancel work scheduled by a
+        # body (or handler) that caught the Cancelled — cancelling the main run
+        # Future then would fail the run mid-await and the later resolution
+        # would die "already failed and cannot be ->done". Cancellation was
+        # delivered once at the awaited point; post-cancel cleanup work runs to
+        # completion (Python parity).
+        if (defined $main_run_future && !$main_run_future->is_ready
+            && !$self->_live_pending_futures)
+        {
             $main_run_future->cancel;
         }
         return;
+    }
+
+    # Every not-yet-ready Future in the tracked pending maps, enumerated from
+    # ONE list so the _apply_cancel_workflow fallback guard cannot drift from
+    # the sweep above (findings R4/R4b/R4c): activities (local activities
+    # included, plus parked backoff state), timers, child-workflow and nexus
+    # handles (start + result), external signals, external cancels, and
+    # wait_condition entries.
+    method _live_pending_futures {
+        return grep { defined($_) && !$_->is_ready } (
+            values %pending_activities,
+            values %pending_timers,
+            (map { $_->{state}{future} } values %local_activity_backoff_timers),
+            (map { ($_->start_future, $_->result_future) }
+                values %pending_child_workflows),
+            (map { ($_->start_future, $_->result_future) }
+                values %pending_nexus_operations),
+            values %pending_external_signals,
+            values %pending_external_cancels,
+            (map { $_->{future} } @conditions),
+        );
     }
 
     # UpdateRandomSeed { randomness_seed } — re-seed the deterministic RNG (spec
@@ -2857,6 +2945,19 @@ class Temporalio::Workflow::Runner {
         if (defined $main_run_future && $main_run_future->is_ready) {
             if (my @failure = $main_run_future->failure) {
                 return $self->_outcome_for_failure($failure[0]);
+            }
+            # A NATIVELY-cancelled run Future (finding R4b / spec R9): the
+            # _apply_cancel_workflow fallback ->cancel'd a run Future whose
+            # class has no Cancelled-failure override (the body's first await
+            # was a plain Future, so the AWAIT_CLONEd run Future is one too).
+            # Route it through the outcome table as a Cancelled failure so a
+            # cancel-requested run maps to CancelWorkflowExecution — never to
+            # the ->result croak the success branch below would raise.
+            if ($main_run_future->is_cancelled) {
+                return $self->_outcome_for_failure(
+                    Temporalio::Exception::Cancelled->new(
+                        message => 'Workflow cancelled',
+                    ));
             }
             # WARN-AND-COMPLETE (spec section 19.2, corrected v0.2.1): when :Run
             # returns with a signal/update handler still in-flight, WARN and

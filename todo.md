@@ -83,12 +83,12 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P4: Post-Cancel Corruption Cluster
 
 ### Step R8-R10: Post-Cancel Corruption Cluster
-- [ ] R8-R10.1a RED: t/replay/repro_post_cancel_cleanup.t (R4) reproduces the "already failed and cannot be ->done" death
-- [ ] R8-R10.1b RED: t/replay/repro_cancel_plain_future.t (R4b) reproduces the ->result croak / missing completion
-- [ ] R8-R10.1c RED: t/replay/repro_cancel_ext_signal.t (R4c) reproduces the die in push_activation for the external-signal and external-cancel maps
-- [ ] R8-R10.2 GREEN: fallback stops failing a live body (Runner :2276-2278/:3297-3306); discriminate cancelled in _build_completion :2851; sweep external maps in _apply_cancel_workflow :2188-2278
-- [ ] R8-R10.3 REFACTOR: unify the per-map sweep from one list; comment citing R4/R4b/R4c
-- [ ] R8-R10.4 Verify: cleanup command completes, CancelWorkflowExecution outcome produced, external maps observe Cancelled; prove -lj4 t green under the memory guard
+- [x] R8-R10.1a RED: t/replay/repro_post_cancel_cleanup.t (R4) reproduces the "already failed and cannot be ->done" death
+- [x] R8-R10.1b RED: t/replay/repro_cancel_plain_future.t (R4b) reproduces the ->result croak / missing completion
+- [x] R8-R10.1c RED: t/replay/repro_cancel_ext_signal.t (R4c) reproduces the die in push_activation for the external-signal and external-cancel maps
+- [x] R8-R10.2 GREEN: fallback stops failing a live body (Runner :2276-2278/:3297-3306); discriminate cancelled in _build_completion :2851; sweep external maps in _apply_cancel_workflow :2188-2278
+- [x] R8-R10.3 REFACTOR: unify the per-map sweep from one list; comment citing R4/R4b/R4c
+- [x] R8-R10.4 Verify: cleanup command completes, CancelWorkflowExecution outcome produced, external maps observe Cancelled; prove -lj4 t green under the memory guard
 
 ### Step R11: Always Send a Completion for a Failed Activation
 - [ ] R11.1 RED: t/replay/failed_activation_completion.t (pending-future :Query) and subprocess-guarded t/integration/failed_activation_no_wedge.t assert a failed completion, not a die/wedge
