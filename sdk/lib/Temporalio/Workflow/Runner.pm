@@ -29,6 +29,7 @@ use Temporalio::Exception::Timeout ();
 use Temporalio::Exception::Nondeterminism ();
 use Temporalio::Exception::Workflow::NoRunner ();
 use Temporalio::Exception::Argument ();
+use Temporalio::Exception::ReadOnly ();
 use Temporalio::Exception::NexusOperation ();
 use Temporalio::Common::SearchAttributeUpdate ();
 use Temporalio::Worker::Interceptor ();          # build_workflow_inbound + Input::*
@@ -299,10 +300,11 @@ class Temporalio::Workflow::Runner {
     # the outcome decision table as a task failure. Only the first is kept.
     field $current_activation_error;
 
-    # Read-only guard depth (spec section 19.2 / sdk-python _as_read_only):
-    # while > 0 the runner is executing a synchronous read-only block (an update
-    # validator), so any command-emitting call (_emit_command) MUST throw rather
-    # than buffer a command. A counter (not a bool) so nesting is safe.
+    # Read-only guard depth (spec section 19.2 + step R24 / sdk-python
+    # _as_read_only): while > 0 the runner is executing a synchronous read-only
+    # block (an update validator or a :Query handler), so any command-emitting
+    # call MUST throw Temporalio::Exception::ReadOnly (via _assert_writable)
+    # rather than buffer a command. A counter (not a bool) so nesting is safe.
     field $read_only_depth = 0;
 
     # Durable-scheduler suppression depth (spec section 27.4 /
@@ -431,6 +433,10 @@ class Temporalio::Workflow::Runner {
     # the server notified it (it was present in history). Emitting the marker
     # tells the server this run took the patched branch.
     method patched ($patch_id, %opts) {
+        # Before the memoization check, so a read-only caller cannot mutate
+        # %patches_memoized (step R24, finding R8; sdk-python asserts at the
+        # head of workflow_patch).
+        $self->_assert_writable('patched');
         my $deprecated = $opts{deprecated} ? 1 : 0;
 
         # A previously-memoized answer wins (even when deprecating, we keep the
@@ -989,6 +995,10 @@ class Temporalio::Workflow::Runner {
     # _register_pending_external_signal (finding R10). Returns the Future the
     # $handle->signal caller awaits.
     method _signal_child_workflow ($handle, $name, %opts) {
+        # Step R24 (finding R8): before the seq allocation, so a read-only
+        # caller leaves no gap in the seq space (sdk-python "signal child
+        # handle").
+        $self->_assert_writable('signal child workflow handle');
         my $seq = ++$external_signal_seq_counter;
 
         my @args = map { $payload_converter->to_payload($_) }
@@ -1075,6 +1085,9 @@ class Temporalio::Workflow::Runner {
     # cancellation; MUST-match sdk-python asyncio.shield +
     # cancel_signal_workflow). Returns the Future the $handle->signal caller awaits.
     method _signal_external_workflow ($workflow_id, $run_id, $name, %opts) {
+        # Step R24 (finding R8): before the seq allocation (sdk-python "signal
+        # external handle").
+        $self->_assert_writable('signal external workflow handle');
         my $seq = ++$external_signal_seq_counter;
 
         my @args = map { $payload_converter->to_payload($_) }
@@ -1114,6 +1127,9 @@ class Temporalio::Workflow::Runner {
     # on_cancel hook is installed. Returns the Future the $handle->cancel caller
     # awaits.
     method _request_cancel_external_workflow ($workflow_id, $run_id, %opts) {
+        # Step R24 (finding R8): before the seq allocation (sdk-python "cancel
+        # external handle").
+        $self->_assert_writable('cancel external workflow handle');
         my $seq = ++$external_cancel_seq_counter;
 
         my %fields = (
@@ -2806,16 +2822,34 @@ class Temporalio::Workflow::Runner {
     # A read-only violation (the validator issued a command) is routed as a
     # workflow TASK failure via $current_activation_error.
     method _run_update_validator ($validator, $args) {
+        my $commands_before = scalar @commands;
         my $future = Future->call(sub {
             dynamically $read_only_depth = $read_only_depth + 1;
             return Future->wrap($instance->$validator(@$args));
         });
+        # Leak backstop (step R24 REFACTOR, finding R8; mirrors
+        # _apply_query_workflow): commands buffered by an unguarded API inside
+        # the read-only scope are stripped, and a validator that leaked without
+        # dying is routed as the same task failure the guard would have raised.
+        my $leaked = scalar(@commands) - $commands_before;
+        if ($leaked > 0) {
+            splice @commands, $commands_before, $leaked;
+            if (!$future->failure) {
+                $current_activation_error //= Temporalio::Exception::ReadOnly->new(
+                    message => "Temporalio::Workflow::Runner: update validator "
+                             . "emitted $leaked command(s) from a read-only "
+                             . "context (unguarded API; add _assert_writable "
+                             . "at its head)",
+                );
+                return { task_failure => 1 };
+            }
+        }
         if (my @failure = $future->failure) {
             my $err = $failure[0];
-            # A read-only-context violation is a task failure, NOT a rejection.
+            # A read-only-context violation is a task failure, NOT a rejection
+            # (typed check, step R24; formerly a fragile message-regex match).
             if (Scalar::Util::blessed($err)
-                && $err->isa('Temporalio::Exception')
-                && ($err->message // '') =~ /read-only context/)
+                && $err->isa('Temporalio::Exception::ReadOnly'))
             {
                 $current_activation_error //= $err;
                 return { task_failure => 1 };
@@ -2948,7 +2982,16 @@ class Temporalio::Workflow::Runner {
         # Route through the workflow-inbound chain so every inbound handle_query
         # is invoked (outermost first) before the real handler (#10). The root
         # reads the real handler from the input's `_root` coderef.
+        #
+        # The handler runs under the read-only guard (step R24, finding R8;
+        # MUST-match sdk-python _apply_query_workflow's _as_read_only): any
+        # command-emitting API dies with Temporalio::Exception::ReadOnly, which
+        # the failed-query branch below converts into a RespondToQuery FAILED
+        # response (Python catches it like any other query death). The
+        # command-count snapshot backs the leak backstop after the scope exits.
+        my $commands_before = scalar @commands;
         my $future = Future->call(sub {
+            dynamically $read_only_depth = $read_only_depth + 1;
             my $input =
                 Temporalio::Worker::Interceptor::Input::HandleQuery->new(
                     id    => $query_id,
@@ -2962,6 +3005,34 @@ class Temporalio::Workflow::Runner {
                 );
             return Future->wrap($workflow_inbound->handle_query($input));
         });
+
+        # Leak backstop (step R24 REFACTOR, finding R8): a command-emitting API
+        # that forgot its head _assert_writable would have pushed commands from
+        # inside the read-only scope without dying. Strip anything the handler
+        # buffered so it never reaches the completion; if the handler otherwise
+        # succeeded, fail the query with the same typed read-only error the
+        # guard would have raised. New APIs therefore inherit the guard even
+        # without a per-site assert.
+        my $leaked = scalar(@commands) - $commands_before;
+        if ($leaked > 0) {
+            splice @commands, $commands_before, $leaked;
+            if (!$future->failure) {
+                push @commands, Temporalio::Workflow::Commands::respond_to_query(
+                    $query_id,
+                    failure => $failure_converter->to_failure(
+                        Temporalio::Exception::ReadOnly->new(
+                            message =>
+                                "Temporalio::Workflow::Runner: query handler "
+                              . "'$name' emitted $leaked command(s) from a "
+                              . "read-only context (unguarded API; add "
+                              . "_assert_writable at its head)",
+                        ),
+                        $payload_converter,
+                    ),
+                );
+                return;
+            }
+        }
 
         if (my @failure = $future->failure) {
             # Dying handler -> query FAILED response (not a workflow/task fail).
@@ -3009,18 +3080,29 @@ class Temporalio::Workflow::Runner {
     # when :Run returns with a handler still in-flight (warn-and-complete).
     method _all_handlers_finished { return %in_progress_handlers ? 0 : 1 }
 
-    # Assert the runner is NOT inside a read-only block (spec section 19.2): an
-    # update validator must not issue commands or mutate workflow state. Called
-    # at the head of every command-emitting runner method; inside a validator it
-    # throws a ReadOnlyContext error that _apply_do_update routes to a workflow
-    # TASK failure (NOT an update rejection). MUST-match sdk-python
-    # _as_read_only / ReadOnlyContextError.
+    # Assert the runner is NOT inside a read-only block (spec section 19.2 /
+    # step R24, finding R8): neither an update validator nor a :Query handler
+    # may issue commands or mutate workflow state. Called at the head of every
+    # command-emitting runner method, BEFORE any side effect (seq allocation,
+    # memoization, pending-map registration), so a violation leaves no stale
+    # state behind. The guarded surface (the R24 table; MUST-match sdk-python
+    # _assert_not_read_only call sites):
+    #   schedule_activity, schedule_local_activity, start_child_workflow,
+    #   _signal_child_workflow, _signal_external_workflow,
+    #   _request_cancel_external_workflow, start_nexus_operation, start_timer,
+    #   upsert_search_attributes, upsert_memo, patched.
+    # A new command-emitting API MUST call this at its head; the command-leak
+    # backstop in _apply_query_workflow / _run_update_validator catches one
+    # that forgets. Inside a validator the throw is routed by _apply_do_update
+    # to a workflow TASK failure (NOT an update rejection); inside a query it
+    # becomes a failed query response. MUST-match sdk-python _as_read_only /
+    # ReadOnlyContextError.
     method _assert_writable ($what) {
         return if $read_only_depth <= 0;
-        die Temporalio::Exception->new(
-            message => "Temporalio::Workflow::Runner: $what is not allowed in a "
-                     . "read-only context (update validator must not mutate "
-                     . "state or issue commands)",
+        die Temporalio::Exception::ReadOnly->new(
+            message => "Temporalio::Workflow::Runner: while in a read-only "
+                     . "context (query handler or update validator), action "
+                     . "attempted: $what",
         );
     }
 

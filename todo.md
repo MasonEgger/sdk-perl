@@ -147,10 +147,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R23+R50.4 Verify: both classes' second-consumer-observes assertions pass; prove -lj4 t and xt green
 
 ### Step R24: Enforce Read-Only Context and Writability Asserts Uniformly
-- [ ] R24.1 RED: replay query_readonly.t table-drives the four bypassing APIs raising the typed read-only error in query context; unchanged in writable context
-- [ ] R24.2 GREEN: add _assert_writable at the four sites and run query handlers in a read-only context that raises on command emission
-- [ ] R24.3 REFACTOR: table-drive the guard so new APIs inherit it; cite R8 + Python read-only parity
-- [ ] R24.4 Verify: each API raises in query context and works in writable context; prove -lj4 t green
+- [x] R24.1 RED: replay query_readonly.t table-drives the four bypassing APIs raising the typed read-only error in query context; unchanged in writable context
+- [x] R24.2 GREEN: add _assert_writable at the four sites and run query handlers in a read-only context that raises on command emission
+- [x] R24.3 REFACTOR: table-drive the guard so new APIs inherit it; cite R8 + Python read-only parity
+- [x] R24.4 Verify: each API raises in query context and works in writable context; prove -lj4 t green
 
 ### Step R20: Isolate Exceptions Per Entry in the Callback Drain Loop
 - [ ] R20.1 RED: unit callback.t enqueues a chunk with a dying middle entry; asserts later entries still run and the death is captured
