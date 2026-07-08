@@ -6,6 +6,8 @@ use v5.38;
 use warnings;
 use feature 'class';
 no warnings 'experimental::class';
+use feature 'try';
+no warnings 'experimental::try';
 
 use Future ();
 use Future::AsyncAwait;
@@ -96,7 +98,14 @@ class Temporalio::Worker::WorkflowDispatcher {
     # Decode the activation, take the RemoveFromCache fast path when it is the
     # only/last job, else codec-decode the inbound payloads, route by run_id to a
     # (created-or-cached) Runner, process the activation, codec-encode the
-    # outbound payloads, and send the completion.
+    # outbound payloads, and send the completion. Activation processing runs
+    # under a catch-all (spec R11, finding R5): the completion contract with
+    # core is one completion per activation, so ANY die on the way to a
+    # completion — codec decode, runner creation (unregistered type, missing
+    # init job), the Runner itself — maps to a FAILED completion that is still
+    # sent, never an escaped die the poll loop would have to swallow (which
+    # left the workflow task uncompleted and the workflow wedged until timeout).
+    # MUST-match sdk-python _handle_activation's catch-all except branch.
     async method dispatch_task ($activation_bytes) {
         my $activation = $WorkflowActivation->decode($activation_bytes);
         my $run_id     = $activation->run_id;
@@ -112,30 +121,92 @@ class Temporalio::Worker::WorkflowDispatcher {
             return await $self->_handle_eviction($run_id);
         }
 
-        # Step 5 — codec-decode every inbound payload at the worker boundary so
-        # the Runner only ever sees decoded payloads.
-        await $self->_codec_decode_activation($activation);
+        my $completion;
+        try {
+            # Step 5 — codec-decode every inbound payload at the worker boundary
+            # so the Runner only ever sees decoded payloads.
+            await $self->_codec_decode_activation($activation);
 
-        # Step 6 — route by run_id; create a Runner on the first activation for a
-        # run (which must carry an InitializeWorkflow job).
-        my $runner = $self->_runner_for($run_id, $activation);
+            # Step 6 — route by run_id; create a Runner on the first activation
+            # for a run (which must carry an InitializeWorkflow job).
+            my $runner = $self->_runner_for($run_id, $activation);
 
-        # Step 7 — process the activation (synchronous from the loop's view: the
-        # Runner applies all jobs and pumps to a completion). The Runner builds
-        # the completion from nested hashrefs, so round-trip it through
-        # encode/decode to bless every sub-message (Success, each WorkflowCommand,
-        # its payloads) before walking it for the codec boundary — mirrors the
-        # replay harness, and matches how core hands bytes back.
-        my $completion = $runner->process_activation($activation);
-        $completion = $Completion->decode($completion->encode);
-        $completion->set_run_id($run_id) if $completion->run_id ne $run_id;
+            # Step 7 — process the activation (synchronous from the loop's
+            # view: the Runner applies all jobs and pumps to a completion). The
+            # Runner builds the completion from nested hashrefs, so round-trip
+            # it through encode/decode to bless every sub-message (Success, each
+            # WorkflowCommand, its payloads) before walking it for the codec
+            # boundary — mirrors the replay harness, and matches how core hands
+            # bytes back.
+            $completion = $runner->process_activation($activation);
+            $completion = $Completion->decode($completion->encode);
+            $completion->set_run_id($run_id) if $completion->run_id ne $run_id;
+        }
+        catch ($err) {
+            $completion = $self->_failed_completion_for($run_id, $err);
+        }
 
-        # Step 8 — codec-encode every outbound payload.
-        await $self->_codec_encode_completion($completion);
+        # Step 8 — codec-encode every outbound payload (success or failure
+        # content both cross the codec boundary). Guarded so an encode die still
+        # honors the completion contract (sdk-python parity: the completion is
+        # replaced with a bare failed one, never dropped).
+        try {
+            await $self->_codec_encode_completion($completion);
+        }
+        catch ($err) {
+            $completion = $Completion->decode($Completion->new({
+                run_id => $run_id,
+                failed => {
+                    failure => { message => "Failed encoding completion: $err" },
+                },
+            })->encode);
+        }
 
         # Step 9 — send the completion bytes.
         await $self->_send($completion);
         return;
+    }
+
+    # Map a die that escaped activation processing to the completion the core
+    # contract requires (spec R11, finding R5; MUST-match sdk-python
+    # _handle_activation). A NON-RETRYABLE ApplicationError fails the WORKFLOW
+    # terminally (a successful completion whose sole command is
+    # FailWorkflowExecution); anything else fails the workflow TASK (the
+    # `failed` status, which the server retries). Failure conversion is itself
+    # guarded (sdk-python "Failed converting activation exception") so a
+    # converter die can never re-escape and break the contract.
+    method _failed_completion_for ($run_id, $err) {
+        my $failure;
+        {
+            local $@;
+            $failure = eval {
+                $data_converter->failure_converter->to_failure(
+                    $err, $data_converter->payload_converter);
+            };
+            $failure //=
+                { message => "Failed converting activation exception: $@" };
+        }
+
+        my $completion;
+        if (Scalar::Util::blessed($err)
+            && $err->isa('Temporalio::Exception::Application')
+            && $err->non_retryable)
+        {
+            $completion = $Completion->new({
+                run_id     => $run_id,
+                successful => { commands => [
+                    { fail_workflow_execution => { failure => $failure } },
+                ] },
+            });
+        }
+        else {
+            $completion = $Completion->new({
+                run_id => $run_id,
+                failed => { failure => $failure },
+            });
+        }
+        # Round-trip so every sub-message is blessed for the codec walker.
+        return $Completion->decode($completion->encode);
     }
 
     # Eviction fast path (spec section 8.3 step 4 / 10.3 RemoveFromCache): tear
@@ -388,6 +459,18 @@ activation for a run (which must carry an C<InitializeWorkflow> job) creates the
 Runner from the job's C<workflow_type> via the
 L<Temporalio::Worker::WorkflowRegistry>, and it is cached for the life of the
 run. A cache miss with no init job raises L<Temporalio::Exception::Bridge>.
+
+=item *
+
+B<Failure catch-all.> The completion contract with core is one completion per
+activation (spec R11, finding R5): any die on the way to a completion — codec
+decode, runner creation (unregistered type, missing init job), or a die
+escaping the Runner — maps to a B<failed> completion that is still sent
+(sdk-python C<_handle_activation> parity). A non-retryable
+L<Temporalio::Exception::Application> fails the workflow terminally instead
+(a C<FailWorkflowExecution> command); a codec-encode die replaces the
+completion with a bare failed one. C<dispatch_task> therefore only fails when
+the completion cannot be B<sent>.
 
 =back
 

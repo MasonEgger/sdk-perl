@@ -91,10 +91,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R8-R10.4 Verify: cleanup command completes, CancelWorkflowExecution outcome produced, external maps observe Cancelled; prove -lj4 t green under the memory guard
 
 ### Step R11: Always Send a Completion for a Failed Activation
-- [ ] R11.1 RED: t/replay/failed_activation_completion.t (pending-future :Query) and subprocess-guarded t/integration/failed_activation_no_wedge.t assert a failed completion, not a die/wedge
-- [ ] R11.2 GREEN: catch-all in Worker/WorkflowDispatcher.pm:89-128 mapping die to failed completion; stop the warn-and-swallow in Worker/PollLoop.pm:46-50
-- [ ] R11.3 REFACTOR: centralize the die-to-failed-completion mapping for the Runner.pm trigger sites; comment citing R5
-- [ ] R11.4 Verify: failed-completion and no-wedge assertions map; prove -lj4 t green under the memory guard
+- [x] R11.1 RED: t/replay/failed_activation_completion.t (pending-future :Query) and subprocess-guarded t/integration/failed_activation_no_wedge.t assert a failed completion, not a die/wedge
+- [x] R11.2 GREEN: catch-all in Worker/WorkflowDispatcher.pm:89-128 mapping die to failed completion; stop the warn-and-swallow in Worker/PollLoop.pm:46-50
+- [x] R11.3 REFACTOR: centralize the die-to-failed-completion mapping for the Runner.pm trigger sites; comment citing R5
+- [x] R11.4 Verify: failed-completion and no-wedge assertions map; prove -lj4 t green under the memory guard
 
 ### Step R39: Add the Missing on_cancel Hook to Child-Workflow Signals
 - [ ] R39.1 RED: t/replay/child_signal_cancel.t asserts a cancelled pending child signal emits CancelSignalWorkflow (and no double-emit when resolved first)

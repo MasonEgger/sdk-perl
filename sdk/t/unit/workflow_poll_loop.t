@@ -223,6 +223,35 @@ T2->subtest('poll loop dispatches activations until the shutdown sentinel (T-wkr
         'each non-undef activation dispatched; loop returned on the sentinel');
 });
 
+T2->subtest('a failed dispatch fails run() — no warn-and-swallow (R11)' => sub {
+    # The dispatcher owns the die-to-failed-completion mapping (spec R11), so
+    # dispatch_task resolves even when task processing dies. A dispatch future
+    # that FAILS therefore means the completion contract with core was broken;
+    # the loop must surface that, never warn-and-swallow it (finding R5: the
+    # swallow left workflow tasks uncompleted and the workflow wedged).
+    my $stub = FailingDispatcherStub->new(error => 'completion contract broken');
+
+    my @queue = ('act-a', 'act-b', undef);
+    my $poll_source = sub { return Future->done(shift @queue) };
+
+    my $poll_loop = Temporalio::Worker::PollLoop->new(
+        dispatcher  => $stub,
+        poll_source => $poll_source,
+        loop        => $loop,
+    );
+
+    my @warnings;
+    my $run = do {
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+        $poll_loop->run;
+    };
+    T2->ok($run->is_ready, 'run settled (synchronous stub futures)');
+    T2->ok($run->is_failed, 'run() failed instead of swallowing the dispatch error');
+    T2->like(($run->failure)[0] // '', qr/completion contract broken/,
+        'the dispatch failure is the run failure');
+    T2->is(\@warnings, [], 'no warn-and-swallow');
+});
+
 T2->done_testing;
 
 # --- test doubles ---------------------------------------------------------
@@ -248,5 +277,13 @@ package DispatcherStub {
     sub dispatch_task ($self, $bytes) {
         push @{ $self->{log} }, $bytes;
         return Future->done;
+    }
+}
+
+package FailingDispatcherStub {
+    use Future ();
+    sub new ($class, %args) { return bless { error => $args{error} }, $class }
+    sub dispatch_task ($self, $bytes) {
+        return Future->fail($self->{error} . "\n");
     }
 }

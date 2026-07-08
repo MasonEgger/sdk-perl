@@ -5,6 +5,8 @@ use v5.38;
 use warnings;
 use feature 'class';
 no warnings 'experimental::class';
+use feature 'try';
+no warnings 'experimental::try';
 
 use Future ();
 use Scalar::Util ();
@@ -1516,22 +1518,38 @@ class Temporalio::Workflow::Runner {
         # buffer once the instance exists (T-wf-3 visibility).
         dynamically $Temporalio::Workflow::Runner::CURRENT = $self;
         my $set_index = -1;
-        for my $job_set ($self->_ordered_job_sets($activation)) {
-            $set_index++;
-            next unless @$job_set;
-            $self->_apply_job($_) for @$job_set;
-            # Re-check wait_condition predicates only after the signal set (1)
-            # and the non-query set (2) — NOT after patches (0) or queries (3).
-            # A query activation (incl. a standalone "legacy_query") must not
-            # advance the workflow: resuming a parked :Run there would emit a
-            # CompleteWorkflow alongside the QueryResult, which core rejects
-            # ("legacy query response along with other commands"). MUST-match
-            # sdk-python activate(): _run_once(check_conditions=index==1 or 2).
-            $self->_pump(check_conditions => ($set_index == 1 || $set_index == 2));
-        }
+        try {
+            for my $job_set ($self->_ordered_job_sets($activation)) {
+                $set_index++;
+                next unless @$job_set;
+                $self->_apply_job($_) for @$job_set;
+                # Re-check wait_condition predicates only after the signal set
+                # (1) and the non-query set (2) — NOT after patches (0) or
+                # queries (3). A query activation (incl. a standalone
+                # "legacy_query") must not advance the workflow: resuming a
+                # parked :Run there would emit a CompleteWorkflow alongside the
+                # QueryResult, which core rejects ("legacy query response along
+                # with other commands"). MUST-match sdk-python activate():
+                # _run_once(check_conditions=index==1 or 2).
+                $self->_pump(check_conditions => ($set_index == 1 || $set_index == 2));
+            }
 
-        # Steps 6-7: drain the command buffer into a completion proto.
-        return $self->_build_completion;
+            # Steps 6-7: drain the command buffer into a completion proto.
+            return $self->_build_completion;
+        }
+        catch ($err) {
+            # THE die-to-failed-completion funnel (spec R11, finding R5): any
+            # die that escapes job application, the pump, or the completion
+            # builder — e.g. a :Query handler returning a pending future, whose
+            # `->result` read croaks — maps to a failed workflow-TASK completion
+            # (the server retries the task), the same route the recorded
+            # $current_activation_error takes. Pre-fix the die escaped
+            # process_activation, the poll loop warned-and-swallowed it, and
+            # the workflow task was never completed: the workflow wedged until
+            # timeout, forever on each retry. The completion contract with core
+            # is one completion per activation, on every path.
+            return $self->_task_failed_completion($err);
+        }
     }
 
     # evict (spec section 10.3 RemoveFromCache): tear the runner down. Cancel
@@ -2804,6 +2822,9 @@ class Temporalio::Workflow::Runner {
             return;
         }
 
+        # A handler that returns a PENDING future croaks on this read (a query
+        # cannot wait); that die funnels to process_activation's catch (spec
+        # R11, finding R5) and fails the workflow TASK — never an escaped die.
         my $result = ($future->result)[0];
         my $payload = defined $result
             ? $payload_converter->to_payload($result)
@@ -3730,6 +3751,7 @@ Implements the C<patched>/C<deprecate_patch> logic against history, emitting pat
 =head2 process_activation
 
 Applies one workflow activation (its jobs) against the workflow instance and returns the resulting completion (its buffered commands).
+Never dies: any die that escapes job application or the completion builder is mapped to a workflow-B<task>-failure completion (spec R11, finding R5) — the completion contract with core is one completion per activation, on every path.
 
 =head2 random
 

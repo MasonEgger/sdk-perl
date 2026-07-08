@@ -36,23 +36,36 @@ class Temporalio::Worker::PollLoop {
     # shutdown mid-run returns once work drains; a never-started / already-empty
     # loop returns immediately).
     async method run () {
+        my $dispatch_error;
         while (1) {
             my $bytes = await $poll_source->();
             last unless defined $bytes;
             # Dispatch concurrently: a slow activity must not block polling the
-            # next task. Track the Future so shutdown can await it. A failed
-            # dispatch is logged, never fatal to the loop (spec section 8.4 —
-            # a dispatch error must not crash the worker).
-            my $f = $dispatcher->dispatch_task($bytes)
-                ->else(sub ($err, @) {
-                    warn "Temporalio::Worker::PollLoop: dispatch failed: $err\n";
-                    return Future->done;
-                });
-            push @in_flight, $f;
-            # Reap finished dispatches so the array does not grow unbounded.
+            # next task. Track the Future so shutdown can await it. The
+            # dispatcher owns the die-to-failed-completion mapping (spec R11,
+            # finding R5): dispatch_task resolves even when task processing
+            # dies, because a FAILED completion is built and sent instead. A
+            # dispatch Future that fails therefore means the completion
+            # contract with core was broken (e.g. the completion could not be
+            # sent at all) — that is surfaced by failing run(), never
+            # warned-and-swallowed (the swallow left workflow tasks
+            # uncompleted and the workflow wedged until timeout).
+            push @in_flight, $dispatcher->dispatch_task($bytes);
+            # Reap finished dispatches so the array does not grow unbounded,
+            # capturing the first failure before it is dropped.
+            for my $done (grep { $_->is_ready } @in_flight) {
+                $dispatch_error //= ($done->failure)[0] if $done->is_failed;
+            }
             @in_flight = grep { !$_->is_ready } @in_flight;
+            last if defined $dispatch_error;
         }
+        # Drain in-flight dispatches so pending completions are sent, then
+        # surface any dispatch failure (wait_all itself never fails).
         await Future->wait_all(@in_flight) if @in_flight;
+        for my $f (@in_flight) {
+            $dispatch_error //= ($f->failure)[0] if $f->is_failed;
+        }
+        die $dispatch_error if defined $dispatch_error;
         return;
     }
 }
@@ -86,8 +99,11 @@ serialized bytes, exits on the C<undef> ShutDown sentinel, and otherwise hands
 the bytes to the C<dispatcher>'s C<dispatch_task> method. Dispatches run
 concurrently (a slow activity must not stall polling); the loop tracks the
 in-flight Futures and awaits them before returning so pending completions are
-sent. A dispatch that fails is warned about and swallowed — a single bad task
-never tears down the worker (spec section 8.4 failure modes).
+sent. A dispatcher maps task-processing dies to failed completions itself
+(spec R11), so a dispatch Future that fails means the completion contract with
+core was broken; C<run> surfaces that by failing, after draining the remaining
+in-flight dispatches — it is never warned-and-swallowed (finding R5: the
+swallow left workflow tasks uncompleted and the workflow wedged until timeout).
 
 Making the poll source injectable lets unit tests feed crafted C<ActivityTask>
 protos (and the shutdown sentinel) without a live server; the worker supplies a
