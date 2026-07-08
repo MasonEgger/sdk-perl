@@ -1529,21 +1529,44 @@ class Temporalio::Workflow::Runner {
     # MUST-match sdk-python _handle_cache_eviction (deletes the run from
     # _running_workflows after cancelling its tasks).
     method evict () {
-        for my $future (values %pending_activities, values %pending_timers,
+        # Iterate COPIED snapshots of the pending tables, never the aliased
+        # `values` lists (finding L6 / spec R16). Cancel continuations run
+        # synchronously and may de-register ANY pending entry: each future's
+        # on_cancel deletes its own hash slot, and a Future->wait_any
+        # loser-cancel chains that delete onto a SIBLING (cancelling the
+        # activity fails it Cancelled, wait_any then cancels the losing timer,
+        # whose on_cancel deletes the not-yet-visited $pending_timers slot).
+        # A foreach over `values` aliases the hash slots, so that sibling
+        # delete freed an alias this loop still held and evict croaked before
+        # sending the eviction completion (the step-45 probe_l6_freed_iteration
+        # croak, at the pre-fix trace Runner.pm:1532-1538; own-entry deletion
+        # alone was survivable per probe_l6_self_delete). The whole-workflow
+        # cancel sweeps learned the same lesson and snapshot `keys` first
+        # (pre-fix trace :2199, :2212, in _apply_cancel_workflow below). The
+        # array copies hold their own references, so continuations may delete
+        # any entry and eviction always completes.
+        my @pending_futures = (
+            values %pending_activities, values %pending_timers,
             values %in_progress_handlers, values %pending_external_signals,
             values %pending_external_cancels,
-            map { $_->{future} } @conditions)
-        {
+            map { $_->{future} } @conditions,
+        );
+        for my $future (@pending_futures) {
             $future->cancel unless $future->is_ready;
         }
-        # Child handles own a start AND a result Future; cancel both.
-        for my $handle (values %pending_child_workflows) {
+        # Child handles own a start AND a result Future; cancel both. Snapshot
+        # here too: a child handle's cancel de-registers its seq (the reason
+        # _apply_cancel_workflow snapshots keys), and wait_any can chain a
+        # sibling handle's de-register exactly as above.
+        my @child_handles = values %pending_child_workflows;
+        for my $handle (@child_handles) {
             for my $f ($handle->start_future, $handle->result_future) {
                 $f->cancel unless $f->is_ready;
             }
         }
         # Nexus handles likewise own a start AND a result Future.
-        for my $handle (values %pending_nexus_operations) {
+        my @nexus_handles = values %pending_nexus_operations;
+        for my $handle (@nexus_handles) {
             for my $f ($handle->start_future, $handle->result_future) {
                 $f->cancel unless $f->is_ready;
             }

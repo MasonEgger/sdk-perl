@@ -29,10 +29,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R28.4 Verify: independent "\0" scalar untouched; audit note enumerates write sites; prove -lj4 t green under the memory guard
 
 ### Step R16: Make Evict Iteration Safe Against Sibling Deletion
-- [ ] R16.1 RED: replay test (adapted probe_l6_freed_iteration.pl) drives an evict whose cancel continuation deletes an unvisited sibling; asserts no freed-value croak and eviction completion sent; also covers self-delete
-- [ ] R16.2 GREEN: iterate a copied key/value snapshot of %pending at Workflow/Runner.pm:1532-1538
-- [ ] R16.3 REFACTOR: comment the snapshot with the code trace (:1532-1538, sweeps :2199, :2212) and probe note
-- [ ] R16.4 Verify: sibling-delete evict completes and sends completion; self-delete survivable; prove -lj4 t green under the memory guard
+- [x] R16.1 RED: replay test (adapted probe_l6_freed_iteration.pl) drives an evict whose cancel continuation deletes an unvisited sibling; asserts no freed-value croak and eviction completion sent; also covers self-delete
+- [x] R16.2 GREEN: iterate a copied key/value snapshot of %pending at Workflow/Runner.pm:1532-1538
+- [x] R16.3 REFACTOR: comment the snapshot with the code trace (:1532-1538, sweeps :2199, :2212) and probe note
+- [x] R16.4 Verify: sibling-delete evict completes and sends completion; self-delete survivable; prove -lj4 t green under the memory guard
 
 ## Phase P2: Pool Fork-Channel Rework
 
