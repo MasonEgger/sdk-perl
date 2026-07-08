@@ -45,13 +45,25 @@ class Temporalio::Client::Connection {
         return;
     }
 
-    # Idempotent. The runtime must still be open: client_free drops the
-    # core connection on the runtime's Tokio threads.
+    # Liveness-guarded free (finding L2 / spec R2). client_free drops the
+    # core connection on the runtime's Tokio threads; once Runtime->shutdown
+    # has torn the core runtime down, that call is a use-after-free. When
+    # the runtime is gone we release only Perl-side state and skip the FFI
+    # free. Both close and DESTROY (via close) route through this one
+    # method so the guard cannot drift between the two paths.
+    method _free_client () {
+        Temporalio::Core::FFI::client_free($ptr)
+            if defined $ptr && defined $runtime && !$runtime->is_shutdown;
+        $ptr = undef;
+        return;
+    }
+
+    # Idempotent. Frees the C connection only while the owning runtime is
+    # still live (see _free_client above).
     method close () {
         return if $is_closed;
         $is_closed = 1;
-        Temporalio::Core::FFI::client_free($ptr) if defined $ptr;
-        $ptr = undef;
+        $self->_free_client;
         return;
     }
 
@@ -96,6 +108,11 @@ C<update_api_key> raise L<Temporalio::Exception::Runtime> with
 C<"Connection is closed">. C<DESTROY> frees with a warning — call
 C<close> explicitly.
 
+Both C<close> and C<DESTROY> guard the FFI free with a runtime-liveness
+check: C<temporal_core_client_free> drops the core connection on the
+runtime's Tokio threads, so once the runtime has shut down the free is
+skipped and only Perl-side state is released (finding L2).
+
 =head1 CONSTRUCTOR
 
 =head2 new
@@ -124,6 +141,9 @@ Constructs a Temporalio::Client::Connection. Named parameters:
 =head2 close
 
 Closes the underlying sdk-core connection and frees its C pointer.
+If the owning runtime has already shut down, the FFI free is skipped
+(freeing against a torn-down core would be a use-after-free) and only
+Perl-side state is released.
 
 =head2 is_closed
 

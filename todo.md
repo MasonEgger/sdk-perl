@@ -11,10 +11,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R1+R21.4 Verify: barrier-before-free and fail-within-timeout asserted; cargo test green for the shim counterpart; prove -lj4 t green under the memory guard
 
 ### Step R2: Guard Connection Free Against a Dead Runtime
-- [ ] R2.1 RED: unit test destroys the runtime first, then close and (separately) DESTROY the connection; assert no client_free and no crash; comments cite Client/Connection.pm:50-66, Core/FFI.pm:606-608
-- [ ] R2.2 GREEN: guard both close and DESTROY with a runtime-liveness check (or strong runtime ref), skipping client_free when the runtime is gone
-- [ ] R2.3 REFACTOR: factor the guarded free into one method both paths call; comment cites L2
-- [ ] R2.4 Verify: guard present on both paths; both after-shutdown cases skip client_free without crashing; prove -lj4 t green under the memory guard
+- [x] R2.1 RED: unit test destroys the runtime first, then close and (separately) DESTROY the connection; assert no client_free and no crash; comments cite Client/Connection.pm:50-66, Core/FFI.pm:606-608
+- [x] R2.2 GREEN: guard both close and DESTROY with a runtime-liveness check (or strong runtime ref), skipping client_free when the runtime is gone
+- [x] R2.3 REFACTOR: factor the guarded free into one method both paths call; comment cites L2
+- [x] R2.4 Verify: guard present on both paths; both after-shutdown cases skip client_free without crashing; prove -lj4 t green under the memory guard
 
 ### Step R3: Stop Freeing the DevServer Handle on the Timeout Path
 - [ ] R3.1 RED: unit test forces the timeout arm (stalled future) and asserts the handle free is deferred or skipped while the bridge future is pending; comments cite Test/DevServer.pm:232, Core/FFI.pm:625-628
