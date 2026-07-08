@@ -97,10 +97,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R11.4 Verify: failed-completion and no-wedge assertions map; prove -lj4 t green under the memory guard
 
 ### Step R39: Add the Missing on_cancel Hook to Child-Workflow Signals
-- [ ] R39.1 RED: t/replay/child_signal_cancel.t asserts a cancelled pending child signal emits CancelSignalWorkflow (and no double-emit when resolved first)
-- [ ] R39.2 GREEN: add the on_cancel hook to _signal_child_workflow in Workflow/Runner.pm:908-936, mirroring :996-1010
-- [ ] R39.3 REFACTOR: factor the shared cancel-emits-command logic so child/external arms cannot drift; comment citing R10
-- [ ] R39.4 Verify: cancel-emits-command and no-double-emit assertions map; prove -lj4 t green under the memory guard
+- [x] R39.1 RED: t/replay/child_signal_cancel.t asserts a cancelled pending child signal emits CancelSignalWorkflow (and no double-emit when resolved first)
+- [x] R39.2 GREEN: add the on_cancel hook to _signal_child_workflow in Workflow/Runner.pm:908-936, mirroring :996-1010
+- [x] R39.3 REFACTOR: factor the shared cancel-emits-command logic so child/external arms cannot drift; comment citing R10
+- [x] R39.4 Verify: cancel-emits-command and no-double-emit assertions map; prove -lj4 t green under the memory guard
 
 ### Step R51: Correct the Pre-Scheduled-Cancel Comment in Runner
 - [ ] R51.1 RED: guard in t/unit/runner_comments.t fails while the stale "pre-scheduled cancel" phrasing remains at Runner.pm:1188-1193

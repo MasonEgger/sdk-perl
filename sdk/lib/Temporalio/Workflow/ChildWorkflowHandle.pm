@@ -174,6 +174,9 @@ raises the mapped failure (L<Temporalio::Exception::ChildWorkflow>).
 C<signal($name, %opts)> emits a C<SignalExternalWorkflowExecution> targeting
 this child (the C<child_workflow_id> oneof arm) and returns a Future resolved
 when the signal is acknowledged. C<%opts>: C<args> (arrayref), C<headers>.
+Cancelling the returned Future before its resolve emits
+C<CancelSignalWorkflow> without pre-emptively raising, exactly as the
+external-handle arm (finding R10).
 
 =head2 cancel
 

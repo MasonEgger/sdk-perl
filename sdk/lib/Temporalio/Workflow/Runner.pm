@@ -905,7 +905,9 @@ class Temporalio::Workflow::Runner {
 
     # Emit a SignalExternalWorkflowExecution targeting a child (spec section 18;
     # child_workflow_id oneof arm) and register the pending signal Future so a
-    # later ResolveSignalExternalWorkflow settles it. Returns the Future the
+    # later ResolveSignalExternalWorkflow settles it. In-flight cancellation is
+    # shared with the external-handle arm via
+    # _register_pending_external_signal (finding R10). Returns the Future the
     # $handle->signal caller awaits.
     method _signal_child_workflow ($handle, $name, %opts) {
         my $seq = ++$external_signal_seq_counter;
@@ -932,8 +934,36 @@ class Temporalio::Workflow::Runner {
             Temporalio::Workflow::Commands::signal_external_workflow_execution(
                 \%fields);
 
+        return $self->_register_pending_external_signal($seq);
+    }
+
+    # Register the pending signal Future for $seq and install the shared
+    # in-flight cancellation hook. Both signal arms, child-targeted (spec
+    # section 18) and external-handle (spec section 20), MUST behave
+    # identically here: cancelling the returned Future before its resolve
+    # emits CancelSignalWorkflow{seq} at most once and does NOT pre-emptively
+    # settle it; the seq stays mapped so the eventual
+    # ResolveSignalExternalWorkflow settles (or, post-cancel, is dropped by
+    # the is_ready guard, spec section 20.2). Finding R10 (step-45 audit):
+    # the child arm originally shipped without the hook, so a cancelled
+    # pending child signal never emitted the cancel command; one shared
+    # registration point keeps the two arms from drifting again.
+    method _register_pending_external_signal ($seq) {
         my $future = Temporalio::Workflow::Future->new;
         $pending_external_signals{$seq} = $future;
+
+        # The hook must NOT fail the Future here (cancelling a Future already
+        # marks it ready/cancelled); we only emit the cancel command at most
+        # once. A ready Future ignores ->cancel, so a post-resolve cancel
+        # never reaches this hook.
+        my $cancel_emitted = 0;
+        $future->on_cancel(sub {
+            return if $cancel_emitted;
+            $cancel_emitted = 1;
+            push @commands,
+                Temporalio::Workflow::Commands::cancel_signal_workflow($seq);
+        });
+
         return $future;
     }
 
@@ -958,10 +988,12 @@ class Temporalio::Workflow::Runner {
     # (spec section 20; the workflow_execution oneof arm, NOT child_workflow_id)
     # and register the pending signal Future so a later
     # ResolveSignalExternalWorkflow settles it. The namespace comes from this
-    # runner's namespace (never a user argument). Cancelling the returned Future
-    # before its resolve emits CancelSignalWorkflow{seq} and does NOT
-    # pre-emptively settle it — the eventual Resolve* still arrives (spec section
-    # 20.2 in-flight cancellation; MUST-match sdk-python asyncio.shield +
+    # runner's namespace (never a user argument). In-flight cancellation is
+    # shared with the child arm via _register_pending_external_signal (finding
+    # R10): cancelling the returned Future before its resolve emits
+    # CancelSignalWorkflow{seq} and does NOT pre-emptively settle it; the
+    # eventual Resolve* still arrives (spec section 20.2 in-flight
+    # cancellation; MUST-match sdk-python asyncio.shield +
     # cancel_signal_workflow). Returns the Future the $handle->signal caller awaits.
     method _signal_external_workflow ($workflow_id, $run_id, $name, %opts) {
         my $seq = ++$external_signal_seq_counter;
@@ -992,23 +1024,7 @@ class Temporalio::Workflow::Runner {
             Temporalio::Workflow::Commands::signal_external_workflow_execution(
                 \%fields);
 
-        my $future = Temporalio::Workflow::Future->new;
-        $pending_external_signals{$seq} = $future;
-
-        # In-flight cancellation (spec section 20.2): if the awaiting frame is
-        # cancelled before the resolve, emit CancelSignalWorkflow{seq} but leave
-        # the seq mapped so the eventual ResolveSignalExternalWorkflow settles
-        # it. The hook must NOT fail the Future here (cancelling a Future already
-        # marks it ready/cancelled); we only emit the cancel command at most once.
-        my $cancel_emitted = 0;
-        $future->on_cancel(sub {
-            return if $cancel_emitted;
-            $cancel_emitted = 1;
-            push @commands,
-                Temporalio::Workflow::Commands::cancel_signal_workflow($seq);
-        });
-
-        return $future;
+        return $self->_register_pending_external_signal($seq);
     }
 
     # Emit a RequestCancelExternalWorkflowExecution targeting an arbitrary
