@@ -135,10 +135,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R14+R15.4 Verify: unit-arrival and replay outcome assertions (listed-type + nondeterminism) pass; prove -lj4 t green
 
 ### Step R17: Settle Updates from Cancelled Handler Futures Without Croaking
-- [ ] R17.1 RED: replay evict_pending_update.t (no croak, eviction completes) + unit settle_update_states.t (done/failed/cancelled)
-- [ ] R17.2 GREEN: discriminate the cancelled future in _settle_update before ->result and settle per the eviction contract
-- [ ] R17.3 REFACTOR: factor a settle-core sub; embed the probe state table; cite L7
-- [ ] R17.4 Verify: no-croak eviction and three-state settle assertions pass; prove -lj4 t green
+- [x] R17.1 RED: replay evict_pending_update.t (no croak, eviction completes) + unit settle_update_states.t (done/failed/cancelled)
+- [x] R17.2 GREEN: discriminate the cancelled future in _settle_update before ->result and settle per the eviction contract
+- [x] R17.3 REFACTOR: factor a settle-core sub; embed the probe state table; cite L7
+- [x] R17.4 Verify: no-croak eviction and three-state settle assertions pass; prove -lj4 t green
 
 ### Step R23+R50: Make the Shared Cancellation Future Survive wait_any (with Direct ChildCancellation Tests)
 - [ ] R23+R50.1 RED: cancellation.t wait_any-double-race then later-consumer-observes; new child_cancellation.t covers construction, observation, and the race

@@ -2828,31 +2828,69 @@ class Temporalio::Workflow::Runner {
         return {};
     }
 
+    # Classify a READY accepted-update handler Future into its settlement
+    # (spec section 19.2 step 4 plus the R17 eviction rule). Returns exactly
+    # one of:
+    #   { completed    => $payload }        done: the encoded return value
+    #   { rejected     => $failure_proto }  a Temporal-failure-type throw
+    #   { task_failure => $err }            any other die (post-accept)
+    #   { dropped      => 1 }               a CANCELLED handler future
+    # The cancelled state MUST be discriminated before ->result (finding L7,
+    # spec R17; step-45 probe probe_l7_cancelled_result.pl):
+    #   state      is_ready  is_cancelled  ->failure  ->result
+    #   done       1         0             ()         the value
+    #   failed     1         0             ($err)     croaks with $err
+    #   cancelled  1         1             ()         croaks "... was cancelled"
+    # A cancelled future passes the ->failure check EMPTY and then ->result
+    # croaks: the pre-fix _settle_update death that aborted evict() before it
+    # could send the eviction completion. The only producer of a natively
+    # cancelled handler future is evict()'s %in_progress_handlers sweep, and
+    # the eviction contract is DROP: no UpdateResponse, no activation error,
+    # matching sdk-python where the update task's teardown exception during
+    # eviction is swallowed with no response (_workflow_instance.py
+    # run_update, `except BaseException` under self._deleting). A task-cancel
+    # OUTSIDE eviction is the rejected branch instead: the workflow cancel
+    # chain throws Temporalio::Exception::Cancelled INTO the handler, so its
+    # future arrives here FAILED (sdk-python parity: asyncio.CancelledError
+    # becomes a Temporal CancelledError and rejects the update).
+    method _update_settlement ($future) {
+        return { dropped => 1 } if $future->is_cancelled;
+        if (my @failure = $future->failure) {
+            my $err = $failure[0];
+            return $self->_is_workflow_failure_exception($err)
+                ? { rejected =>
+                        $failure_converter->to_failure($err, $payload_converter) }
+                : { task_failure => $err };
+        }
+        return {
+            completed => $payload_converter->to_payload(($future->result)[0]),
+        };
+    }
+
     # Settle an accepted update once its handler Future is ready (spec section
     # 19.2 step 4): a returned value -> UpdateResponse.completed; a Temporal
     # failure-type throw -> UpdateResponse.rejected (post-accept); any other die
-    # -> a workflow TASK failure.
+    # -> a workflow TASK failure; a cancelled handler future (eviction, spec
+    # R17) -> dropped, no response. Classification lives in _update_settlement
+    # so the three-state contract is unit-testable directly.
     method _settle_update ($protocol_instance_id, $future) {
-        if (my @failure = $future->failure) {
-            my $err = $failure[0];
-            if ($self->_is_workflow_failure_exception($err)) {
-                push @commands, Temporalio::Workflow::Commands::update_response(
-                    $protocol_instance_id,
-                    rejected =>
-                        $failure_converter->to_failure($err, $payload_converter),
-                );
-            }
-            else {
-                # A plain die post-acceptance is a workflow TASK failure.
-                $current_activation_error //= $err;
-            }
+        my $settlement = $self->_update_settlement($future);
+        return if $settlement->{dropped};
+        if (exists $settlement->{task_failure}) {
+            # A plain die post-acceptance is a workflow TASK failure.
+            $current_activation_error //= $settlement->{task_failure};
             return;
         }
-        my $result  = ($future->result)[0];
-        my $payload = $payload_converter->to_payload($result);
+        if (exists $settlement->{rejected}) {
+            push @commands, Temporalio::Workflow::Commands::update_response(
+                $protocol_instance_id,
+                rejected => $settlement->{rejected},
+            );
+            return;
+        }
         push @commands, Temporalio::Workflow::Commands::update_response(
             $protocol_instance_id,
-            completed => $payload,
+            completed => $settlement->{completed},
         );
         return;
     }
