@@ -1208,10 +1208,17 @@ class Temporalio::Workflow::Runner {
         # $handle->cancel alone honours the wait_* cancellation types and would
         # stay parked, so force-report exactly as the whole-workflow cancel
         # sweep does: emit the cancel command (unless abandon), de-register,
-        # and fail the pending awaits with Cancelled. (Pre-R8 this relied on
-        # the _apply_cancel_workflow nexus sweep re-reading the map keys after
-        # the body had resumed; the R4/R8 fix snapshots every map before
-        # sweeping, so the pre-scheduled path must report on its own.)
+        # and fail the pending awaits with Cancelled. Nexus is the ONLY arm
+        # with a per-call pre-scheduled check (finding R3, equal to L31b: an
+        # earlier version of this comment claimed an activity/child mirror
+        # that was never built). Activities, timers, and children get their
+        # cancellation from the _apply_cancel_workflow fallback instead, which
+        # sweeps every pending map from a pre-sweep snapshot (findings
+        # R4/R4b/R4c, spec R8-R10); anything scheduled AFTER the cancel
+        # arrived is post-cancel cleanup work and deliberately runs to
+        # completion. That snapshot is also why this arm must report on its
+        # own: pre-R8 it relied on the nexus sweep re-reading the map keys
+        # after the body had resumed, and the snapshot fix closed that path.
         if ($cancel_requested) {
             $handle->cancel;   # emit the cancel command (honours abandon).
             delete $pending_nexus_operations{$seq};

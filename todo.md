@@ -103,10 +103,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R39.4 Verify: cancel-emits-command and no-double-emit assertions map; prove -lj4 t green under the memory guard
 
 ### Step R51: Correct the Pre-Scheduled-Cancel Comment in Runner
-- [ ] R51.1 RED: guard in t/unit/runner_comments.t fails while the stale "pre-scheduled cancel" phrasing remains at Runner.pm:1188-1193
-- [ ] R51.2 GREEN: rewrite the :1188-1193 comment to the real _apply_cancel_workflow fallback mechanism post-R8-R10; fix the contradicting nexus arm comment
-- [ ] R51.3 REFACTOR: ensure the comment cites finding R3 and the fixed behavior
-- [ ] R51.4 Verify: guard passes plus reviewer sign-off in the commit message; prove -lj4 t green under the memory guard
+- [x] R51.1 RED: guard in t/unit/runner_comments.t fails while the stale "pre-scheduled cancel" phrasing remains at Runner.pm:1188-1193
+- [x] R51.2 GREEN: rewrite the :1188-1193 comment to the real _apply_cancel_workflow fallback mechanism post-R8-R10; fix the contradicting nexus arm comment
+- [x] R51.3 REFACTOR: ensure the comment cites finding R3 and the fixed behavior
+- [x] R51.4 Verify: guard passes plus reviewer sign-off in the commit message; prove -lj4 t green under the memory guard
 
 ### Step R40: Cover the Post-Cancel Paths in the Replay Suite
 - [ ] R40.1 RED: add t/replay/post_cancel_child_workflow.t, post_cancel_timer.t, post_cancel_local_activity.t in catch-and-cleanup and propagate shapes
