@@ -326,10 +326,26 @@ class Temporalio::Core::Callback {
         return $future;
     }
 
+    # Guarded per-entry invoke (finding L17 / spec R20): the drain loop is
+    # the delivery path for every async completion in the process, so the
+    # blast radius of a death must be one entry, never the chunk. Both drain
+    # sites route through this: the entry dispatch below (a dying per-kind
+    # builder or a bridge-bug cast must not abort the chunk) and the Future
+    # settle in _complete (an awaiter continuation that dies while its
+    # Future resolves must not strand the later completions). Log and move
+    # on. Kept cheap (one eval, nothing allocated on the happy path)
+    # because this loop is the hot path for every async result.
+    sub _guard_entry ($what, $code) {
+        return if eval { $code->(); 1 };
+        warn "Temporalio::Core::Callback: $what died: $@";
+        return;
+    }
+
     # Drain loop (spec section 4.5): runs on the main thread when the
     # runtime's fd watcher reads ready. Pops entries in $DRAIN_CAP chunks
     # until the queue reports empty, dispatching each to its per-kind
-    # builder and resolving the pending Future.
+    # builder and resolving the pending Future. Each entry runs under its
+    # own _guard_entry (finding L17 / spec R20).
     method drain ($runtime) {
         # Pipe mode: the shim holds only the write end, so empty the read
         # end here BEFORE popping entries — a push after this read writes a
@@ -349,7 +365,8 @@ class Temporalio::Core::Callback {
                 my $entry = $ffi->cast(
                     'opaque' => 'record(Temporalio::Core::FFI::CallbackEntry)*',
                     $entry_ptr);
-                $self->_complete($runtime, $entry, $entry_ptr);
+                _guard_entry('completion entry dispatch',
+                    sub { $self->_complete($runtime, $entry, $entry_ptr) });
             }
         }
 
@@ -489,9 +506,14 @@ class Temporalio::Core::Callback {
         }
 
         my ($resolution, $value) = $build->($runtime, $entry);
-        $resolution eq 'fail'
-            ? $record->{future}->fail($value)
-            : $record->{future}->done($value);
+        # Settling runs the awaiter's continuations synchronously; guard so
+        # one dying continuation cannot strand the rest of the chunk
+        # (finding L17 / spec R20).
+        _guard_entry("callback $id (kind $kind) continuation", sub {
+            $resolution eq 'fail'
+                ? $record->{future}->fail($value)
+                : $record->{future}->done($value);
+        });
         return;
     }
 
@@ -559,6 +581,11 @@ client layer maps failures per spec section 7.5); C<server_start> resolves
 with a C<< { handle, target } >> hashref. Byte arrays are freed through
 the bridge once consumed. A completion whose callback id has no pending
 Future is warned about and dropped, never fatal.
+
+Each drained entry runs under its own exception guard (finding L17 / spec
+R20): a continuation that dies while its Future settles, or a per-kind
+builder that dies, is warned about and the drain continues with the next
+entry. The blast radius of any death is one entry, never the chunk.
 
 =head1 CONSTRUCTOR
 

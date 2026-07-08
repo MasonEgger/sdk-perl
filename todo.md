@@ -153,10 +153,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R24.4 Verify: each API raises in query context and works in writable context; prove -lj4 t green
 
 ### Step R20: Isolate Exceptions Per Entry in the Callback Drain Loop
-- [ ] R20.1 RED: unit callback.t enqueues a chunk with a dying middle entry; asserts later entries still run and the death is captured
-- [ ] R20.2 GREEN: wrap each per-entry continuation in its own eval at Core/Callback.pm:322-331,:463-467; log and continue
-- [ ] R20.3 REFACTOR: factor a guarded-invoke helper for both drain sites; cite L17
-- [ ] R20.4 Verify: all non-dying entries ran despite the middle death; prove -lj4 t green
+- [x] R20.1 RED: unit callback.t enqueues a chunk with a dying middle entry; asserts later entries still run and the death is captured
+- [x] R20.2 GREEN: wrap each per-entry continuation in its own eval at Core/Callback.pm:322-331,:463-467; log and continue
+- [x] R20.3 REFACTOR: factor a guarded-invoke helper for both drain sites; cite L17
+- [x] R20.4 Verify: all non-dying entries ran despite the middle death; prove -lj4 t green
 
 ## Phase P6: Workflow and Client Semantics
 

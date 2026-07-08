@@ -241,6 +241,62 @@ T2->subtest('T-cb-4: drain honors cap=256 per call and loops until empty' => sub
     $runtime->shutdown;
 });
 
+# Finding L17 / spec R20: the drain loop (Core/Callback.pm entry dispatch,
+# spec-time :322-331) settles each pending Future (:463-467), which runs the
+# awaiter's continuations synchronously; without per-entry isolation one
+# dying continuation propagates out of the loop and strands every later
+# completion in the chunk. Three completions land in one chunk; the middle
+# one's continuation dies; the first and third must still resolve and the
+# death must be logged, not propagated out of the drain.
+T2->subtest('R20: a dying continuation does not strand later completions in the chunk' => sub {
+    my $loop    = IO::Async::Loop->new;
+    my $runtime = Temporalio::Runtime->new(loop => $loop);
+
+    # Queue all three completions BEFORE running the loop so one wakeup
+    # drains them as a single chunk (the stranding scenario).
+    my (@futures, @keep);
+    for my $i (0 .. 2) {
+        my $user_data;
+        push @futures, Temporalio::Core::Callback->issue_async(
+            $runtime, worker_poll => sub ($ud, $ptr) { $user_data = $ud });
+        $worker_poll->call(
+            $user_data, craft_byte_array("entry-$i", \@keep), undef);
+    }
+
+    # The middle entry's continuation dies when the drain settles it.
+    my $middle_ran = 0;
+    $futures[1]->on_done(sub { $middle_ran++; die "continuation boom\n" });
+
+    my (@warnings, $error);
+    {
+        local $SIG{__WARN__} = sub { push @warnings, @_ };
+        local $@;
+        eval {
+            await_or_timeout(
+                $loop, Future->needs_all($futures[0], $futures[2]));
+            1;
+        } or $error = $@;
+    }
+
+    T2->is($error, undef, 'the death did not propagate out of the drain loop')
+        or T2->diag("propagated: $error");
+    T2->ok($futures[0]->is_done, 'entry before the dying one resolved');
+    T2->ok($futures[1]->is_done, 'the dying entry itself still settled done');
+    T2->ok($futures[2]->is_done, 'entry after the dying one is not stranded');
+    T2->is(
+        $futures[2]->is_done ? $futures[2]->get : undef,
+        'entry-2',
+        'the later entry carries its own payload',
+    );
+    T2->is($middle_ran, 1, 'the dying continuation ran exactly once');
+    T2->ok(
+        (scalar grep { /continuation boom/ } @warnings),
+        'the death is captured and logged',
+    ) or T2->diag("warnings: @warnings");
+
+    $runtime->shutdown;
+});
+
 T2->subtest('unknown callback kind raises Exception::Argument' => sub {
     my $loop    = IO::Async::Loop->new;
     my $runtime = Temporalio::Runtime->new(loop => $loop);
