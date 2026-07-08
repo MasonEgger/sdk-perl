@@ -573,8 +573,19 @@ class Temporalio::Worker {
         # Both loops have drained (sentinels seen). Make sure shutdown was
         # actually initiated (a loop may have exited because core shut down on
         # its own), then finalize + free. _finalize_and_free is idempotent.
+        # Preserve-cause (spec R62, finding L32): pre-R62 this await was
+        # unprotected, so a finalize die REPLACED the poll-loop $error saved
+        # above and the primary failure vanished. A finalize failure must
+        # ATTACH to the saved error; with no saved error it becomes the
+        # primary itself. Folding it into $error also lets the pool close
+        # below still run on the finalize-failure path.
         $self->_initiate_shutdown_once;
-        await $self->_finalize_and_free;
+        {
+            local $@;
+            eval { await $self->_finalize_and_free; 1 }
+                or $error =
+                    Temporalio::Worker::_attach_secondary_error($error, $@);
+        }
 
         # Stop the sync-activity fork pool (reap its children) so no orphaned
         # worker processes linger after the worker stops.
@@ -861,7 +872,10 @@ class Temporalio::Worker {
             && !Temporalio::Worker::_shutdown_error_is_tolerable($err))
         {
             # Free before rethrowing so a real finalize failure still releases
-            # the native worker (DESTROY-safety, no leak).
+            # the native worker (DESTROY-safety, no leak). The rethrow itself
+            # cannot mask anything: run()'s guarded await attaches this die to
+            # any saved poll-loop error via _attach_secondary_error rather
+            # than letting it replace the primary (spec R62, finding L32).
             Temporalio::Core::FFI::worker_free($ptr);
             $worker_ptr  = undef;
             $worker_keep = undef;
@@ -946,6 +960,29 @@ sub Temporalio::Worker::_shutdown_error_is_tolerable ($err) {
         return 1 if $message =~ $pat;
     }
     return 0;
+}
+
+# The preserve-cause hand-off (spec R62, finding L32): combine a PRIMARY
+# error (the one already being unwound, run()'s saved poll-loop failure)
+# with a SECONDARY failure raised on the way out (the finalize die), so the
+# secondary ATTACHES to the primary instead of replacing it. A blessed
+# Temporalio::Exception primary keeps its object and class identity and
+# records the secondary via attach_secondary (visible in stringification and
+# secondary_errors); a plain-string primary gets the secondary appended after
+# its own text. Either error alone passes through unchanged.
+sub Temporalio::Worker::_attach_secondary_error ($primary, $secondary) {
+    return $secondary if !defined $primary;
+    return $primary   if !defined $secondary;
+    if (Scalar::Util::blessed($primary)
+        && $primary->isa('Temporalio::Exception'))
+    {
+        return $primary->attach_secondary($secondary);
+    }
+    my $text = "$primary";
+    chomp $text;
+    my $secondary_text = "$secondary";
+    chomp $secondary_text;
+    return "$text [also failed: $secondary_text]\n";
 }
 
 # Wrap the generated constructor so an unrecognised kwarg surfaces as

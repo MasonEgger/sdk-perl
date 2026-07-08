@@ -61,10 +61,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R30.4 Verify: core/client sockets closed and channel open in the child; prove -lj4 t green under the memory guard
 
 ### Step R62: Stop Masking Pool and Worker Error Causes
-- [ ] R62.1 RED: unit test asserts a pool-child require failure surfaces with the module name, and a finalize die attaches to (not replaces) the saved error
-- [ ] R62.2 GREEN: surface the require failure at Activity/Pool.pm:98-101; attach finalize failures to the saved error at Worker.pm:576-577 and :855-864
-- [ ] R62.3 REFACTOR: route both hand-offs through a preserve-cause pattern; comment cites L32
-- [ ] R62.4 Verify: original require message (with module name) and attached finalize error present; prove -lj4 t green under the memory guard
+- [x] R62.1 RED: unit test asserts a pool-child require failure surfaces with the module name, and a finalize die attaches to (not replaces) the saved error
+- [x] R62.2 GREEN: surface the require failure at Activity/Pool.pm:98-101; attach finalize failures to the saved error at Worker.pm:576-577 and :855-864
+- [x] R62.3 REFACTOR: route both hand-offs through a preserve-cause pattern; comment cites L32
+- [x] R62.4 Verify: original require message (with module name) and attached finalize error present; prove -lj4 t green under the memory guard
 
 ## Phase P3: Wire Format and Codec
 

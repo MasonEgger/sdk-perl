@@ -166,10 +166,26 @@ class Temporalio::Activity::Pool {
                 for my $fh (@{ $channel{close_fhs} }) {
                     close($fh) if defined $fh;
                 }
+                # Preserve-cause (spec R62, finding L32): pre-R62 this eval
+                # swallowed a failed require outright, so a broken activity
+                # module surfaced later as a masking symptom ("Undefined
+                # subroutine ..."), or not at all, instead of the real load
+                # error. Record each failure with the module name and the
+                # ORIGINAL $@ in this child's %channel copy; _child_dispatch
+                # surfaces them on the next invocation through the R5
+                # structured-error frame, message intact.
+                my @require_errors;
                 for my $mod (@{ $channel{modules} }) {
                     my $path = ($mod =~ s{::}{/}gr) . '.pm';
-                    eval { require $path; 1 };
+                    if (!eval { require $path; 1 }) {
+                        my $cause = "$@";
+                        chomp $cause;
+                        push @require_errors,
+                            "activity module '$mod' failed to load: $cause";
+                    }
                 }
+                $channel{require_errors} = \@require_errors
+                    if @require_errors;
                 # R18/R19: connect the per-child control socket. The slot
                 # lands in this child's copy of %channel, which the `code`
                 # closure below shares, so each child talks over its own
@@ -181,7 +197,7 @@ class Temporalio::Activity::Pool {
             },
             code => sub ($frozen) {
                 return _child_dispatch($channel{registry}, $frozen,
-                    $channel{child});
+                    $channel{child}, $channel{require_errors});
             },
         );
         $loop->add($function);
@@ -563,7 +579,7 @@ class Temporalio::Activity::Pool {
     # re-raise the ORIGINAL failure semantics across the fork boundary.
     # `heartbeats` carries only the frames the live channel could NOT stream
     # (control connect failed) — the degraded pre-R18 path.
-    sub _child_dispatch ($registry, $frozen, $child) {
+    sub _child_dispatch ($registry, $frozen, $child, $require_errors = undef) {
         $child //= { control => undef };
         my @child_heartbeats;
         my $token;
@@ -574,6 +590,15 @@ class Temporalio::Activity::Pool {
             # Announce the running invocation so the parent can route a
             # post-dispatch cancel to THIS child's connection (R19).
             _child_send($child, { op => 'start', token => $token });
+
+            # Preserve-cause (spec R62, finding L32): a module this pool was
+            # told to preload failed to require in init_code. The child is
+            # misconfigured for EVERY dispatch (there is no telling which
+            # body needed the module), so fail the invocation with the
+            # recorded original message (module name and load error intact)
+            # rather than running the body against a half-loaded interpreter.
+            die join("\n", @$require_errors) . "\n"
+                if $require_errors && @$require_errors;
 
             my $def = defined $registry
                 ? $registry->definition($inv->activity_type)
@@ -819,6 +844,12 @@ L<Temporalio::Exception::Application> therefore stays non-retryable, with its
 type, details, category, and cause chain intact (finding L14); a plain die
 arrives as a retryable ApplicationError with the message preserved. An error
 the default converter cannot carry degrades to the stringified form.
+
+A module named in C<activity_modules> that fails to C<require> in the child
+surfaces the same way (spec R62, finding L32): every C<invoke> dispatched to
+that child fails with the original load error, module name included, instead
+of the failure being swallowed and the body dying later with a masking
+symptom.
 
 =head2 Per-instance fork state (spec R4)
 

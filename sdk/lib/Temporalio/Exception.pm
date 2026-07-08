@@ -1,5 +1,7 @@
 # ABOUTME: Base class for all Temporalio exceptions (spec section 6.1).
 # ABOUTME: Carries message/stack_trace/cause; stringifies the full cause chain.
+# ABOUTME: Also carries mutable SECONDARY errors (spec R62): failures raised
+# ABOUTME: while this exception was being handled attach, never replace.
 use v5.38;
 use warnings;
 use feature 'class';
@@ -16,6 +18,13 @@ class Temporalio::Exception {
     field $message :param;
     field $stack_trace :param = undef;
     field $cause :param = undef;
+
+    # Errors raised while THIS exception was being handled or unwound (spec
+    # R62, finding L32), e.g. a worker finalize die while a poll-loop error
+    # is saved. They attach here (the Java suppressed-exceptions shape)
+    # instead of replacing the primary error, so the original cause survives.
+    # Unlike $cause, entries may be any exception object or plain string.
+    field $secondary_errors = [];
 
     ADJUST {
         if (defined $cause
@@ -39,10 +48,29 @@ class Temporalio::Exception {
     method stack_trace { $stack_trace }
     method cause       { $cause }
 
+    # attach_secondary($error): record a failure raised while handling this
+    # exception (spec R62). Mutates in place so the caller keeps the primary
+    # exception's class identity; returns $self for chaining.
+    method attach_secondary ($error) {
+        push @$secondary_errors, $error;
+        return $self;
+    }
+
+    method secondary_errors { [@$secondary_errors] }
+
     # Message plus the recursively stringified cause chain, e.g.
-    # "foo: caused by: bar: caused by: baz".
+    # "foo: caused by: bar: caused by: baz", then any attached secondary
+    # errors, each as " [also failed: ...]".
     method as_string () {
-        return defined $cause ? "$message: caused by: " . $cause->as_string : $message;
+        my $string = defined $cause
+            ? "$message: caused by: " . $cause->as_string
+            : $message;
+        for my $secondary (@$secondary_errors) {
+            my $text = "$secondary";
+            chomp $text;
+            $string .= " [also failed: $text]";
+        }
+        return $string;
     }
 }
 
@@ -73,7 +101,14 @@ its C<Temporalio::Exception::*> subclasses. Instances carry a C<message>,
 an optional C<cause> (which must itself be a Temporalio::Exception), and a
 L<Devel::StackTrace> captured at construction unless one is supplied.
 Stringification is overloaded to render the message followed by the full
-cause chain.
+cause chain and any attached secondary errors.
+
+Instances also carry a mutable list of B<secondary errors> (spec R62): a
+failure raised while this exception was being handled or unwound, such as a
+worker finalize failure while a poll-loop error was pending, attaches via
+L</attach_secondary> instead of replacing the primary error. This is the
+analog of Java's suppressed exceptions; unlike C<cause>, an attached value
+may be any exception object or plain string.
 
 =head1 CONSTRUCTOR
 
@@ -107,11 +142,26 @@ Constructs a Temporalio::Exception. Named parameters:
 
 =head2 as_string
 
-Renders the message followed by the recursively stringified cause chain. Also invoked by string overloading.
+Renders the message followed by the recursively stringified cause chain and
+any attached secondary errors. Also invoked by string overloading.
+
+=head2 attach_secondary
+
+    $exception->attach_secondary($error);
+
+Records a failure raised while this exception was being handled (spec R62,
+finding L32), so it attaches to rather than replaces the primary error.
+Mutates the instance in place and returns C<$self>. C<$error> may be any
+exception object or plain string.
 
 =head2 cause
 
 Accessor returning the C<cause> value.
+
+=head2 secondary_errors
+
+Returns an array reference (a copy) of the errors attached via
+L</attach_secondary>, in attachment order. Empty when none were attached.
 
 =head2 message
 
