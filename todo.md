@@ -109,10 +109,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R51.4 Verify: guard passes plus reviewer sign-off in the commit message; prove -lj4 t green under the memory guard
 
 ### Step R40: Cover the Post-Cancel Paths in the Replay Suite
-- [ ] R40.1 RED: add t/replay/post_cancel_child_workflow.t, post_cancel_timer.t, post_cancel_local_activity.t in catch-and-cleanup and propagate shapes
-- [ ] R40.2 GREEN: no product code (behavior fixed by R8-R10); any failure is a real gap traced back to the cluster
-- [ ] R40.3 REFACTOR: header each file mapping it to finding T8 and its arm; keep the four-arm ledger visible
-- [ ] R40.4 Verify: four arms covered in both shapes (activity via R8-R10 repros); closed LAST in the cluster; prove -lj4 t green under the memory guard
+- [x] R40.1 RED: add t/replay/post_cancel_child_workflow.t, post_cancel_timer.t, post_cancel_local_activity.t in catch-and-cleanup and propagate shapes
+- [x] R40.2 GREEN: no product code (behavior fixed by R8-R10); any failure is a real gap traced back to the cluster
+- [x] R40.3 REFACTOR: header each file mapping it to finding T8 and its arm; keep the four-arm ledger visible
+- [x] R40.4 Verify: four arms covered in both shapes (activity via R8-R10 repros); closed LAST in the cluster; prove -lj4 t green under the memory guard
 
 ## Phase P5: Cancellation Semantics
 
