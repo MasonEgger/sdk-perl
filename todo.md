@@ -344,10 +344,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R73.4 Verify: override-before-handler assertion green; prove -lj4 t green under the memory guard (t: 170 files/771 tests green incl. live integration; xt: 420 green after the _RootNexusOperationInbound %TRUSTME entry and the NexusOperationInbound/builder POD)
 
 ### Step R74: Carry ApplicationError next_retry_delay Through Exception and Failure Proto
-- [ ] R74.1 RED: unit test round-tripping next_retry_delay through to_failure/from_failure and asserting the proto field is set
-- [ ] R74.2 GREEN: accept next_retry_delay on ApplicationError (Application.pm:11-14) and map it to/from ApplicationFailureInfo.next_retry_delay (Failure.pm:231-240,251-261)
-- [ ] R74.3 REFACTOR: centralize Duration<->seconds conversion; comment citing parity finding 1 / message.proto:27
-- [ ] R74.4 Verify: survives round-trip and appears in proto field; prove -lj4 t green under the memory guard
+- [x] R74.1 RED: unit test round-tripping next_retry_delay through to_failure/from_failure and asserting the proto field is set (t/unit/application_error_next_retry_delay.t: 5.5s survives the round-trip, on-wire Duration is seconds=5/nanos=500000000, an ApplicationError without the field leaves the proto field unset and reads back undef; failed pre-wire, ApplicationError had no next_retry_delay method)
+- [x] R74.2 GREEN: accept next_retry_delay on ApplicationError (Application.pm:11-14) and map it to/from ApplicationFailureInfo.next_retry_delay (Failure.pm:231-240,251-261) (new `field $next_retry_delay :param = undef` + accessor, seconds Perl-side like every other SDK duration; to_failure writes the Duration only when truthy, matching Python's `if error.next_retry_delay:` at _failure_converter.py:160-163, so undef AND 0 stay off the wire; from_failure reads it back as fractional seconds, undef when absent — a deliberate deviation from Python's unconditional ToTimedelta(), which manufactures timedelta(0) for unset)
+- [x] R74.3 REFACTOR: centralize Duration<->seconds conversion; comment citing parity finding 1 / message.proto:27 (_duration_from_seconds/_seconds_from_duration subs in Failure.pm next to the category maps, both write and read paths use them; comment cites finding 1, message.proto:27, and _failure_converter.py:160-162,340; the pre-existing per-module _duration copies in RetryPolicy/Schedule/Commands are untouched, out of step scope)
+- [x] R74.4 Verify: survives round-trip and appears in proto field; prove -lj4 t green under the memory guard (t: 171 files/774 tests green incl. live integration; xt: 420 green, next_retry_delay POD added to Application.pm and the seconds-crossing note to Failure.pm DESCRIPTION)
 
 ### Step R75: Support encode_common_attributes on the Failure Converter
 - [ ] R75.1 RED: test with encode_common_attributes on + marker codec asserting on-wire message "Encoded failure" and codec-tagged encoded_attributes, and from_failure recovery

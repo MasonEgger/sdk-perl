@@ -59,6 +59,7 @@ my %INFO    = map {
     NexusHandlerFailureInfo NexusOperationFailureInfo
 );
 my $PAYLOADS      = Temporalio::Core::Proto::resolve('temporal.api.common.v1.Payloads');
+my $DURATION      = Temporalio::Core::Proto::resolve('google.protobuf.Duration');
 my $ACTIVITY_TYPE = Temporalio::Core::Proto::resolve('temporal.api.common.v1.ActivityType');
 my $WF_EXECUTION  = Temporalio::Core::Proto::resolve('temporal.api.common.v1.WorkflowExecution');
 my $WF_TYPE       = Temporalio::Core::Proto::resolve('temporal.api.common.v1.WorkflowType');
@@ -75,6 +76,23 @@ class Temporalio::Converter::Failure {
     # encoding as UNSPECIFIED) and 'benign'.
     sub _category_number ($category) { ($category // '') eq 'benign' ? 1 : 0 }
     sub _category_name   ($number)   { ($number // 0) == 1 ? 'benign' : 'application' }
+
+    # Perl-side seconds (possibly fractional) <-> google.protobuf.Duration,
+    # for ApplicationFailureInfo.next_retry_delay (failure/v1/message.proto:27;
+    # parity audit, activity/conversion finding 1). Matches sdk-python
+    # _failure_converter.py:160-162 (write, only when truthy) and :340 (read).
+    # An absent proto Duration reads back as undef, the Perl-side "not set".
+    sub _duration_from_seconds ($seconds) {
+        my $whole = int($seconds);
+        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
+        return $DURATION->new({ seconds => $whole, nanos => $nanos });
+    }
+
+    sub _seconds_from_duration ($duration) {
+        return undef unless defined $duration;
+        return ($duration->seconds // 0)
+            + (($duration->nanos // 0) / 1_000_000_000);
+    }
 
     # to_failure($exception, $payload_converter) -> Failure proto instance.
     # Non-Temporalio values (plain string deaths, foreign objects) are wrapped
@@ -235,6 +253,10 @@ class Temporalio::Converter::Failure {
                         ? (type => $exception->type) : ()),
                     non_retryable => $exception->non_retryable ? 1 : 0,
                     $self->_maybe_payloads(details => $exception->details, $pc),
+                    ($exception->next_retry_delay
+                        ? (next_retry_delay =>
+                            _duration_from_seconds($exception->next_retry_delay))
+                        : ()),
                     category => _category_number($exception->category),
                 }));
         }
@@ -255,6 +277,7 @@ class Temporalio::Converter::Failure {
             type          => $info->type,
             non_retryable => $info->non_retryable ? 1 : 0,
             details       => $self->_from_payloads($info->details, $pc),
+            next_retry_delay => _seconds_from_duration($info->next_retry_delay),
             category      => _category_name($info->category),
             %common,
         );
@@ -437,7 +460,9 @@ Embedded payload lists (C<details>, C<last_heartbeat_details>) are converted
 through the supplied L<Temporalio::Converter::Payload>. Enum-valued fields
 cross the boundary as Temporal-spec strings on the Perl side — the lowercased
 suffix of the proto enum name (C<start_to_close>, C<in_progress>, ...) — and
-as numbers on the proto side; 0/UNSPECIFIED maps to C<undef>.
+as numbers on the proto side; 0/UNSPECIFIED maps to C<undef>. The
+C<ApplicationFailureInfo.next_retry_delay> Duration crosses as seconds
+(possibly fractional) on the Perl side, C<undef> when absent.
 
 =head1 BEHAVIOR NOTES
 
