@@ -447,12 +447,20 @@ class Temporalio::Client::WorkflowHandle {
     );
 
     # execute_update($name, \@args, %opts) — async (spec section 19.1). Sugar
-    # over start_update(wait_for_stage => 'completed') + ->result: starts the
-    # update, waits for it to complete, and returns the decoded result (or
-    # raises Temporalio::Exception::WorkflowUpdateFailed on a failed outcome).
+    # over start_update + ->result: starts the update, waits for it to
+    # complete, and returns the decoded result (or raises
+    # Temporalio::Exception::WorkflowUpdateFailed on a failed outcome).
+    # wait_for_stage defaults to 'completed' as in Python, whose
+    # execute_update takes no wait_for_stage kwarg at all and hard-codes
+    # WorkflowUpdateStage.COMPLETED (../sdk-python/temporalio/client/
+    # _workflow.py:792-836, :830). This surface funnels %opts through
+    # start_update, so the kwarg IS accepted here; per finding A17 / spec R69
+    # an explicit caller value is honored (the default goes BEFORE %opts).
+    # The pre-R69 code appended wait_for_stage => 'completed' AFTER %opts,
+    # silently clobbering the caller's value.
     async method execute_update ($name, $args = [], %opts) {
         my $update_handle = await $self->start_update(
-            $name, $args, %opts, wait_for_stage => 'completed');
+            $name, $args, wait_for_stage => 'completed', %opts);
         return await $update_handle->result;
     }
 
@@ -725,8 +733,10 @@ map via spec section 7.5.
 
 C<< await $handle->execute_update($name, \@args, %opts) >> starts a workflow
 update, waits for it to complete, and returns the decoded result (sugar over
-C<start_update(wait_for_stage =E<gt> 'completed')> followed by C<< ->result >>).
-A failed outcome raises L<Temporalio::Exception::WorkflowUpdateFailed>.
+C<start_update> followed by C<< ->result >>). C<wait_for_stage> defaults to
+C<'completed'> as in the Python SDK; an explicit caller value is honored
+rather than overridden. A failed outcome raises
+L<Temporalio::Exception::WorkflowUpdateFailed>.
 
 C<< await $handle->start_update($name, \@args, wait_for_stage =E<gt> 'accepted', %opts) >>
 sends C<UpdateWorkflowExecution> (retrying until the update is at least

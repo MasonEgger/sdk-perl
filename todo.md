@@ -315,13 +315,13 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R68.4 Verify: string die and foreign object survive as causes (identity preserved), POD states contract; prove -lj4 t green (163 files, 750 tests, live integration) and prove -lj4 xt green (414)
 
 ### Step R69: Close the Four Verified Cross-SDK Divergences
-- [ ] R69.1 RED: four tests: parity_backfills, parity_activity_priority_summary, parity_list_page_size, parity_execute_update_wait_for_stage (backfills quarter landed with commit 1: parity_backfills.t, honest RED on the singular kwarg; priority/summary quarter landed with commit 2: parity_activity_priority_summary.t, honest RED on the unknown-key Argument; page-size quarter landed with commit 3: parity_list_page_size.t, honest RED on the missing default, undef vs 1000, on both list calls; only parity_execute_update_wait_for_stage remains)
+- [x] R69.1 RED: four tests: parity_backfills, parity_activity_priority_summary, parity_list_page_size, parity_execute_update_wait_for_stage (all four landed: commit 1 parity_backfills.t, honest RED on the singular kwarg; commit 2 parity_activity_priority_summary.t, honest RED on the unknown-key Argument; commit 3 parity_list_page_size.t, honest RED on the missing default; commit 4 parity_execute_update_wait_for_stage.t, honest RED on the clobbered caller value, WaitPolicy stage 3 vs the requested 2)
 - [x] R69.2a GREEN (commit 1): add schedule backfills kwarg wired to proto (divergence per step-44 finding A17 is the kwarg FORM: Python `backfill` singular, _client.py:2675, vs shipped Ruby-style `backfills`, client.rb:684; create_schedule now accepts both wired to initial_patch.backfill_request, both-given raises Argument)
 - [x] R69.2b GREEN (commit 2): add activity priority/summary options carried to the command (schedule_activity now takes priority, a Temporalio::Common::Priority, wired to ScheduleActivity.priority, and summary, wired to the WorkflowCommand user_metadata.summary Payload; Python parity _workflow_instance.py:3155-3183; local activities keep summary and stay priority-less, the proto has no LA priority field)
 - [x] R69.2c GREEN (commit 3): send page-size defaults on list calls (list_workflows and list_schedules now default page_size to 1000 when the caller omits it, Python parity _client.py:1230 and :2732; the iterators already forwarded an explicit value, the gap was only the omitted-kwarg case; explicit values still win)
-- [ ] R69.2d GREEN (commit 4): stop execute_update overriding the caller's wait_for_stage
-- [ ] R69.3 REFACTOR: per-diff comment citing A17 and the checked Python behavior
-- [ ] R69.4 Verify: one passing assertion per item, four separate commits; prove -lj4 t and xt green
+- [x] R69.2d GREEN (commit 4): stop execute_update overriding the caller's wait_for_stage (the default 'completed' now goes BEFORE %opts so an explicit caller value wins; omitted-kwarg default stays COMPLETED, Python parity _workflow.py:830, whose execute_update takes no wait_for_stage kwarg at all and hard-codes COMPLETED)
+- [x] R69.3 REFACTOR: per-diff comment citing A17 and the checked Python behavior (all four diffs carry the A17 citation and the _client.py/_workflow_instance.py/_workflow.py anchors)
+- [x] R69.4 Verify: one passing assertion per item, four separate commits; prove -lj4 t and xt green (commit 4: t 167 files/760 tests green, xt 414 green)
 
 ## Phase P9: Parity — Interceptor and High-Value Gaps
 
