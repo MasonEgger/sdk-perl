@@ -386,10 +386,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R80.4 Verify: supplier-packing and mutual-exclusion assertions green; prove -lj4 t green under the memory guard (t: 177 files/795 tests PASS incl. live integration; xt: 422 PASS)
 
 ### Step R81: Add fairness_key and fairness_weight to Priority
-- [ ] R81.1 RED: unit test asserting to_proto sets priority_key, fairness_key, and fairness_weight (and leaves the latter two unset when absent)
-- [ ] R81.2 GREEN: accept fairness_key (string) and fairness_weight (float) and encode both into Priority (Common/Priority.pm)
-- [ ] R81.3 REFACTOR: validate fairness_weight type at construction as Python does; comment citing schedule/runtime finding 3 / message.proto:344,354
-- [ ] R81.4 Verify: three-field to_proto assertion green; prove -lj4 t green under the memory guard
+- [x] R81.1 RED: unit test asserting to_proto sets priority_key, fairness_key, and fairness_weight (and leaves the latter two unset when absent) (t/unit/priority_fairness.t; the unset subtest leans on the pure-Perl proto accessors returning undef for never-set fields; honest RED confirmed as "Unrecognised parameters ... fairness_weight, fairness_key")
+- [x] R81.2 GREEN: accept fairness_key (string) and fairness_weight (float) and encode both into Priority (Common/Priority.pm) (two new :param fields + readers; to_proto sets each `if defined`, matching Python's not-None guards in common.py:1212-1220)
+- [x] R81.3 REFACTOR: validate fairness_weight type at construction as Python does; comment citing schedule/runtime finding 3 / message.proto:344,354 (ADJUST guard throws Temporalio::Exception::Argument on non-numeric weight, test-driven; comment notes Python's __post_init__ only guards priority_key and its fairness_weight enforcement lands via the typed proto setter, so the construction-time check is the Perl equivalent; POD updated for both params/accessors)
+- [x] R81.4 Verify: three-field to_proto assertion green; prove -lj4 t green under the memory guard (t: 178 files/798 tests PASS incl. live integration; xt: 422 PASS)
 
 ### Step R82: Encode static_summary and static_details on the Schedule Action
 - [ ] R82.1 RED: request-capture/replay test asserting static_summary and static_details appear as encoded payloads in the emitted NewWorkflowExecutionInfo.user_metadata (none when absent)
