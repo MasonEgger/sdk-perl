@@ -37,6 +37,8 @@ class Temporalio::Schedule::Action::StartWorkflow
     field $search_attributes :param = undef;
     field $headers           :param = undef;
     field $priority          :param = undef;
+    field $static_summary    :param = undef;     # string or pre-encoded Payload
+    field $static_details    :param = undef;     # string or pre-encoded Payload
 
     # When constructed from a describe response, the args are raw Payloads kept
     # verbatim so describe->modify->update re-emits identical bytes.
@@ -67,6 +69,8 @@ class Temporalio::Schedule::Action::StartWorkflow
     method search_attributes { $search_attributes }
     method headers           { $headers }
     method priority          { $priority }
+    method static_summary    { $static_summary }
+    method static_details    { $static_details }
 
     # _to_proto($client) — async; encodes args/memo/headers/SAs through the
     # client's data converter and builds a ScheduleAction{start_workflow}.
@@ -114,6 +118,17 @@ class Temporalio::Schedule::Action::StartWorkflow
         if (defined $search_attributes) {
             $info{search_attributes} =
                 Temporalio::Client::_coerce_search_attributes($search_attributes);
+        }
+
+        # static_summary/static_details -> NewWorkflowExecutionInfo
+        # user_metadata (parity audit, schedule/runtime finding 1): reuse the
+        # shared R37 converter builder rather than a schedule-local copy, so
+        # a string encodes to a single Payload and a pre-encoded Payload
+        # passes through untouched. MUST-match sdk-python
+        # client/_schedule.py:551-552 (_to_proto's _encode_user_metadata).
+        if (defined $static_summary || defined $static_details) {
+            $info{user_metadata} = await $client->data_converter
+                ->encode_user_metadata($static_summary, $static_details);
         }
 
         my $NewInfo = Temporalio::Core::Proto::resolve(
@@ -184,7 +199,12 @@ trip re-emits identical bytes.
 Named parameters: C<workflow> (required, type-name string), C<id> (required),
 C<task_queue> (required), C<args>, C<execution_timeout>, C<run_timeout>,
 C<task_timeout> (seconds), C<retry_policy>, C<memo>, C<search_attributes>,
-C<headers>, C<priority>.
+C<headers>, C<priority>, C<static_summary>, C<static_details>.
+
+C<static_summary> and C<static_details> (each a string or a pre-encoded
+C<Payload>) become the started workflow's fixed summary/details: they encode
+into C<NewWorkflowExecutionInfo.user_metadata> exactly as they do on a direct
+C<start_workflow> call.
 
 =head1 METHODS
 
@@ -235,5 +255,13 @@ Accessor returning the headers hashref.
 =head2 priority
 
 Accessor returning the priority.
+
+=head2 static_summary
+
+Accessor returning the fixed single-line workflow summary (string or Payload).
+
+=head2 static_details
+
+Accessor returning the fixed workflow details (string or Payload).
 
 =cut

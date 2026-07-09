@@ -392,10 +392,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R81.4 Verify: three-field to_proto assertion green; prove -lj4 t green under the memory guard (t: 178 files/798 tests PASS incl. live integration; xt: 422 PASS)
 
 ### Step R82: Encode static_summary and static_details on the Schedule Action
-- [ ] R82.1 RED: request-capture/replay test asserting static_summary and static_details appear as encoded payloads in the emitted NewWorkflowExecutionInfo.user_metadata (none when absent)
-- [ ] R82.2 GREEN: StartWorkflow accepts static_summary/static_details (Action.pm:28-39) and _to_proto encodes them into user_metadata (Action.pm:73-124)
-- [ ] R82.3 REFACTOR: reuse the R37 user-metadata payload builder; comment citing schedule/runtime finding 1 / _schedule.py:551-552
-- [ ] R82.4 Verify: user_metadata payload assertions green; prove -lj4 t green under the memory guard
+- [x] R82.1 RED: request-capture/replay test asserting static_summary and static_details appear as encoded payloads in the emitted NewWorkflowExecutionInfo.user_metadata (none when absent) (t/unit/schedule_action_user_metadata.t, the schedule_request.t rpc-mock capture pattern; honest RED as `Unrecognised parameters ... static_summary, static_details`)
+- [x] R82.2 GREEN: StartWorkflow accepts static_summary/static_details (Action.pm:28-39) and _to_proto encodes them into user_metadata (Action.pm:73-124) (two :param fields + readers; _to_proto sets user_metadata only when either is defined, mirroring Client.pm's R37 guard)
+- [x] R82.3 REFACTOR: reuse the R37 user-metadata payload builder; comment citing schedule/runtime finding 1 / _schedule.py:551-552 (GREEN reused Converter::Data->encode_user_metadata from the start: string encodes to a single Payload, pre-encoded Payload passes through; POD updated for params/accessors)
+- [x] R82.4 Verify: user_metadata payload assertions green; prove -lj4 t green under the memory guard (t: 179 files/800 tests PASS incl. live integration; xt: 422 PASS)
 
 ## Phase P10: Parity — Medium and Low
 
