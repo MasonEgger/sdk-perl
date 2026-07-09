@@ -20,6 +20,7 @@ use Temporalio::Exception::Argument ();
         StartActivity StartLocalActivity StartChildWorkflow
         SignalChildWorkflow SignalExternalWorkflow ContinueAsNew
         StartNexusOperation Info
+        ExecuteNexusOperationStart ExecuteNexusOperationCancel
     )) {
         @{ "Temporalio::Worker::Interceptor::Input::${name}::ISA" } =
             ('Temporalio::Interceptor::Input');
@@ -59,6 +60,26 @@ class Temporalio::Worker::ActivityOutbound {
 
     method info      { $next->info($_[0]) }
     method heartbeat { $next->heartbeat($_[0]) }
+}
+
+# --- Nexus operation inbound base (spec R73) -------------------------------
+# Wraps Nexus operation starting and cancelling. The method set MUST-matches
+# sdk-python's NexusOperationInboundInterceptor (worker/_interceptor.py:500-528,
+# spec R73 parity finding 3): execute_nexus_operation_start and
+# execute_nexus_operation_cancel, each delegating to next by default. Unlike
+# the activity/workflow inbounds there is NO init/outbound side (Python has
+# none either); the chain root runs the handler via the input's private
+# `_root` coderef. The start input carries the operation context in `ctx` and
+# the operation input riding the writable `args` field (Python's single
+# mutable `input`, a documented spec section 0 surface deviation matching the
+# R72 heartbeat-details precedent); the cancel input carries `ctx` and `token`
+# (worker/_interceptor.py:485-497).
+class Temporalio::Worker::NexusOperationInbound {
+    field $next :param = undef;
+    method next { $next }
+
+    method execute_nexus_operation_start  { $next->execute_nexus_operation_start($_[0]) }
+    method execute_nexus_operation_cancel { $next->execute_nexus_operation_cancel($_[0]) }
 }
 
 # --- Workflow inbound base (spec section 27.1) -----------------------------
@@ -103,45 +124,48 @@ class Temporalio::Worker::WorkflowOutbound {
 # -> ActivityInbound, intercept_workflow($next) -> WorkflowInbound. Defaults
 # return $next unchanged (no-op interceptor).
 class Temporalio::Worker::Interceptor {
-    method intercept_activity { return $_[0] }
-    method intercept_workflow { return $_[0] }
+    method intercept_activity        { return $_[0] }
+    method intercept_workflow        { return $_[0] }
+    method intercept_nexus_operation { return $_[0] }
 }
 
 # --- Chain builders (spec section 27.2) ------------------------------------
 # First-listed interceptor is OUTERMOST: iterate in reverse, each wrapping the
-# accumulator over the root impl. Non-conforming returns die (spec 27.3).
-sub Temporalio::Worker::Interceptor::build_activity_inbound ($interceptors, $root) {
+# accumulator over the root impl. Non-conforming returns die (spec 27.3). All
+# three per-kind builders share the one fold below (spec R73 unification: the
+# nexus fold is the same reduce sdk-python runs for its middleware,
+# _interceptor.py:66-78,500-528 via _nexus.py:666-673, parity finding 3);
+# $hook is the Interceptor method to call and $inbound_class the required
+# return type.
+sub _fold_inbound ($interceptors, $root, $hook, $inbound_class) {
     my $chain = $root;
     for my $i (reverse @{ $interceptors // [] }) {
         _assert_worker_interceptor($i);
-        my $wrapped = $i->intercept_activity($chain);
+        my $wrapped = $i->$hook($chain);
         unless (Scalar::Util::blessed($wrapped)
-            && $wrapped->isa('Temporalio::Worker::ActivityInbound'))
+            && $wrapped->isa($inbound_class))
         {
             Temporalio::Exception::Argument->throw(
-                message => 'intercept_activity must return a '
-                         . 'Temporalio::Worker::ActivityInbound');
+                message => "$hook must return a $inbound_class");
         }
         $chain = $wrapped;
     }
     return $chain;
 }
 
+sub Temporalio::Worker::Interceptor::build_activity_inbound ($interceptors, $root) {
+    return _fold_inbound($interceptors, $root,
+        'intercept_activity', 'Temporalio::Worker::ActivityInbound');
+}
+
 sub Temporalio::Worker::Interceptor::build_workflow_inbound ($interceptors, $root) {
-    my $chain = $root;
-    for my $i (reverse @{ $interceptors // [] }) {
-        _assert_worker_interceptor($i);
-        my $wrapped = $i->intercept_workflow($chain);
-        unless (Scalar::Util::blessed($wrapped)
-            && $wrapped->isa('Temporalio::Worker::WorkflowInbound'))
-        {
-            Temporalio::Exception::Argument->throw(
-                message => 'intercept_workflow must return a '
-                         . 'Temporalio::Worker::WorkflowInbound');
-        }
-        $chain = $wrapped;
-    }
-    return $chain;
+    return _fold_inbound($interceptors, $root,
+        'intercept_workflow', 'Temporalio::Worker::WorkflowInbound');
+}
+
+sub Temporalio::Worker::Interceptor::build_nexus_operation_inbound ($interceptors, $root) {
+    return _fold_inbound($interceptors, $root,
+        'intercept_nexus_operation', 'Temporalio::Worker::NexusOperationInbound');
 }
 
 # Build a full inbound + outbound chain PAIR (spec R71/R72, parity findings 1
@@ -206,9 +230,11 @@ Defines the worker interceptor surfaces (spec section 27.1):
 =over 4
 
 =item * L<Temporalio::Worker::Interceptor> with C<intercept_activity($next)>
-returning a L<Temporalio::Worker::ActivityInbound> and
-C<intercept_workflow($next)> returning a L<Temporalio::Worker::WorkflowInbound>
-(Ruby's instance-returning shape). Defaults return C<$next> unchanged.
+returning a L<Temporalio::Worker::ActivityInbound>,
+C<intercept_workflow($next)> returning a L<Temporalio::Worker::WorkflowInbound>,
+and C<intercept_nexus_operation($next)> returning a
+L<Temporalio::Worker::NexusOperationInbound> (Ruby's instance-returning
+shape). Defaults return C<$next> unchanged.
 
 =item * L<Temporalio::Worker::ActivityInbound>: C<init($outbound)>,
 C<execute_activity($input)>.
@@ -223,6 +249,15 @@ chain, and the L<Temporalio::Activity::Context> routes the body's
 C<heartbeat()>/C<info()> through whatever outbound reaches the chain root.
 Heartbeat details ride the Input's writable C<args> field (Python's
 C<*details>).
+
+=item * L<Temporalio::Worker::NexusOperationInbound>:
+C<execute_nexus_operation_start>, C<execute_nexus_operation_cancel> (spec R73;
+the method set matches sdk-python's C<NexusOperationInboundInterceptor>,
+C<worker/_interceptor.py:500-528>). No init/outbound side (Python has none
+either). The NexusDispatcher folds the interceptor list over a
+handler-running root on every start/cancel. The start input carries the
+operation context in C<ctx> and the operation input riding the writable
+C<args> field; the cancel input carries C<ctx> and C<token>.
 
 =item * L<Temporalio::Worker::WorkflowInbound>: C<init($outbound)>,
 C<execute_workflow>, C<handle_signal>, C<handle_query>, C<validate_update>,
@@ -244,11 +279,12 @@ through whatever outbound reaches the chain root.
 
 =head1 FUNCTIONS
 
-=head2 build_activity_inbound / build_workflow_inbound
+=head2 build_activity_inbound / build_workflow_inbound / build_nexus_operation_inbound
 
 C<< Temporalio::Worker::Interceptor::build_activity_inbound(\@interceptors, $root) >>
-and the workflow variant fold the list so the first-listed interceptor is
-outermost, wrapping C<$root>. Non-conforming interceptors or returns die.
+and the workflow and nexus-operation variants fold the list so the
+first-listed interceptor is outermost, wrapping C<$root>. All three share one
+fold (spec R73). Non-conforming interceptors or returns die.
 
 =head2 build_chains
 

@@ -720,6 +720,10 @@ class Temporalio::Worker {
             task_queue     => $task_queue,
             client         => $client,
             loop           => $runtime->loop,
+            # The combined interceptor list drives the nexus-operation-inbound
+            # chain the dispatcher folds over each start/cancel (spec R73,
+            # parity finding 3).
+            interceptors   => $all_interceptors,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_nexus_task($completion_bytes);
             },

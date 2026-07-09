@@ -29,6 +29,14 @@ class NexusDef::Handler :isa(Temporalio::Nexus::Definition) {
             namespace => 'default', workflow_id => "op-wf-$input");
     }
 
+    # R73: a sync op that records its invocation onto @NexusDef::Handler::TRACE
+    # so the nexus-inbound interceptor test can assert the chain runs before
+    # the handler body.
+    method traced :SyncOperation('traced') ($ctx, $x) {
+        push @NexusDef::Handler::TRACE, 'handler:traced';
+        return "traced:$x";
+    }
+
     # R32 (finding L20): an operation that parks on a pending future, exposed
     # in $NexusDef::Handler::PARKED so the cancel_task test can observe the
     # dispatcher cancelling it.

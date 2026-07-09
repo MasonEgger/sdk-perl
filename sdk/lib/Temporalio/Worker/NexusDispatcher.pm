@@ -18,6 +18,8 @@ use Temporalio::Nexus::OperationContext ();
 use Temporalio::Nexus::OperationResult ();
 use Temporalio::Nexus::WorkflowHandle ();
 use Temporalio::Core::Proto ();
+use Temporalio::Worker::Interceptor ();
+use Temporalio::Worker::_RootNexusOperationInbound ();
 use Temporalio::Exception::NexusHandler ();
 use Temporalio::Exception::Nexus::OperationError ();
 use Temporalio::Exception::Application ();
@@ -35,6 +37,12 @@ class Temporalio::Worker::NexusDispatcher {
     field $client     :param = undef;
     field $loop       :param = undef;
     field $logger     :param = undef;
+
+    # The combined worker interceptor list (client-supplied then
+    # worker-supplied, outermost first), folded over a handler-running root on
+    # every start/cancel (spec R73, parity finding 3; sdk-python
+    # _interceptor.py:66-78,500-528 via _nexus.py:657-675).
+    field $interceptors :param = [];
 
     # A coderef ($completion_bytes) -> Future sending the serialized
     # NexusTaskCompletion to core. Injectable so unit tests capture completions
@@ -223,22 +231,39 @@ class Temporalio::Worker::NexusDispatcher {
                 info => $info, client => $client, logger => $logger,
                 headers => ($request->can('header') ? ($request->header // {}) : {}));
 
+        # R73 (parity finding 3): fold the interceptor list over a
+        # handler-running root and dispatch the start THROUGH the chain, the
+        # Perl form of sdk-python's nexus middleware
+        # (_interceptor.py:66-78,500-528 via _nexus.py:657-675). The input
+        # carries the operation context in `ctx`; the operation input rides
+        # the writable `args` field (Python's mutable `input`).
+        my $inbound = Temporalio::Worker::Interceptor::build_nexus_operation_inbound(
+            $interceptors, Temporalio::Worker::_RootNexusOperationInbound->new);
+        my $start_input =
+            Temporalio::Worker::Interceptor::Input::ExecuteNexusOperationStart->new(
+                ctx  => $ctx,
+                args => [$input],
+                _root => sub ($in) {
+                    # Invoke under the dynamically-scoped Nexus context, but
+                    # end the `dynamically` scope BEFORE any await: a
+                    # cancel_task abort (R32, finding L20) cancels this frame
+                    # via the wait_any in _handle_task, and cancelling a frame
+                    # suspended across a `dynamically` assignment segfaults
+                    # perl 5.38.2 (Syntax::Keyword::Dynamically +
+                    # Future::AsyncAwait cancel; verified empirically). The
+                    # scope ends when this closure returns the (not-yet-
+                    # awaited) future, so handler code up to its first await
+                    # still sees the context.
+                    dynamically $Temporalio::Nexus::CURRENT = $in->get('ctx');
+                    return $self->_invoke(
+                        $def->{code}, $in->get('ctx'), @{ $in->args });
+                },
+            );
+
         my $result;
         try {
-            # Invoke under the dynamically-scoped Nexus context, but end the
-            # `dynamically` scope BEFORE the await: a cancel_task abort (R32,
-            # finding L20) cancels this frame via the wait_any in
-            # _handle_task, and cancelling a frame suspended across a
-            # `dynamically` assignment segfaults perl 5.38.2
-            # (Syntax::Keyword::Dynamically + Future::AsyncAwait cancel;
-            # verified empirically). Handler code up to its first await still
-            # sees the context, and the old shape restored $CURRENT for the
-            # suspension anyway, so the observable semantics are unchanged.
-            my $op_future = do {
-                dynamically $Temporalio::Nexus::CURRENT = $ctx;
-                $self->_invoke($def->{code}, $ctx, $input);
-            };
-            $result = await $op_future;
+            $result = await $self->_invoke(
+                sub { $inbound->execute_nexus_operation_start($start_input) });
         }
         catch ($error) {
             # A handler OperationError is an operation-level failure, not a
@@ -298,17 +323,51 @@ class Temporalio::Worker::NexusDispatcher {
     }
 
     # Cancel operation: decode the token, cancel the backing workflow, ack.
+    # The cancel dispatches through the nexus-operation-inbound chain too
+    # (spec R73, parity finding 3; sdk-python _interceptor.py:493-497,524-528):
+    # the input carries a CancelOperationContext in `ctx` and the operation
+    # token in `token`, and the chain root runs the real cancel work.
     async method _handle_cancel_operation ($task_token, $request, $endpoint) {
         my $cancel = $request->cancel_operation;
         my $token  = $cancel->operation_token;
+
+        my $info = Temporalio::Nexus::OperationInfo->new(
+            service    => $cancel->service,
+            operation  => $cancel->operation,
+            endpoint   => $endpoint,
+            task_queue => $task_queue,
+        );
+        my $ctx = Temporalio::Nexus::CancelOperationContext->new(
+            info => $info, client => $client, logger => $logger,
+            operation_token => $token);
+
+        my $inbound = Temporalio::Worker::Interceptor::build_nexus_operation_inbound(
+            $interceptors, Temporalio::Worker::_RootNexusOperationInbound->new);
+        my $cancel_input =
+            Temporalio::Worker::Interceptor::Input::ExecuteNexusOperationCancel->new(
+                ctx   => $ctx,
+                token => $token,
+                _root => sub ($in) {
+                    return $self->_cancel_backing_workflow($in->get('token'));
+                },
+            );
+        await $self->_invoke(
+            sub { $inbound->execute_nexus_operation_cancel($cancel_input) });
+
+        my $cancel_resp = $CancelOperationResponse->new({});
+        return $self->_completion($task_token,
+            completed => $Response->new({ cancel_operation => $cancel_resp }));
+    }
+
+    # The real cancel work behind the chain root: cancel the backing workflow
+    # the operation token references (a no-op without a client or token).
+    async method _cancel_backing_workflow ($token) {
         if (defined $client && defined $token && length $token) {
             my $wf = Temporalio::Nexus::WorkflowHandle->from_token($token);
             my $handle = $client->get_workflow_handle($wf->workflow_id);
             await $handle->cancel;
         }
-        my $cancel_resp = $CancelOperationResponse->new({});
-        return $self->_completion($task_token,
-            completed => $Response->new({ cancel_operation => $cancel_resp }));
+        return;
     }
 
     # A handler OperationError -> failure-carrying StartOperationResponse: state
@@ -443,7 +502,15 @@ already-finished task token is a no-op.
 
     Temporalio::Worker::NexusDispatcher->new(
         registry => ..., data_converter => ..., task_queue => ...,
-        completer => sub { ... }, client => ..., logger => ...);
+        completer => sub { ... }, client => ..., logger => ...,
+        interceptors => [...]);
+
+C<interceptors> is the combined worker interceptor list (client-supplied then
+worker-supplied, outermost first). Each start/cancel folds it over a
+handler-running root via
+C<Temporalio::Worker::Interceptor::build_nexus_operation_inbound> and
+dispatches through the resulting
+L<Temporalio::Worker::NexusOperationInbound> chain (spec R73).
 
 =head1 METHODS
 

@@ -68,6 +68,11 @@ my %TRUSTME = (
     # heartbeat/info via the input's _root coderef. Documented collectively in
     # Temporalio::Worker::Interceptor's POD.
     'Temporalio::Worker::_RootActivityOutbound' => [ qr/^[a-z]/ ],
+    # The nexus operation inbound chain root (spec R73): same internal
+    # mechanism, methods mirror the NexusOperationInbound surface and run the
+    # real start/cancel handler via the input's _root coderef. Documented
+    # collectively in Temporalio::Worker::Interceptor's POD.
+    'Temporalio::Worker::_RootNexusOperationInbound' => [ qr/^[a-z]/ ],
 );
 
 my @modules = all_modules('lib');
