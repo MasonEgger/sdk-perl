@@ -81,6 +81,13 @@ class Temporalio::Worker::WorkflowDispatcher {
     # without a live worker.
     field $completer :param;
 
+    # Optional coderef ($run_id, $remove_from_cache_job) invoked on every
+    # eviction BEFORE the empty completion is sent (sdk-python parity:
+    # _workflow.py on_eviction_hook). The replay path (spec R43, finding R14)
+    # uses it to read the eviction reason; NONDETERMINISM is how core reports
+    # a history mismatch. Live workers leave it unset.
+    field $on_eviction :param = undef;
+
     # run_id => Temporalio::Workflow::Runner. One Runner per workflow run, kept
     # for the life of the run; dropped on RemoveFromCache (eviction). MUST-match
     # sdk-python _running_workflows (keyed by act.run_id).
@@ -140,8 +147,8 @@ class Temporalio::Worker::WorkflowDispatcher {
         # empty-success eviction completion, regardless of the other jobs
         # (MUST-match sdk-python _handle_activation: a cache_remove_job short-
         # circuits to _handle_cache_eviction and returns).
-        if (_has_eviction(\@jobs)) {
-            return await $self->_handle_eviction($run_id);
+        if (defined(my $remove_job = _eviction_job(\@jobs))) {
+            return await $self->_handle_eviction($run_id, $remove_job);
         }
 
         my $completion;
@@ -233,12 +240,15 @@ class Temporalio::Worker::WorkflowDispatcher {
     }
 
     # Eviction fast path (spec section 8.3 step 4 / 10.3 RemoveFromCache): tear
-    # down the cached Runner (if any) and send an empty successful completion
-    # without invoking any workflow code. Tolerates an uncached run (cache miss).
-    async method _handle_eviction ($run_id) {
+    # down the cached Runner (if any), report the RemoveFromCache job to the
+    # on_eviction hook (reason + message, the replay path's nondeterminism
+    # signal, spec R43), and send an empty successful completion without
+    # invoking any workflow code. Tolerates an uncached run (cache miss).
+    async method _handle_eviction ($run_id, $remove_job = undef) {
         if (my $runner = delete $runners{$run_id}) {
             $runner->evict;
         }
+        $on_eviction->($run_id, $remove_job) if defined $on_eviction;
         my $completion = $Completion->new({
             run_id     => $run_id,
             successful => { commands => [] },
@@ -399,11 +409,15 @@ class Temporalio::Worker::WorkflowDispatcher {
     # File-scope subs (a bare `class` file puts them in main:: — lessons.md, but
     # these take no $self so name them plainly inside the block).
 
-    sub _has_eviction ($jobs) {
+    # The RemoveFromCache message of the activation's eviction job, or undef
+    # when the activation carries none. The job's reason/message ride to the
+    # on_eviction hook (spec R43).
+    sub _eviction_job ($jobs) {
         for my $job (@$jobs) {
-            return 1 if ($job->which_variant // '') eq 'remove_from_cache';
+            return $job->remove_from_cache
+                if ($job->which_variant // '') eq 'remove_from_cache';
         }
-        return 0;
+        return undef;
     }
 
     sub _initialize_job ($activation) {
@@ -536,6 +550,12 @@ Constructs a Temporalio::Worker::WorkflowDispatcher. Named parameters:
 =item C<completer>
 
 (required)
+
+=item C<on_eviction>
+
+(optional, default C<undef>)
+Coderef C<($run_id, $remove_from_cache_job)> invoked on every eviction before the empty completion is sent (sdk-python C<on_eviction_hook> parity).
+The replay path reads the job's C<reason>/C<message> to detect nondeterminism (spec R43); live workers leave it unset.
 
 =item C<workflow_failure_exception_types>
 

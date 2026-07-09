@@ -546,10 +546,12 @@ Non-deterministic divergence during replay is detected and surfaced as
 
 #### Replay
 
-You can verify workflow code against real or hand-built histories without a server
-using [`Temporalio::Test::WorkflowReplay`](sdk/lib/Temporalio/Test/WorkflowReplay.pm) —
-useful for catching non-determinism introduced by a code change in CI. The
-[replay tests](sdk/t/replay/) exercise the runner this way.
+You can verify workflow code against recorded histories without a server using
+[`Temporalio::Test::WorkflowReplay`](sdk/lib/Temporalio/Test/WorkflowReplay.pm),
+useful for catching non-determinism introduced by a code change in CI.
+`replay_history` pushes a real `temporal.api.history.v1.History` through sdk-core's replayer, which compares every command the workflow emits against the recorded events and raises `Temporalio::Exception::Nondeterminism` on divergence.
+`push_activation` drives the deterministic runner directly with hand-built activations and returns the emitted commands; it checks command emission, not history consistency.
+The [replay tests](sdk/t/replay/) exercise both paths.
 
 ### Activities
 

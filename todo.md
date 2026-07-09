@@ -247,10 +247,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R49.4 Verify: xt probe passes; die no longer orphans CLI; prove -lj4 t and xt green
 
 ### Step R43: Make WorkflowReplay's Nondeterminism Claim True or Scoped
-- [ ] R43.1 RED: implemented -> t/replay/nondeterminism.t on mutated history; scoped -> xt grep probe for the overclaim
-- [ ] R43.2 GREEN: engage core replayer at WorkflowReplay:59-95, or scope README:545-552 and POD; record direction in commit
-- [ ] R43.3 REFACTOR: comment WorkflowReplay:59 with R14 and the chosen direction
-- [ ] R43.4 Verify: mutated-history error or grep finds no overclaim; prove -lj4 t and xt green
+- [x] R43.1 RED: implemented -> t/replay/nondeterminism.t on mutated history; scoped -> xt grep probe for the overclaim
+- [x] R43.2 GREEN: engage core replayer at WorkflowReplay:59-95, or scope README:545-552 and POD; record direction in commit
+- [x] R43.3 REFACTOR: comment WorkflowReplay:59 with R14 and the chosen direction
+- [x] R43.4 Verify: mutated-history error or grep finds no overclaim; prove -lj4 t and xt green
 
 ### Step R45: Revive the Dead Nexus Integration Test
 - [ ] R45.1 RED: perl -c on t/integration/nexus.t fails on with_worker and the API misuse

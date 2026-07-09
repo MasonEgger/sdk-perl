@@ -394,6 +394,32 @@ package Temporalio::Core::FFI::WorkerOrFail {
     );
 }
 
+package Temporalio::Core::FFI::WorkerReplayerOrFail {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreWorkerReplayerOrFail (header :828-832)
+    #   { TemporalCoreWorker *worker;
+    #     TemporalCoreWorkerReplayPusher *worker_replay_pusher;
+    #     const TemporalCoreByteArray *fail; }
+    # Returned BY VALUE from temporal_core_worker_replayer_new. On failure only
+    # fail is non-null (must be freed); on success worker AND pusher are set.
+    record_layout_1(
+        opaque => 'worker',
+        opaque => 'worker_replay_pusher',
+        opaque => 'fail',
+    );
+}
+
+package Temporalio::Core::FFI::WorkerReplayPushResult {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreWorkerReplayPushResult (header :834-836)
+    #   { const TemporalCoreByteArray *fail; }
+    # Returned BY VALUE from temporal_core_worker_replay_push. fail is non-null
+    # only when the pushed History bytes fail to decode (must be freed).
+    record_layout_1(
+        opaque => 'fail',
+    );
+}
+
 package Temporalio::Core::FFI::ClientEnvConfigLoadOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreClientEnvConfigLoadOptions (header :282-288):
@@ -484,6 +510,7 @@ $ffi->type('opaque' => $_) for qw(
     TemporalCoreCancellationToken
     TemporalCoreByteArray
     TemporalCoreEphemeralServer
+    TemporalCoreWorkerReplayPusher
     TemporalioPerlBridgeQueue
 );
 
@@ -505,6 +532,8 @@ $ffi->type('record(Temporalio::Core::FFI::TelemetryOptions)'     => 'TemporalCor
 $ffi->type('record(Temporalio::Core::FFI::RuntimeOptions)'       => 'TemporalCoreRuntimeOptions');
 $ffi->type('record(Temporalio::Core::FFI::RuntimeOrFail)'        => 'TemporalCoreRuntimeOrFail');
 $ffi->type('record(Temporalio::Core::FFI::WorkerOrFail)'         => 'TemporalCoreWorkerOrFail');
+$ffi->type('record(Temporalio::Core::FFI::WorkerReplayerOrFail)' => 'TemporalCoreWorkerReplayerOrFail');
+$ffi->type('record(Temporalio::Core::FFI::WorkerReplayPushResult)' => 'TemporalCoreWorkerReplayPushResult');
 $ffi->type('record(Temporalio::Core::FFI::ClientEnvConfigLoadOptions)'        => 'TemporalCoreClientEnvConfigLoadOptions');
 $ffi->type('record(Temporalio::Core::FFI::ClientEnvConfigProfileLoadOptions)' => 'TemporalCoreClientEnvConfigProfileLoadOptions');
 $ffi->type('record(Temporalio::Core::FFI::ClientEnvConfigOrFail)'             => 'TemporalCoreClientEnvConfigOrFail');
@@ -691,6 +720,25 @@ my @phase0_attach = (
       [ 'TemporalCoreWorker', 'opaque', 'opaque' ] => 'void' ],
     [ temporal_core_worker_free => 'worker_free',
       [ 'TemporalCoreWorker' ] => 'void' ],
+    # Replay worker (spec R43, finding R14). All three are SYNCHRONOUS, with no
+    # callback bridge, no shim involvement. replayer_new packs the same
+    # hand-packed TemporalCoreWorkerOptions buffer worker_new takes (opaque)
+    # but needs no connection (core mocks the client internally, sdk-core
+    # replay/mod.rs) and returns worker+pusher-or-fail BY VALUE. replay_push
+    # sends one serialized temporal.api.history.v1.History (with a caller-
+    # supplied workflow id; histories don't embed one); its fail is non-null
+    # only on a History decode error. The pusher must outlive every push's
+    # spawned send (c-bridge worker.rs: the send task borrows the pusher);
+    # free it only after the run's eviction has been observed. Dropping the
+    # pusher ends core's history stream and shuts the replay worker down.
+    [ temporal_core_worker_replayer_new => 'worker_replayer_new',
+      [ 'TemporalCoreRuntime', 'opaque' ] => 'TemporalCoreWorkerReplayerOrFail' ],
+    [ temporal_core_worker_replay_pusher_free => 'worker_replay_pusher_free',
+      [ 'TemporalCoreWorkerReplayPusher' ] => 'void' ],
+    [ temporal_core_worker_replay_push => 'worker_replay_push',
+      [ 'TemporalCoreWorker', 'TemporalCoreWorkerReplayPusher',
+        'TemporalCoreByteArrayRef', 'TemporalCoreByteArrayRef' ]
+        => 'TemporalCoreWorkerReplayPushResult' ],
     # Activity poll + complete (spec section 8.4). Both are async (callback
     # bridge): poll uses the 'worker_poll' kind (a TemporalCoreWorkerPollCallback
     # returning the serialized ActivityTask byte array, or null/null on
