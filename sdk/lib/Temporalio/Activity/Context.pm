@@ -27,7 +27,13 @@ class Temporalio::Activity::Context {
     field $info :param;
 
     # A Temporalio::Cancellation that fires when the activity is cancelled
-    # (server-requested cancel or worker shutdown), supplied by the dispatcher.
+    # for ANY cause — explicit server cancel, worker shutdown, pause, reset,
+    # timeout, or not-found — supplied by the dispatcher. The token alone does
+    # not say WHICH cause; cancellation_details below does (spec R76, parity
+    # worker finding 2 / activity+conversion finding 3: this comment used to
+    # conflate server-cancel with worker-shutdown as if they were the only two
+    # and interchangeable; sdk-python worker/_activity.py:221-226 delivers the
+    # cause alongside the cancel and bodies branch on it).
     field $cancellation :param;
 
     # The worker's Temporalio::Converter::Data — heartbeat() converts details
@@ -60,6 +66,25 @@ class Temporalio::Activity::Context {
     # ActivityHeartbeat BYTES, not Perl-level details, so there is nothing
     # chain-shaped to intercept parent-side.
     field $outbound :param = undef;
+
+    # The set-on-cancel holder ({ details => CancellationDetails-or-undef })
+    # the dispatcher writes the Cancel job's captured reason + details into
+    # (spec R76). Shared BY REFERENCE with the dispatcher's running-activity
+    # entry — Python's _ActivityCancellationDetailsHolder (activity.py:164-166)
+    # — so a cancel landing after this context was built is still observable.
+    # undef for direct constructions and the fork-pool child's context (the
+    # holder does not cross the fork: a pooled sync body sees the frozen
+    # `cancelled` flag and the R19 live-cancel relay but no details — a
+    # documented spec section 0 deviation, like the heartbeat chain above).
+    field $cancellation_details_holder :param = undef;
+
+    # cancellation_details() -> Temporalio::Activity::CancellationDetails or
+    # undef while the activity has not been cancelled (Python parity:
+    # activity.cancellation_details(), activity.py:315-317).
+    method cancellation_details {
+        return undef unless defined $cancellation_details_holder;
+        return $cancellation_details_holder->{details};
+    }
 
     # info() (spec section 9.3): the frozen info hashref, routed through the
     # outbound chain when one is installed (Python parity: every
@@ -187,7 +212,21 @@ spec section 0 deviation).
 
 =head2 cancellation
 
-The L<Temporalio::Cancellation> that fires when this activity is cancelled.
+The L<Temporalio::Cancellation> that fires when this activity is cancelled
+for any cause: an explicit server cancel, worker shutdown, pause, reset,
+timeout, or not-found. The token itself carries no cause; call
+L</cancellation_details> to find out which (spec R76 — this section used to
+present server-cancel and worker-shutdown as the interchangeable whole of
+cancellation).
+
+=head2 cancellation_details
+
+The L<Temporalio::Activity::CancellationDetails> captured from the C<Cancel>
+activity task (its reason plus the six boolean causes), or C<undef> while the
+activity has not been cancelled. Set once when the cancel arrives; mirrors
+sdk-python's C<activity.cancellation_details()>. The fork-pool child's
+context always reports C<undef> (the holder does not cross the fork, a
+documented spec section 0 deviation).
 
 =head2 client / data_converter / payload_converter
 
@@ -234,6 +273,11 @@ Constructs a Temporalio::Activity::Context. Named parameters:
 
 (optional, default C<undef>) The finished activity-outbound interceptor
 chain; when set, C<info> and C<heartbeat> route through it.
+
+=item C<cancellation_details_holder>
+
+(optional, default C<undef>) The dispatcher-shared set-on-cancel holder that
+L</cancellation_details> reads (spec R76). C<undef> reports no details.
 
 =back
 

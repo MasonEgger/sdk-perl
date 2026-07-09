@@ -35,6 +35,12 @@ sub info () { context()->info }
 # heartbeat(@details) -> record a heartbeat on the current activity.
 sub heartbeat (@details) { context()->heartbeat(@details) }
 
+# cancellation_details() -> the current activity's
+# Temporalio::Activity::CancellationDetails, or undef while it has not been
+# cancelled (spec R76; mirrors sdk-python activity.cancellation_details,
+# activity.py:315-317).
+sub cancellation_details () { context()->cancellation_details }
+
 # complete_async() -> declare the activity will complete out of band (spec
 # section 22). Throws Temporalio::Exception::Activity::CompleteAsync; the
 # activity dispatcher catches that class specifically and reports
@@ -79,6 +85,13 @@ activity-context functional surface (C<Temporalio::Activity::context> and
 friends, spec section 9.3), documented under L</METHODS>.
 
 =head1 METHODS
+
+=head2 cancellation_details
+
+Returns the current activity's L<Temporalio::Activity::CancellationDetails>
+(why it was cancelled: reason plus boolean causes, spec R76), or C<undef>
+while the activity has not been cancelled. Dies if called outside an
+activity.
 
 =head2 context
 

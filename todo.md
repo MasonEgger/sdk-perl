@@ -356,10 +356,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R75.4 Verify: on-wire encoded + recovery assertions green; prove -lj4 t green under the memory guard (t: 172 files/778 tests green incl. live integration; xt: 420 green; Data.pm:99-102 codec transform of encoded_attributes confirmed by the binary/xor-test tag assertion)
 
 ### Step R76: Expose Activity Cancellation Details and Reason
-- [ ] R76.1 RED: unit test delivering WORKER_SHUTDOWN and PAUSED cancels and asserting the context reports the matching reason and details
-- [ ] R76.2 GREEN: capture Cancel reason + ActivityCancellationDetails (ActivityDispatcher.pm:105-113) and add a cancellation_details accessor on Context.pm
-- [ ] R76.3 REFACTOR: fix Context POD conflating server-cancel with worker-shutdown; comment citing worker finding 2 / _activity.py:221-226
-- [ ] R76.4 Verify: reason/details assertions green; prove -lj4 t and xt green under the memory guard
+- [x] R76.1 RED: unit test delivering WORKER_SHUTDOWN and PAUSED cancels and asserting the context reports the matching reason and details (t/unit/activity_cancellation_details.t: park-on-cancel body observes reason name + the six boolean causes post-wake, package-fn identity, un-cancelled and holderless contexts report undef; all four subtests failed honestly pre-fix on the missing cancellation_details method)
+- [x] R76.2 GREEN: capture Cancel reason + ActivityCancellationDetails (ActivityDispatcher.pm:105-113) and add a cancellation_details accessor on Context.pm (new Temporalio::Activity::CancellationDetails value class with from_proto mirroring activity.py:180-191; the dispatcher registers a set-on-cancel holder shared by reference with the Context, Python's _ActivityCancellationDetailsHolder shape, and _handle_cancel fills it BEFORE firing the token per _activity.py:221-226; reason rides as the enum NAME, a deliberate addition over Python which logs-and-drops it; Temporalio::Activity::cancellation_details() package fn added per activity.py:315-317)
+- [x] R76.3 REFACTOR: fix Context POD conflating server-cancel with worker-shutdown; comment citing worker finding 2 / _activity.py:221-226 (field comment + =head2 cancellation now list all six causes and point to cancellation_details; both cite R76, worker finding 2 / activity+conversion finding 3, and _activity.py:221-226; fork-pool child's undef documented as a spec section 0 deviation)
+- [x] R76.4 Verify: reason/details assertions green; prove -lj4 t and xt green under the memory guard (t: 173 files/782 tests green incl. live integration; xt: 422 green with the new module's POD)
 
 ### Step R77: Add workflow.uuid4 Deterministic UUID
 - [ ] R77.1 RED: replay test asserting uuid4() is a valid v4, stable across replay, differs from a second call, and is seeded from the activation randomness seed

@@ -15,6 +15,7 @@ use Scalar::Util ();
 use Syntax::Keyword::Dynamically;
 
 use Temporalio::Activity ();          # the context()/info()/heartbeat() surface
+use Temporalio::Activity::CancellationDetails ();
 use Temporalio::Activity::Context ();
 use Temporalio::Activity::Invocation ();
 use Temporalio::Cancellation ();
@@ -110,6 +111,17 @@ class Temporalio::Worker::ActivityDispatcher {
                . " activity task token '$task_token' dropped\n";
             return;
         }
+        # Capture the Cancel job's reason + ActivityCancellationDetails into
+        # the holder shared with the Activity::Context BEFORE firing the
+        # token, so a body woken by ->cancelled already sees them via
+        # $ctx->cancellation_details (spec R76, parity worker finding 2 /
+        # activity+conversion finding 3). Pre-R76 both fields were discarded
+        # and a body could not tell WHY it was cancelled. Python sets the
+        # shared holder then cancels the same way
+        # (worker/_activity.py:221-226).
+        $entry->{details_holder}{details} =
+            Temporalio::Activity::CancellationDetails::from_proto(
+                $cancel->reason, $cancel->details);
         $entry->{cancellation}->cancel;
         return;
     }
@@ -119,8 +131,20 @@ class Temporalio::Worker::ActivityDispatcher {
     # Activity::Context, build + send the completion, then remove from the map.
     async method _handle_start ($task_token, $start) {
         my $cancellation = Temporalio::Cancellation->new;
+        # The set-on-cancel holder for the Cancel job's captured reason +
+        # details (spec R76): created at registration and shared BY REFERENCE
+        # with the Activity::Context built below, so a cancel landing at any
+        # point after registration (even across the awaits before the context
+        # exists) is visible through the context. The Perl form of Python's
+        # _ActivityCancellationDetailsHolder shared between the running-
+        # activity record and the context (activity.py:164-166,
+        # worker/_activity.py:221-223).
+        my $details_holder = { details => undef };
         # Register before running so a concurrent cancel task can find it.
-        $running{$task_token} = { cancellation => $cancellation };
+        $running{$task_token} = {
+            cancellation   => $cancellation,
+            details_holder => $details_holder,
+        };
 
         my $completion;
         try {
@@ -212,6 +236,7 @@ class Temporalio::Worker::ActivityDispatcher {
                     heartbeat_recorder => $heartbeat_recorder
                         // sub ($bytes) { return undef },
                     outbound           => $outbound,
+                    cancellation_details_holder => $details_holder,
                 );
                 $running{$task_token}{context} = $ctx;
 
@@ -419,10 +444,14 @@ serialized C<coresdk.activity_task.ActivityTask> and branches on its variant:
 =item C<cancel>
 
 Looks up the running activity by C<task_token> in the dispatcher's
-running-activities map and cancels its L<Temporalio::Cancellation> so a
-cooperating body observing C<< $ctx->cancellation >> sees the cancellation. No
-completion is sent for the cancel task itself; the running activity reports via
-its own completion. An unknown token is warned about and dropped.
+running-activities map, captures the cancel's C<reason> and
+C<ActivityCancellationDetails> as a
+L<Temporalio::Activity::CancellationDetails> the body can read via
+C<< $ctx->cancellation_details >> (spec R76), then cancels the activity's
+L<Temporalio::Cancellation> so a cooperating body observing
+C<< $ctx->cancellation >> sees the cancellation. No completion is sent for
+the cancel task itself; the running activity reports via its own completion.
+An unknown token is warned about and dropped.
 
 =item C<start>
 
