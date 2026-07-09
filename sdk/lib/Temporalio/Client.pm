@@ -271,10 +271,11 @@ class Temporalio::Client {
         );
     }
 
-    # list_workflows($query, page_size => 100) — returns an async iterator
-    # yielding WorkflowExecutionInfo records page-by-page (spec section 7.4;
-    # sdk-python _impl.py list_workflows 391-394). No RPC until the first
-    # ->next is awaited.
+    # list_workflows($query, page_size => 100): synchronous. Returns the
+    # iterator itself (an object with one async method, ->next, yielding one
+    # WorkflowExecutionInfo per await and undef when exhausted; spec section
+    # 7.4 / R64, finding A9; sdk-python _impl.py list_workflows 391-394).
+    # No RPC until the first ->next is awaited.
     method list_workflows ($query = undef, %opts) {
         Temporalio::Common::Options::assert_known_keys(
             'list_workflows', \%opts, { page_size => 1 });
@@ -1035,7 +1036,9 @@ Retry defaults match sdk-core exactly and retries run inside sdk-core, not
 the Perl layer. Keep-alive defaults on (30s/15s); disable with
 C<< keep_alive => 0 >>. C<update_api_key> rotates the bearer token on the
 live connection synchronously; rotation is always manual (spec section
-7.3). Lazy connections are deferred past v0.1.
+7.3). Connections are always established eagerly: the C<lazy> option is
+accepted for reference-SDK parity but any true value raises
+L<Temporalio::Exception::Argument> (see L</connect>).
 
 Every client RPC funnels through the private C<_rpc_call> helper: it
 encodes the request proto, calls C<temporal_core_client_rpc_call> over the
@@ -1044,8 +1047,8 @@ against the client retry config), decodes the typed response, and maps
 failures onto the exception hierarchy via the spec section 7.5 MUST-match
 table in L<Temporalio::Core::Callback>.
 
-Workflow operations (C<start_workflow> and friends, spec section 7.4)
-arrive in later plan steps.
+Workflow operations (C<start_workflow> and friends, spec section 7.4) are
+documented under L</METHODS>.
 
 =head2 Option strictness
 
@@ -1098,7 +1101,87 @@ Constructs a Temporalio::Client. Named parameters:
 
 =head2 connect
 
-Class method (async): connects to a Temporal server at the given target and returns a L<Future> resolving to a new client. Accepts namespace, identity, tls, retry config and runtime options.
+    my $client = await Temporalio::Client->connect(
+        'localhost:7233',            # target host:port, positional, required
+        namespace => 'default',
+    );
+
+Class method (async): connects to a Temporal server at the given
+C<host:port> target and returns a L<Future> resolving to a new client.
+Named options (spec R66; each entry states its type and default):
+
+=over 4
+
+=item C<namespace>
+
+(string; default C<'default'>) The namespace every workflow, schedule, and
+visibility call made through this client addresses.
+
+=item C<api_key>
+
+(string; default none) Bearer token sent as gRPC metadata on every RPC.
+Rotate it later with L</update_api_key>.
+
+=item C<tls>
+
+(boolean, hashref, or L<Temporalio::Client::TlsConfig>; default off) TLS
+configuration. A bare true value enables TLS with defaults; a hashref is
+passed to the config constructor. PEM material (content or path) is
+validated and slurped before any RPC.
+
+=item C<identity>
+
+(string; default C<< <pid>@<hostname> >>) The client identity reported to
+the server.
+
+=item C<rpc_metadata>
+
+(hashref of string to string; default none) Extra gRPC metadata headers
+sent on every RPC. Keys and values must not contain newlines.
+
+=item C<retry>
+
+(hashref or L<Temporalio::Client::RetryConfig>; default the sdk-core retry
+defaults) Per-call retry policy; retries run inside sdk-core, not the Perl
+layer.
+
+=item C<keep_alive>
+
+(boolean, hashref, or L<Temporalio::Client::KeepAliveConfig>; default on
+with a 30s interval and 15s timeout) HTTP/2 keep-alive. Pass
+C<< keep_alive => 0 >> to disable.
+
+=item C<data_converter>
+
+(L<Temporalio::Converter::Data>; default
+C<< Temporalio::Converter::Data->new >>) The payload, failure, and codec
+conversion pipeline.
+
+=item C<interceptors>
+
+(arrayref of interceptor instances; default C<[]>) The outbound interceptor
+chain, first-listed outermost (spec section 27). A worker built on this
+client inherits the list and appends its own.
+
+=item C<lazy>
+
+(boolean; default 0) Accepted for reference-SDK parity but not implemented:
+any true value raises L<Temporalio::Exception::Argument>. Connections are
+always established eagerly, inside C<connect> itself.
+
+=item C<http_connect_proxy>
+
+(hashref or L<Temporalio::Client::HttpConnectProxyConfig>; default none)
+Routes the connection through an HTTP CONNECT proxy. Requires
+C<target_host>; C<basic_auth_user> and C<basic_auth_pass> are optional and
+must be given together.
+
+=item C<runtime>
+
+(L<Temporalio::Runtime>; default C<< Temporalio::Runtime->default >>) The
+runtime whose IO::Async loop and core runtime back this client.
+
+=back
 
 =head2 connection
 
@@ -1154,7 +1237,19 @@ Accessor returning the C<identity> value.
 
 =head2 list_workflows
 
-Async. Returns a L<Future> resolving to a L<Temporalio::Client::WorkflowExecutionIterator> over executions matching the given visibility query.
+    my $iter = $client->list_workflows($query, page_size => 100);
+    while (defined(my $info = await $iter->next)) { ... }
+
+Synchronous: returns an iterator object at once, without an RPC. The
+iterator's public contract is a single async method, C<next>. Each
+C<< await $iter->next >> yields one
+C<temporal.api.workflow.v1.WorkflowExecutionInfo> proto message for an
+execution matching the given visibility query, then C<undef> once every
+page is exhausted. Pages of the C<ListWorkflowExecutions> RPC are fetched
+lazily (C<page_size> rows per page, the server default when omitted), so
+the first RPC happens when the first C<next> is awaited. The iterator's
+class name is private; rely on the C<next> contract described here (spec
+R64).
 
 =head2 namespace
 

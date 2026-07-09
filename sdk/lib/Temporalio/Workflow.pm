@@ -22,9 +22,9 @@ use Temporalio::Exception::Workflow::NoRunner ();
 # which the runner sets via Syntax::Keyword::Dynamically around the workflow
 # body. Calling any of them outside a workflow body raises
 # Temporalio::Exception::Workflow::NoRunner. The deterministic-execution
-# functions land incrementally: replay-safety accessors (P3.3),
-# execute_activity/start_activity (P3.4), start_timer/sleep (P3.5);
-# continue_as_new and friends arrive in later phases.
+# surface spans the replay-safety accessors, execute_activity/start_activity,
+# start_timer/sleep, continue_as_new, and the v0.2 additions (child
+# workflows, updates, external handles, memo/search-attribute upserts).
 
 # Internal: return the active runner or raise NoRunner. $CURRENT lives in the
 # Temporalio::Workflow::Runner package; we read it by its fully-qualified name
@@ -133,9 +133,9 @@ sub execute_activity ($activity, %opts) {
 
 # start_activity($activity, %opts) -> the activity handle (a Workflow::Future).
 # Same scheduling as execute_activity; returned without awaiting so the caller
-# can start several activities concurrently before awaiting them. (The richer
-# ActivityHandle surface — cancel, result — is a Workflow::Future today; it
-# grows in a later phase.)
+# can start several activities concurrently before awaiting them. (The handle
+# is a Workflow::Future: await it for the result, ->cancel it to request
+# activity cancellation.)
 sub start_activity ($activity, %opts) {
     return _runner()->schedule_activity(
         activity_type => _activity_type_name($activity),

@@ -1671,9 +1671,9 @@ class Temporalio::Workflow::Runner {
 
     # process_activation($activation) -> the WorkflowActivationCompletion proto.
     method process_activation ($activation) {
-        # Steps 1-2: activation context. (Step 3 job ordering + the full job
-        # set land as later phases add job kinds; the skeleton handles
-        # InitializeWorkflow and runs the body to completion.)
+        # Steps 1-2: activation context. (Step 3 job ordering and the full
+        # job set are handled below: the jobs are ordered into the de-facto
+        # Temporal sets and applied via _apply_job.)
         $is_replaying = $activation->is_replaying ? 1 : 0;
         $run_id //= $activation->run_id;
         if (my $ts = $activation->timestamp) {
@@ -1873,8 +1873,8 @@ class Temporalio::Workflow::Runner {
         if ($variant eq 'do_update') {
             return $self->_apply_do_update($job->do_update);
         }
-        # RemoveFromCache (handled by the dispatcher fast path) and friends land
-        # in later phases.
+        # RemoveFromCache never reaches the runner (the dispatcher's eviction
+        # fast path consumes it); any other variant is unknown to this SDK.
         warn "Temporalio::Workflow::Runner: ignoring unhandled activation job"
            . " variant '$variant'\n";
         return;
@@ -3222,10 +3222,10 @@ class Temporalio::Workflow::Runner {
     }
 
     # Pump phase (spec section 10.3 pump semantics): drive any ready Future
-    # continuations. For the skeleton there are no pending workflow Futures, so
-    # the main run Future is either already ready (Future::AsyncAwait ran the
-    # body to completion synchronously) or genuinely blocked on a future a
-    # later phase resolves. No IO::Async, no wall-clock.
+    # continuations. The main run Future is either already ready
+    # (Future::AsyncAwait ran the body to completion synchronously) or
+    # genuinely blocked on a pending workflow Future that a job in a
+    # subsequent activation resolves. No IO::Async, no wall-clock.
     method _pump (%opts) {
         # Future::AsyncAwait runs the body and fires its on_ready continuations
         # synchronously when the awaited futures resolve, so activity/timer
@@ -4045,7 +4045,9 @@ A normal return — C<CompleteWorkflowExecution { result }> (T-wf-11).
 
 =back
 
-Signals/queries and the dispatcher's eviction fast path land in later phases.
+Query and update responses ride the same per-activation command buffer as
+these outcome commands; C<RemoveFromCache> eviction is consumed by the
+dispatcher's fast path and never reaches the runner.
 
 =head2 Sequence numbers
 

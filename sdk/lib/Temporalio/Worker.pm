@@ -1090,10 +1090,11 @@ C<run> returns once both loops drain their C<ShutDown> sentinels, then
 finalizes and frees the worker.
 
 The WorkerOptions are marshalled by L<Temporalio::Core::FFI::WorkerOptions>
-(the hand-packed C<TemporalCoreWorkerOptions> buffer proven in plan P0.10):
-versioning is always C<None{build_id}>, the tuner is four C<FixedSize> slot
-suppliers built from the C<max_concurrent_*> kwargs, task types enable
-workflows + remote activities only, and the pollers are C<simple_maximum>.
+(the hand-packed C<TemporalCoreWorkerOptions> buffer proven in plan P0.10).
+Absent explicit options, versioning is C<None{build_id}>, the tuner is four
+C<FixedSize> slot suppliers built from the C<max_concurrent_*> kwargs, and
+the pollers are C<simple_maximum>; C<deployment_options>, C<tuner>, and the
+C<*_poller_behavior> kwargs select the other strategies (spec 29.1-29.3).
 Time-valued kwargs are seconds Perl-side and packed as milliseconds.
 Defaults match the reference SDKs (sdk-ruby C<worker.rb>): cache 1000, slots
 100, sticky 10s, heartbeat throttle 60s/30s, graceful shutdown 0s, pollers 5,
@@ -1121,8 +1122,7 @@ here: finalize awaits core's worker shutdown, which blocks until the
 workflow/activity poll loops return C<ShutDown> — and with no C<run> loop
 driving them that await would deadlock. The full graceful sequence
 (initiate, drain in-flight activities up to C<graceful_shutdown_period>,
-finalize, free) is issued from C<run> once the poll loops have drained;
-C<run> and those loops arrive in later plan steps (P2.4 / P3.6).
+finalize, free) is issued from C<run> once the poll loops have drained.
 
 =head2 Determinism guard lifecycle
 
@@ -1153,6 +1153,193 @@ already-compiled call sites, so when the last worker is destroyed the armed
 overrides simply remain as passthroughs for all non-workflow code.
 C<disable_determinism_guard> means this worker never arms the guard; it cannot
 un-arm a guard another worker armed.
+
+=head1 CONSTRUCTOR
+
+=head2 new
+
+    my $worker = Temporalio::Worker->new(
+        client => $client, task_queue => 'demo', ...);
+
+Constructs a worker (spec 8.1). An unrecognised kwarg raises
+L<Temporalio::Exception::Argument>. Named parameters (spec R66; each entry
+states its type and default):
+
+=over 4
+
+=item C<client>
+
+(L<Temporalio::Client>; required) The connected client whose core runtime,
+namespace, identity, and data converter the worker uses.
+
+=item C<task_queue>
+
+(string; required) The task queue to poll.
+
+=item C<workflows>
+
+(arrayref of workflow class names; default C<[]>) Workflow definitions to
+register (spec 8.6). Each class must declare exactly one C<:Run> method;
+duplicate workflow types raise.
+
+=item C<activities>
+
+(arrayref of activity class names or function definitions; default C<[]>)
+Activity definitions to register.
+
+=item C<nexus_services>
+
+(arrayref of Nexus service class names or instances; default C<[]>) Nexus
+services to register (spec section 26.2); duplicate service names raise.
+
+=item C<interceptors>
+
+(arrayref of interceptor instances; default C<[]>) Appended to the client's
+interceptor list; the combined list folds first-listed outermost over the
+inbound activity and workflow chains (spec section 27.2).
+
+=item C<build_id>
+
+(string; default the MD5 of the sorted C<%INC> contents, a stable
+per-process identity) Worker build id (spec 29.1). Combined with
+C<use_worker_versioning> it selects the deprecated legacy build-id
+strategy; mutually exclusive with C<deployment_options>.
+
+=item C<deployment_options>
+
+(L<Temporalio::Worker::DeploymentOptions>; default none) Deployment-based
+worker versioning, the primary strategy (spec 29.1). Mutually exclusive
+with C<build_id> and C<use_worker_versioning>.
+
+=item C<use_worker_versioning>
+
+(boolean; default 0) Opts into the deprecated legacy build-id versioning
+strategy together with C<build_id>.
+
+=item C<identity_override>
+
+(string; default none, the client identity is reported) Overrides the
+identity this worker reports to the server.
+
+=item C<max_cached_workflows>
+
+(integer; default 1000) Sticky workflow cache size.
+
+=item C<max_concurrent_workflow_tasks>
+
+(integer; default 100) Workflow task slot count; mutually exclusive with
+C<tuner>.
+
+=item C<max_concurrent_activities>
+
+(integer; default 100) Activity slot count; mutually exclusive with
+C<tuner>.
+
+=item C<max_concurrent_local_activities>
+
+(integer; default 100) Local activity slot count; mutually exclusive with
+C<tuner>.
+
+=item C<max_concurrent_workflow_task_polls>
+
+(integer; default unset; deprecated, spec 29.3) Legacy workflow poller
+count. When passed explicitly it overrides C<workflow_task_poller_behavior>
+with a C<SimpleMaximum> of that value.
+
+=item C<max_concurrent_activity_task_polls>
+
+(integer; default unset; deprecated, spec 29.3) Legacy activity poller
+count, the activity-side analogue of
+C<max_concurrent_workflow_task_polls>.
+
+=item C<workflow_task_poller_behavior>
+
+(L<Temporalio::Worker::PollerBehavior::SimpleMaximum> or
+C<::Autoscaling>; default C<SimpleMaximum(5)>) Workflow task poller
+behavior (spec 29.3).
+
+=item C<activity_task_poller_behavior>
+
+(L<Temporalio::Worker::PollerBehavior::SimpleMaximum> or
+C<::Autoscaling>; default C<SimpleMaximum(5)>) Activity task poller
+behavior (spec 29.3).
+
+=item C<nexus_task_poller_behavior>
+
+(L<Temporalio::Worker::PollerBehavior::SimpleMaximum> or
+C<::Autoscaling>; default C<SimpleMaximum(5)>) Nexus task poller behavior
+(spec 29.3); there is no legacy poll-count equivalent.
+
+=item C<tuner>
+
+(L<Temporalio::Worker::Tuner>; default a C<FixedSize> tuner synthesized
+from the C<max_concurrent_*> slot kwargs) Slot-supplier tuner (spec 29.2);
+mutually exclusive with the three C<max_concurrent_*> slot kwargs.
+
+=item C<nonsticky_to_sticky_poll_ratio>
+
+(float; default 0.2) Ratio of nonsticky to sticky polls.
+
+=item C<sticky_queue_schedule_to_start_timeout>
+
+(seconds; default 10) Schedule-to-start timeout on the sticky queue.
+
+=item C<max_heartbeat_throttle_interval>
+
+(seconds; default 60) Longest interval activity heartbeats are throttled
+to.
+
+=item C<default_heartbeat_throttle_interval>
+
+(seconds; default 30) Heartbeat throttle used when the activity declares no
+heartbeat timeout.
+
+=item C<max_activities_per_second>
+
+(float; default unset) Per-worker activity rate limit.
+
+=item C<max_task_queue_activities_per_second>
+
+(float; default unset) Task-queue-wide activity rate limit.
+
+=item C<graceful_shutdown_period>
+
+(seconds; default 0) How long shutdown waits for in-flight activities
+before cancelling them.
+
+=item C<workflow_failure_exception_types>
+
+(arrayref of exception class names; default C<[]>) Exception classes that
+fail the workflow execution instead of the workflow task (spec R13).
+
+=item C<nondeterminism_as_workflow_fail>
+
+(boolean; default 0) Routes detected non-determinism to a workflow failure
+instead of a retried workflow task failure.
+
+=item C<no_remote_activities>
+
+(boolean; default 0) Bridge-side flag: disables the remote activity poller
+entirely, so an eager activity declined for slots times out
+schedule-to-start (spec 23.2).
+
+=item C<disable_eager_activity_execution>
+
+(boolean; default 0) Workflow-side flag: sets C<do_not_eagerly_execute> on
+every emitted C<ScheduleActivity> command (spec 23.2).
+
+=item C<disable_determinism_guard>
+
+(boolean; default 0) This worker never arms the process-global determinism
+guard (spec 29.4). It cannot disarm a guard another worker armed; see
+L</Determinism guard lifecycle>.
+
+=item C<sync_activity_workers>
+
+(integer; default 4) IO::Async::Function fork-pool size for synchronous
+activities (spec 9.4).
+
+=back
 
 =head1 METHODS
 

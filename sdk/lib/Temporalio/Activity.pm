@@ -74,9 +74,9 @@ Temporalio::Activity - entry point for activity authors
 
 C<use Temporalio::Activity;> in an activity module loads
 L<Temporalio::Activity::Definition> so the C<:isa> base resolves and the
-C<:Defn> attribute handler is in scope. The activity-context functional
-surface (C<Temporalio::Activity::context>, etc. — spec section 9.3) is added
-in a later phase.
+C<:Defn> attribute handler is in scope. This package also hosts the
+activity-context functional surface (C<Temporalio::Activity::context> and
+friends, spec section 9.3), documented under L</METHODS>.
 
 =head1 METHODS
 

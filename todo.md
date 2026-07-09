@@ -279,10 +279,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R56-R59.4 Verify: typed wrapper, UTF-8 raise, empty-data Python parity, POD maps to code; prove -lj4 t and xt green
 
 ### Step R64-R66: POD Pass
-- [ ] R64-R66.1 RED: xt grep probe for "arrives later"; xt kwarg-vs-POD cross-check for Worker->new and connect; list_workflows behavior test
-- [ ] R64-R66.2 GREEN: fix list_workflows POD (Client:275-281,:1109-1111); strip stale POD (Client:1010-1011, Worker:1060-1063, Activity:74-79); document all kwargs + connect options
-- [ ] R64-R66.3 REFACTOR: keep the xt cross-check general; comment with A9/A11/A12
-- [ ] R64-R66.4 Verify: grep returns nothing, xt cross-check passes, return type matches test; prove -lj4 t and xt green
+- [x] R64-R66.1 RED: xt grep probe for "arrives later"; xt kwarg-vs-POD cross-check for Worker->new and connect; list_workflows behavior test
+- [x] R64-R66.2 GREEN: fix list_workflows POD (Client:275-281,:1109-1111); strip stale POD (Client:1010-1011, Worker:1060-1063, Activity:74-79); document all kwargs + connect options
+- [x] R64-R66.3 REFACTOR: keep the xt cross-check general; comment with A9/A11/A12
+- [x] R64-R66.4 Verify: grep returns nothing, xt cross-check passes, return type matches test; prove -lj4 t and xt green
 
 ### Step R54: Ship the Promised Workflow memo and search_attributes Readers
 - [ ] R54.1 RED: t/replay/workflow_memo_sa_readers.t reads both before and after an upsert

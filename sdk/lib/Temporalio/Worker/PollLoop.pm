@@ -93,7 +93,7 @@ Temporalio::Worker::PollLoop - poll a task queue and dispatch tasks
 
 =head1 DESCRIPTION
 
-The generic activity (and, in a later phase, workflow) poll loop of spec
+The generic poll loop, shared by the activity and workflow sides, of spec
 section 8.4. C<run> awaits the injected C<poll_source> for the next task's
 serialized bytes, exits on the C<undef> ShutDown sentinel, and otherwise hands
 the bytes to the C<dispatcher>'s C<dispatch_task> method. Dispatches run

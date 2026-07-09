@@ -358,11 +358,13 @@ with exactly one variant set; the L<Temporalio::Workflow::Runner> buffers them
 during an activation and drains the buffer into the
 C<WorkflowActivationCompletion> it returns to the worker.
 
-The set grows as later phases land (signal/query response commands, child
-workflow commands, and so on). This module hosts the completion-outcome
-commands (C<complete_workflow_execution>, C<fail_workflow_execution>,
-C<cancel_workflow_execution>, C<continue_as_new_workflow_execution>),
-C<schedule_activity> (P3.4), and C<start_timer> / C<cancel_timer> (P3.5).
+This module hosts the completion-outcome commands
+(C<complete_workflow_execution>, C<fail_workflow_execution>,
+C<cancel_workflow_execution>, C<continue_as_new_workflow_execution>), the
+activity, local-activity, and timer commands, query and update responses,
+child and external workflow commands, Nexus operation commands, patch
+markers, and the memo and search-attribute upserts. Each builder is
+documented under L</FUNCTIONS>.
 
 =head1 FUNCTIONS
 
