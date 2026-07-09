@@ -51,7 +51,6 @@ requires 'File::ShareDir';
 on 'test' => sub {
     requires 'Test2::V1';
     requires 'Test::Future::AsyncAwait';
-    requires 'Net::EmptyPort';
 };
 
 on 'develop' => sub {

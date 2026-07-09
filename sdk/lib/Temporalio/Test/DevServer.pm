@@ -9,7 +9,6 @@ use File::Basename ();
 use File::Path ();
 use File::Spec ();
 use Future ();
-use Net::EmptyPort ();
 use POSIX ();
 use Scalar::Util ();
 use Temporalio::Core::Callback ();
@@ -111,9 +110,21 @@ class Temporalio::Test::DevServer {
         my $download_dest_dir = delete $options{download_dest_dir};
         my $download_ttl      = delete $options{download_ttl_seconds} // 0;
 
-        # Random free port per server (spec section 12.2 / pitfalls item 5)
-        # so `prove -j` files never collide.
-        my $port      = delete $options{port}      // Net::EmptyPort::empty_port();
+        # Port selection (finding T-flake / spec R34): pass port 0 through
+        # the bridge (TestServerOptions.port is documented "0 means default
+        # behavior" in the pinned C header) so sdk-core picks the free port
+        # itself (its get_free_port binds :0, then parks the pick in
+        # TIME_WAIT via a self-connect so the kernel cannot re-issue it) and
+        # reports the ACTUAL bound endpoint back through the start
+        # callback's success_target, which lands in $started->{target}
+        # below. The pre-fix code picked a port with Net::EmptyPort and
+        # FREED it before core's CLI could bind: a select-then-free TOCTOU
+        # inside the kernel's outbound ephemeral range that produced
+        # bind-failure and wrong-server flakes under prove -j4 (the known
+        # updates.t flake). Dropping Net::EmptyPort here also closed R61
+        # (finding L29, its test-phase-only cpanfile misclassification) by
+        # deleting the dependency; t/unit/emptyport_range.t pins both.
+        my $port      = delete $options{port}      // 0;
         my $namespace = delete $options{namespace} // 'default';
         my $ip        = delete $options{ip}        // '127.0.0.1';
         my $database_filename = delete $options{database_filename};
@@ -404,8 +415,10 @@ C<temporal_core_ephemeral_server_start_dev_server> (spec section 12.2),
 awaiting the start through the callback bridge. sdk-core spawns the
 C<temporal> CLI binary: the C<existing_path> option (defaulting to the
 C<TEMPORAL_CLI> environment variable) runs an installed binary; when both
-are unset sdk-core downloads and caches one. Each server gets a random
-free port via L<Net::EmptyPort> so parallel test files never collide, and
+are unset sdk-core downloads and caches one. Each server gets a free port
+picked and reserved by sdk-core itself (port 0 rides the bridge and the
+bound endpoint is read back from the start callback, spec R34) so parallel
+test files never collide, and
 the server's stderr is redirected to C<t/tmp/dev-server.E<lt>pidE<gt>.log>
 (override with C<stderr_file>) so failures are debuggable without
 polluting TAP.
@@ -418,7 +431,7 @@ timeout is not leaked: a reaper continuation shuts the late-started CLI
 down and frees its handle (spec R33). Remaining options with their defaults:
 C<runtime> (the process-default L<Temporalio::Runtime>, which must outlive
 the server), C<namespace> ('default'), C<ip> ('127.0.0.1'), C<port>
-(random free port), C<database_filename> (in-memory), C<ui> (off),
+(0: sdk-core picks a free port), C<database_filename> (in-memory), C<ui> (off),
 C<ui_port>, C<log_format> ('pretty'), C<log_level> ('warn'), C<extra_args>
 (arrayref of extra CLI args), C<sdk_name>/C<sdk_version>/
 C<download_version>/C<download_dest_dir>/C<download_ttl_seconds> (download

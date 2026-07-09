@@ -235,10 +235,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R33+R46+R47+R48.4 Verify: reaper observed, retryable shutdown, diagnostic text, connect retry; prove -lj4 t and xt green
 
 ### Step R34+R61: Remove the Ephemeral-Port Race and Fix the Net::EmptyPort Dependency Phase
-- [ ] R34+R61.1 RED: concurrent four-server integration test (skip_all offline) + emptyport_range unit probe + cpanfile dependency-audit assertion
-- [ ] R34+R61.2 GREEN: race-free port strategy at DevServer:109,:143; drop-or-rephase Net::EmptyPort in DevServer:12 and cpanfile
-- [ ] R34+R61.3 REFACTOR: comment the port site with T-flake and the chosen strategy; note R34/R61 coupling
-- [ ] R34+R61.4 Verify: no bind failure/cross-connect, updates.t flake gone, cpanfile phase matches uses; prove -lj4 t and xt green
+- [x] R34+R61.1 RED: concurrent four-server integration test (skip_all offline) + emptyport_range unit probe + cpanfile dependency-audit assertion
+- [x] R34+R61.2 GREEN: race-free port strategy at DevServer:109,:143; drop-or-rephase Net::EmptyPort in DevServer:12 and cpanfile
+- [x] R34+R61.3 REFACTOR: comment the port site with T-flake and the chosen strategy; note R34/R61 coupling
+- [x] R34+R61.4 Verify: no bind failure/cross-connect, updates.t flake gone, cpanfile phase matches uses; prove -lj4 t and xt green
 
 ### Step R49: Register Dev-Server Teardown in END Blocks
 - [ ] R49.1 RED: xt/devserver_end_teardown.t statically asserts END-block teardown in every DevServer-using integration file (fails now)
