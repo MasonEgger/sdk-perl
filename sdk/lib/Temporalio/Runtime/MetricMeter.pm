@@ -45,25 +45,70 @@ class Temporalio::Runtime::MetricMeter {
     # Handle tables: SHIM-allocated ids -> the Perl objects create_metric /
     # new_attributes returned. The shim allocates the id (returned to core
     # synchronously) and parks a create request carrying it; this drain binds
-    # the id here. The record drain looks metrics up by the same id. A bind that
-    # has not landed yet (create request not drained) leaves the id absent, so
-    # its buffered records are held until the bind (never dropped). A create
-    # that returns undef binds the id to a disabled sentinel so its records
-    # drop. Process-global alongside $ACTIVE (one meter at a time).
+    # the id here. The record drain looks metrics up by the same id. A bind
+    # that has not landed yet (create request not drained) leaves the id
+    # absent, so its records buffer in %PENDING until the bind lands (never
+    # dropped; finding L28 / spec R60, the same promise the shim registry doc
+    # makes). A create that returns undef binds the id to a disabled
+    # sentinel so its records drop. Process-global alongside $ACTIVE (one
+    # meter at a time).
     our %METRIC;       # shim id => create_metric return value (undef = disabled)
     our %ATTRIBUTES;   # shim id => new_attributes return value
 
+    # Records drained before their metric's create request bound (the shim
+    # parks requests and aggregates records on separate channels, so a core
+    # thread can slip a create in after the drain's requests loop but record
+    # before the records snapshot). Bounded to one drain cycle: FIFO request
+    # order means a pending id's create is ALWAYS in the very next requests
+    # loop, and _flush_pending (run right after that loop) applies the buffer.
+    # (Finding L28 / spec R60: buffer-until-bound, never dropped.)
+    our %PENDING;      # shim metric id => [record hashrefs awaiting the bind]
+
+    # Frees drained this cycle, applied only AFTER the records drain
+    # (_apply_deferred_frees). FIFO parking means a create+record+free burst
+    # between two wakeups would otherwise bind and immediately delete the
+    # handle in the requests loop, and the records drain would then drop the
+    # value (finding L28 / spec R60). Any record for a freed id was aggregated
+    # before the free was parked, so it is always visible to the records drain
+    # of the same cycle that defers the free: deleting afterwards loses
+    # nothing, and no stale record can still reference the deleted id.
+    our @DEFERRED_FREE;    # [ 'metric' | 'attributes', shim id ] pairs
+
+    # Rate-limit state for the two warn sites (the POD promises rate-limited
+    # warns; finding L28 / spec R60 flagged them as unconditional). At most one
+    # warn per site per $WARN_INTERVAL_SECONDS window.
+    our %WARN_LAST;    # site key => epoch seconds of the last emitted warn
+    our $WARN_INTERVAL_SECONDS = 5;
+
     sub active        ($class) { $ACTIVE }
     sub _set_active   ($class, $meter) {
-        $ACTIVE     = $meter;
-        %METRIC     = ();
-        %ATTRIBUTES = ();
+        $ACTIVE        = $meter;
+        %METRIC        = ();
+        %ATTRIBUTES    = ();
+        %PENDING       = ();
+        @DEFERRED_FREE = ();
+        %WARN_LAST     = ();
         return;
     }
     sub _clear_active ($class) {
-        $ACTIVE     = undef;
-        %METRIC     = ();
-        %ATTRIBUTES = ();
+        $ACTIVE        = undef;
+        %METRIC        = ();
+        %ATTRIBUTES    = ();
+        %PENDING       = ();
+        @DEFERRED_FREE = ();
+        %WARN_LAST     = ();
+        return;
+    }
+
+    # Emit $message via warn at most once per $WARN_INTERVAL_SECONDS per site
+    # key, as the POD promises (finding L28 / spec R60). A throwing meter in a
+    # hot record path would otherwise warn once per aggregated bucket.
+    sub _warn_rate_limited ($class, $site, $message) {
+        my $now  = time;
+        my $last = $WARN_LAST{$site};
+        return if defined $last && ($now - $last) < $WARN_INTERVAL_SECONDS;
+        $WARN_LAST{$site} = $now;
+        warn $message;
         return;
     }
 
@@ -127,8 +172,9 @@ class Temporalio::Runtime::MetricMeter {
 
         my $ok = eval { $class->_dispatch_request($meter, $tag, $request_ptr); 1 };
         unless ($ok) {
-            warn "Temporalio::Runtime::MetricMeter: meter method threw,"
-               . " disabling that handle: $@";
+            $class->_warn_rate_limited(dispatch_threw =>
+                "Temporalio::Runtime::MetricMeter: meter method threw,"
+              . " disabling that handle: $@");
             # Bind the create id (if any) to disabled so its records drop.
             if ($tag == _REQ_METRIC_NEW || $tag == _REQ_ATTRIBUTES_NEW) {
                 my $id = Temporalio::Core::FFI::meter_req_new_id($request_ptr);
@@ -163,19 +209,62 @@ class Temporalio::Runtime::MetricMeter {
             $ATTRIBUTES{$id} = $meter->new_attributes($append_from, \%attrs);
             return;
         }
+        # Frees are DEFERRED to _apply_deferred_frees (after the records drain
+        # of the same cycle) so a create+record+free burst parked between two
+        # wakeups cannot delete the handle before its records apply (finding
+        # L28 / spec R60). Double-free stays a no-op (delete of absent).
         if ($tag == _REQ_METRIC_FREE) {
             my $free_id = Temporalio::Core::FFI::meter_req_free_id($request_ptr);
-            delete $METRIC{$free_id};    # double-free no-ops (delete of absent)
+            push @DEFERRED_FREE, [ metric => $free_id ];
             return;
         }
         if ($tag == _REQ_ATTRIBUTES_FREE) {
             my $free_id = Temporalio::Core::FFI::meter_req_free_id($request_ptr);
-            delete $ATTRIBUTES{$free_id};
+            push @DEFERRED_FREE, [ attributes => $free_id ];
             return;
         }
-        # _REQ_METER_FREE: the meter itself is being dropped; clear the tables.
-        %METRIC     = ();
-        %ATTRIBUTES = ();
+        # _REQ_METER_FREE: the meter itself is being dropped; clear the tables
+        # (buffered records and deferred frees included; nothing can bind or
+        # apply after this).
+        %METRIC        = ();
+        %ATTRIBUTES    = ();
+        %PENDING       = ();
+        @DEFERRED_FREE = ();
+        return;
+    }
+
+    # Apply records that buffered in %PENDING before their metric's create
+    # request bound (finding L28 / spec R60: buffer-until-bound). Called by the
+    # drain right after the requests loop: FIFO parking guarantees any pending
+    # id's create was in that loop, so an id still unbound here belongs to a
+    # create parked mid-cycle and stays buffered for the next cycle. A bind to
+    # the disabled sentinel (undef) makes _apply_record drop the buffer.
+    sub _flush_pending ($class) {
+        for my $id (keys %PENDING) {
+            next unless exists $METRIC{$id};
+            my $records = delete $PENDING{$id};
+            $class->_apply_record($_) for @$records;
+        }
+        return;
+    }
+
+    # Run the frees deferred during this cycle's requests loop (finding L28 /
+    # spec R60). Called by the drain after the records drain: every record for
+    # a freed id was aggregated before the free was parked and the records
+    # drain loops until empty, so all of them applied already; deleting now
+    # loses nothing and no stale record can reference the id later (shim ids
+    # are monotonic, never reused).
+    sub _apply_deferred_frees ($class) {
+        for my $free (splice @DEFERRED_FREE) {
+            my ($which, $id) = @$free;
+            if ($which eq 'metric') {
+                delete $METRIC{$id};
+                delete $PENDING{$id};    # belt-and-braces; flushed already
+            }
+            else {
+                delete $ATTRIBUTES{$id};
+            }
+        }
         return;
     }
 
@@ -203,17 +292,23 @@ class Temporalio::Runtime::MetricMeter {
     # Apply one drained aggregation bucket to the meter. $record is a hashref
     # { metric_id, attributes_id, record_kind (1=int,2=float,3=duration), value,
     # count }. Looks the metric and attribute handles up in the tables and calls
-    # the matching record_* method. A stale/disabled handle (no table entry) is
-    # dropped. A throwing record_* is caught (rate-limited warn) so it never
-    # poisons sibling buckets in the drain batch.
+    # the matching record_* method. A not-yet-bound id buffers in %PENDING
+    # until its create request lands (finding L28 / spec R60: never dropped);
+    # a disabled handle (undef sentinel) drops. A throwing record_* is caught
+    # (rate-limited warn) so it never poisons sibling buckets in the drain
+    # batch.
     sub _apply_record ($class, $record) {
         my $meter = $ACTIVE;
         return unless defined $meter;
 
-        # A bound handle (defined) applies; a disabled (undef sentinel), freed,
-        # or not-yet-bound id drops. The Callback drain runs parked create
-        # requests before records in the same cycle, so a metric recorded in the
-        # same cycle it was created is already bound.
+        # An id with no table entry at all is a create parked after this
+        # cycle's requests loop (frees defer past this drain, and shim ids are
+        # never reused, so absent means not-yet-bound): buffer until the bind
+        # lands. A disabled bind (undef sentinel) drops.
+        if (!exists $METRIC{ $record->{metric_id} }) {
+            push @{ $PENDING{ $record->{metric_id} } }, $record;
+            return;
+        }
         my $metric = $METRIC{ $record->{metric_id} };
         return unless defined $metric;
         my $attributes = $record->{attributes_id}
@@ -229,8 +324,9 @@ class Temporalio::Runtime::MetricMeter {
             1;
         };
         unless ($ok) {
-            warn "Temporalio::Runtime::MetricMeter: record_* threw, dropping"
-               . " aggregated value: $@";
+            $class->_warn_rate_limited(record_threw =>
+                "Temporalio::Runtime::MetricMeter: record_* threw, dropping"
+              . " aggregated value: $@");
         }
         return;
     }
@@ -305,9 +401,17 @@ the core thread until the drain runs the Perl method). When a marshalled
 callback fires on the main thread itself (e.g. metric creation during worker
 construction) the shim runs the Perl method B<inline> to avoid self-deadlock.
 
+Records are never dropped by the marshalling (finding L28 / spec R60,
+buffer-until-bound): a record drained before its metric's create request has
+bound is buffered and applied once the bind lands, and frees apply only after
+the record drain, so a create/record/free burst between two drain wakeups
+loses nothing. The only records intentionally dropped are those of a disabled
+metric (C<create_metric> returned C<undef> or threw) and any still buffered
+when the runtime shuts down.
+
 A meter method that throws is caught and the affected handle disabled or the
-record dropped (rate-limited C<warn>); a method must never unwind across the C
-ABI.
+record dropped (a C<warn> rate-limited to one per site per five seconds); a
+method must never unwind across the C ABI.
 
 =head1 CONSTRUCTOR
 

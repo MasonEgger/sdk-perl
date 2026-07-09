@@ -291,10 +291,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R54.4 Verify: initial then updated values returned; xt pod covers readers; prove -lj4 t and xt green (t: 159 files/733 tests incl. live integration; xt: 414 after adding Workflow.pm + Runner.pm POD entries)
 
 ### Step R60: Align Metric-Drop Behavior with Its Documentation
-- [ ] R60.1 RED: metric_meter_drop.t asserts documented unbound-record behavior and warn rate-limiting
-- [ ] R60.2 GREEN: buffer-until-bound or document the drop window at MetricMeter:46-52; rate-limit the warning at :217-218,:130
-- [ ] R60.3 REFACTOR: comment with L28 and the chosen direction; make doc and code agree
-- [ ] R60.4 Verify: unbound path matches doc, warn rate-limited, decision in commit; prove -lj4 t and xt green
+- [x] R60.1 RED: metric_meter_drop.t asserts documented unbound-record behavior and warn rate-limiting (4 subtests: create+record+free burst via the shim callbacks, buffer-until-bound white-box, both warn sites rate-limited; all 4 failed honestly)
+- [x] R60.2 GREEN: chose buffer-until-bound (records buffer in %PENDING until the create binds; frees defer past the records drain so a create/record/free burst loses nothing); both warn sites go through _warn_rate_limited (one per site per 5s)
+- [x] R60.3 REFACTOR: comments cite L28/R60 at every touched site; POD Threading section now states the never-dropped contract and the 5s warn rate limit, agreeing with the shim registry doc and the Callback.pm drain doc
+- [x] R60.4 Verify: all 4 metric_meter_drop.t subtests green, existing metric_meter.t untouched-green; prove -lj4 t green (160 files, 737 tests, live integration) and prove -lj4 xt green (414, after rewording a comment that tripped the R65 arrives-later guard)
 
 ### Step R63: Accept the Spec-Promised Workflow Argument Forms in start_workflow
 - [ ] R63.1 RED: start_workflow_argforms.t passes a definition class and a ref, asserts resolved type in the request, keeps string form

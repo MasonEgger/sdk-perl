@@ -373,10 +373,15 @@ class Temporalio::Core::Callback {
         # Service the custom-meter channels (spec section 28.2) on the same
         # main-thread wakeup: first the marshalled create/free requests parked
         # by off-core-thread callbacks (run the Perl method, post the result so
-        # the blocked core thread proceeds), then the aggregated record buckets.
+        # the blocked core thread proceeds), then any records buffered before
+        # their bind landed, then the aggregated record buckets, and only then
+        # the frees the requests loop deferred, so a create/record/free burst
+        # parked between wakeups never drops a record (finding L28 / spec R60).
         if (defined Temporalio::Runtime::MetricMeter->active) {
             _service_meter_requests();
+            Temporalio::Runtime::MetricMeter->_flush_pending;
             _drain_meter_records();
+            Temporalio::Runtime::MetricMeter->_apply_deferred_frees;
         }
 
         # Service custom slot-supplier callbacks (spec §29.2) on the same
