@@ -188,10 +188,14 @@ T2->subtest('workflow activation routes every inbound method through the chain' 
         ],
     }));
 
+    # Signal and update hooks fire BEFORE execute_workflow: init-activation
+    # signals and updates are applied before the main routine starts (spec R26
+    # signals-before-main, matching sdk-python's set 1 before set 2); queries
+    # are always last (set 3).
     T2->is(\@trace, [
-        'A:execute_workflow', 'B:execute_workflow',
         'A:handle_signal',    'B:handle_signal',
         'A:handle_update',    'B:handle_update',
+        'A:execute_workflow', 'B:execute_workflow',
         'A:handle_query',     'B:handle_query',
     ], 'every inbound method invoked, outermost (client) first then worker');
 

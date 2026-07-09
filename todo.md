@@ -167,10 +167,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R25.4 Verify: present-with-values and omitted-defaults assertions pass; prove -lj4 t green
 
 ### Step R26: Deliver Init Signals Before the Main Routine Starts
-- [ ] R26.1 RED: replay init_signal_ordering.t asserts an init-activation signal handler's side effect is visible to the main routine's prologue
-- [ ] R26.2 GREEN: apply same-activation signal jobs before the main routine's synchronous prologue at Runner.pm:2317-2319,:1709,:1716
-- [ ] R26.3 REFACTOR: make the signals-before-main job order explicit; cite R12 + ../sdk-python ordering
-- [ ] R26.4 Verify: handler-visible-to-prologue assertion passes and post-start signals still work; prove -lj4 t green
+- [x] R26.1 RED: replay init_signal_ordering.t asserts an init-activation signal handler's side effect is visible to the main routine's prologue
+- [x] R26.2 GREEN: apply same-activation signal jobs before the main routine's synchronous prologue at Runner.pm:2317-2319,:1709,:1716
+- [x] R26.3 REFACTOR: make the signals-before-main job order explicit; cite R12 + ../sdk-python ordering
+- [x] R26.4 Verify: handler-visible-to-prologue assertion passes and post-start signals still work; prove -lj4 t green
 
 ### Step R27+R38: Determinism-Guard Install Point and Override Accountability
 - [ ] R27+R38.1 RED: subprocess-guarded determinism_guard_load_order.t (pre-loaded workflow trips the guard) + unit determinism_guard.t (stock time/rand outside workflow context)

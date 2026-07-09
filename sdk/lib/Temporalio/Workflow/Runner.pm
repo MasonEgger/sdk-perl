@@ -335,6 +335,13 @@ class Temporalio::Workflow::Runner {
     # handler). Workflow-scoped (persists across activations until drained).
     field %buffered_signals;
 
+    # Monotonic arrival stamp for buffered signals (spec R26): each buffered
+    # entry is [stamp, job]. The buffer is keyed by name, so without the stamp
+    # the drain would visit names in hash order and scramble CROSS-name arrival
+    # order; sdk-python applies init-activation signals in job order
+    # (_workflow_instance.py activate() set 1), so the drain sorts by stamp.
+    field $buffered_signal_arrival = 0;
+
     # In-progress signal-handler Futures (spec section 10.3 ASYNC HANDLER
     # TRACKING; MUST-match sdk-python self._in_progress_signals): a hash keyed by
     # a monotonic handler id -> the handler's Future. An async :Signal handler
@@ -1632,7 +1639,9 @@ class Temporalio::Workflow::Runner {
         # Signals (set 1) run BEFORE InitializeWorkflow (set 2): a signal that
         # arrives in the init activation has no instance to dispatch against yet,
         # so _apply_signal_workflow buffers it; _apply_initialize then drains the
-        # buffer once the instance exists (T-wf-3 visibility).
+        # buffer once the instance exists, BEFORE kicking off the :Run body, so
+        # handler side effects are visible to the main routine's first statement
+        # (T-wf-3 visibility; spec R26 signals-before-main).
         dynamically $Temporalio::Workflow::Runner::CURRENT = $self;
         my $set_index = -1;
         try {
@@ -1874,6 +1883,25 @@ class Temporalio::Workflow::Runner {
             Temporalio::Worker::Interceptor::build_workflow_inbound(
                 $interceptors,
                 Temporalio::Worker::_RootWorkflowInbound->new);
+        # SIGNALS-BEFORE-MAIN (spec R26, finding R12): drain the init
+        # activation's buffered signals (then updates) BEFORE kicking off the
+        # :Run body, so handler side effects are visible to the main routine's
+        # FIRST statement. That is signal-with-start parity with sdk-python,
+        # where activate() applies the signal_workflow + do_update set and
+        # pumps the loop before initialize_workflow starts the main routine
+        # (_workflow_instance.py:438-471), and _apply_signal_workflow
+        # (:1057-1065) dispatches registered handlers immediately. The inbound
+        # interceptor chain is already built above, so drained handlers route
+        # through it exactly as post-start ones do. Pre-fix the body was kicked
+        # off first and the drain ran after, so the prologue saw pre-signal
+        # state.
+        $self->_drain_buffered_signals;
+        # Drain any updates buffered before the instance existed (spec section
+        # 19.2): a DoUpdate ordered before InitializeWorkflow in the init
+        # activation is dispatched here, after the buffered signals and, like
+        # them, before the main routine starts (Python set 1).
+        $self->_drain_buffered_updates;
+
         # Thread the start headers off the InitializeWorkflow job into the
         # inbound input the same way the outbound paths (schedule_activity et
         # al., ~L497) carry their `Str => Payload` header maps: the now-invoked
@@ -1890,17 +1918,6 @@ class Temporalio::Workflow::Runner {
                 _root   => sub ($in) { $instance->$run_ref(@{ $in->args }) },
             );
         $main_run_future = $workflow_inbound->execute_workflow($execute_input);
-
-        # Drain any signals buffered before the instance existed (spec section
-        # 10.3 T-wf-3 QUEUEING; MUST-match sdk-python draining _buffered_signals
-        # once a handler is available). The :Run body was just kicked off above,
-        # so a drained signal handler's state mutation is visible to the run
-        # continuation when it next makes progress.
-        $self->_drain_buffered_signals;
-        # Drain any updates buffered before the instance existed (spec section
-        # 19.2): a DoUpdate ordered before InitializeWorkflow in the init
-        # activation is dispatched here, after the buffered signals.
-        $self->_drain_buffered_updates;
         return;
     }
 
@@ -2560,8 +2577,9 @@ class Temporalio::Workflow::Runner {
     # it (spec section 10.3; MUST-match sdk-python _apply_signal_workflow). The
     # handler is a METHOD on the instance, so a signal arriving before the
     # instance exists (e.g. ordered before InitializeWorkflow in the init
-    # activation) is buffered and drained right after _apply_initialize creates
-    # the instance. A signal whose name has no named handler and no dynamic
+    # activation) is buffered and drained inside _apply_initialize, after the
+    # instance is created and BEFORE the :Run body is kicked off (spec R26
+    # signals-before-main). A signal whose name has no named handler and no dynamic
     # handler is buffered too (T-wf-3 QUEUEING), held in arrival order until a
     # matching handler appears (or indefinitely in this static model — it never
     # fails the workflow).
@@ -2571,7 +2589,8 @@ class Temporalio::Workflow::Runner {
         # No instance yet: the handler can only run against the instance the
         # InitializeWorkflow job creates. Buffer for the post-init drain.
         if (!defined $instance) {
-            push $buffered_signals{$name}->@*, $job;
+            push $buffered_signals{$name}->@*,
+                [ $buffered_signal_arrival++, $job ];
             return;
         }
 
@@ -2579,7 +2598,8 @@ class Temporalio::Workflow::Runner {
         if (!defined $handler) {
             # No named or dynamic handler: buffer (a dynamic handler may be
             # registered later; sdk-python keeps these for a later-added handler).
-            push $buffered_signals{$name}->@*, $job;
+            push $buffered_signals{$name}->@*,
+                [ $buffered_signal_arrival++, $job ];
             return;
         }
 
@@ -2646,18 +2666,30 @@ class Temporalio::Workflow::Runner {
 
     # Drain the buffered-signal queue (spec section 10.3 T-wf-3 QUEUEING;
     # MUST-match sdk-python draining _buffered_signals when a handler appears).
-    # Called after _apply_initialize creates the instance. Signals whose name now
-    # resolves to a handler (named or dynamic) are dispatched in arrival order
-    # and removed from the buffer; a signal with still no handler stays buffered.
+    # Called by _apply_initialize after the instance is created and before the
+    # :Run body is kicked off (spec R26 signals-before-main). Signals whose name
+    # now resolves to a handler (named or dynamic) are dispatched in arrival
+    # order and removed from the buffer; a signal with still no handler stays
+    # buffered.
     method _drain_buffered_signals {
         return unless defined $instance;
+        # Two passes: collect every entry whose name now resolves, then
+        # dispatch sorted by arrival stamp. The buffer is keyed by name, so a
+        # single name-order pass would scramble CROSS-name arrival order to
+        # hash order; sdk-python applies init-activation signals in job order
+        # (_workflow_instance.py activate() set 1), and R26 requires the same
+        # arrival order here.
+        my @ready;
         for my $name (keys %buffered_signals) {
             my ($handler, $is_dynamic) = $self->_resolve_signal_handler($name);
             next unless defined $handler;   # still no handler: keep buffered.
-            my $jobs = delete $buffered_signals{$name};
-            for my $job (@$jobs) {
-                $self->_dispatch_signal($handler, $is_dynamic, $job);
-            }
+            my $entries = delete $buffered_signals{$name};
+            push @ready, map { [ $_->[0], $handler, $is_dynamic, $_->[1] ] }
+                @$entries;
+        }
+        for my $entry (sort { $a->[0] <=> $b->[0] } @ready) {
+            my (undef, $handler, $is_dynamic, $job) = @$entry;
+            $self->_dispatch_signal($handler, $is_dynamic, $job);
         }
         return;
     }

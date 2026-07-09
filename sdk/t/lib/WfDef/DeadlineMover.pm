@@ -30,7 +30,12 @@ class WfDef::DeadlineMover :isa(Temporalio::Workflow::Definition) {
     field $updated = 0;       # flipped true by `move` to wake the parked timer
 
     async method run :Run ($wake_epoch) {
-        $deadline = $wake_epoch;
+        # //=, not =: a `move` update delivered in the INITIALIZING activation runs its
+        # handler before this first statement (spec R26 signals/updates-before-main,
+        # sdk-python parity), so a plain assignment would clobber an already-moved
+        # deadline and the body would sleep the full original timer. Same rule as
+        # Python workflows initializing handler-shared state defensively.
+        $deadline //= $wake_epoch;
 
         while (1) {
             my $now = Temporalio::Workflow::now->epoch;
