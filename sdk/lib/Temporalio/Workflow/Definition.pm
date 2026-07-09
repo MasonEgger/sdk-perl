@@ -7,6 +7,18 @@ no warnings 'experimental::class';
 
 use Temporalio::Workflow::Attributes ();
 use Temporalio::Exception::Argument ();
+use Temporalio::Workflow::DeterminismGuard ();
+
+# Determinism-guard install point (spec R27, finding R13). CORE::GLOBAL
+# overrides only affect call sites compiled AFTER they exist, and every
+# workflow class must load this base before its `class :isa` statement - which
+# precedes its method bodies - so installing here guarantees the guard covers
+# every workflow's time/rand call sites regardless of whether the workflow
+# module was loaded before or after worker construction. Install-only:
+# trapping additionally requires arm(), which the worker does at construction
+# (spec R38, finding A15), so the replay harness and plain module loading stay
+# passthrough.
+Temporalio::Workflow::DeterminismGuard::install();
 
 # The four constraints in spec section 10.1 (proven in t/spike/) apply here:
 #   1. This base MUST be declared with `class`, not `package`.

@@ -173,10 +173,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R26.4 Verify: handler-visible-to-prologue assertion passes and post-start signals still work; prove -lj4 t green
 
 ### Step R27+R38: Determinism-Guard Install Point and Override Accountability
-- [ ] R27+R38.1 RED: subprocess-guarded determinism_guard_load_order.t (pre-loaded workflow trips the guard) + unit determinism_guard.t (stock time/rand outside workflow context)
-- [ ] R27+R38.2 GREEN: install/arm the guard at Definition registration; keep overrides transparent passthroughs outside workflow context with a defined uninstall/permanence decision
-- [ ] R27+R38.3 REFACTOR: route R27 and R38 through one install point; document the override lifecycle in Worker POD; cite R13/A15
-- [ ] R27+R38.4 Verify: guard-trips-for-preloaded and stock-outside-context assertions pass; prove -lj4 t and xt green
+- [x] R27+R38.1 RED: subprocess-guarded determinism_guard_load_order.t (pre-loaded workflow trips the guard) + unit determinism_guard.t (stock time/rand outside workflow context)
+- [x] R27+R38.2 GREEN: install/arm the guard at Definition registration; keep overrides transparent passthroughs outside workflow context with a defined uninstall/permanence decision
+- [x] R27+R38.3 REFACTOR: route R27 and R38 through one install point; document the override lifecycle in Worker POD; cite R13/A15
+- [x] R27+R38.4 Verify: guard-trips-for-preloaded and stock-outside-context assertions pass; prove -lj4 t and xt green
 
 ### Step R29: Break the Start-Future Ownership Cycle in Handles
 - [ ] R29.1 RED: unit handle_start_cycle.t asserts DESTROY runs (weak-ref liveness) for ChildWorkflowHandle and NexusOperationHandle after refs drop

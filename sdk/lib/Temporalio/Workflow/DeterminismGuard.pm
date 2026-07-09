@@ -1,7 +1,7 @@
-# ABOUTME: Best-effort workflow determinism guard (spec §29.4): process-global
-# ABOUTME: CORE::GLOBAL:: overrides of the time/entropy builtins + Time::HiRes
-# ABOUTME: symbol-table overrides, gated on $Runner::CURRENT, escapable via the
-# ABOUTME: dynamically-scoped Unsafe::illegal_call_tracing_disabled hatch.
+# ABOUTME: Best-effort workflow determinism guard (spec §29.4, R27/R38): process-global
+# ABOUTME: CORE::GLOBAL:: overrides of the time/entropy builtins + Time::HiRes symbol-table
+# ABOUTME: overrides, installed at Definition load, armed at Worker construction, gated on
+# ABOUTME: armed && $Runner::CURRENT, escapable via Unsafe::illegal_call_tracing_disabled.
 package Temporalio::Workflow::DeterminismGuard;
 
 use v5.38;
@@ -28,12 +28,31 @@ our $SUPPRESS_DEPTH = 0;
 # but tracking the flag keeps is_installed honest and skips redundant work).
 my $INSTALLED = 0;
 
-# True when (and only when) a workflow body is on the stack (the runner sets
-# $Temporalio::Workflow::Runner::CURRENT via `dynamically` for the duration of
-# process_activation) AND tracing is not suppressed. This is the single gate the
-# overrides consult; "in context" is exactly `defined $Runner::CURRENT` per spec.
+# Set once arm() has activated trapping (spec R38, finding A15). The override
+# LIFECYCLE is split in two so both halves land at the right time:
+#   install  - wires the overrides. Happens at Temporalio::Workflow::Definition
+#              LOAD time (spec R27, finding R13): CORE::GLOBAL overrides only
+#              affect call sites compiled after they exist, and every workflow
+#              class must load the Definition base before its own method bodies
+#              compile, so installing there guarantees coverage regardless of
+#              whether the workflow module was loaded before or after worker
+#              construction.
+#   arm      - activates trapping. Happens at Worker construction (unless
+#              disable_determinism_guard), so the replay harness and plain
+#              workflow-module loading never trap; only a process that actually
+#              runs a guard-enabled worker does.
+# Both are one-way for the process lifetime (documented permanence).
+my $ARMED = 0;
+
+# True when (and only when) the guard is armed, a workflow body is on the stack
+# (the runner sets $Temporalio::Workflow::Runner::CURRENT via `dynamically` for
+# the duration of process_activation), AND tracing is not suppressed. This is
+# the single gate the overrides consult; "in context" is exactly
+# `defined $Runner::CURRENT` per spec. Unarmed (or out of context, or
+# suppressed), every override is a transparent passthrough to the real builtin.
 sub _guarding {
-    return defined $Temporalio::Workflow::Runner::CURRENT
+    return $ARMED
+        && defined $Temporalio::Workflow::Runner::CURRENT
         && $SUPPRESS_DEPTH == 0;
 }
 
@@ -130,11 +149,29 @@ sub install {
     return;
 }
 
-# is_installed() - reports whether install() has wired the overrides. The guard
-# cannot be cleanly uninstalled (the overrides are process-global), so a worker
-# that disables the guard simply never installs it; this predicate exists for
-# the test and for diagnostics.
+# arm() - activate trapping (idempotent, one-way). Calls install() first as a
+# belt-and-braces (a guard-enabled worker in a process that somehow never
+# loaded a workflow Definition still gets a fully wired guard). The worker
+# arms at construction unless disable_determinism_guard; arming is permanent
+# for the process lifetime - CORE::GLOBAL overrides cannot be cleanly removed
+# from already-compiled call sites, and per-worker disarming is impossible
+# with a process-global trap, so the honest contract is documented permanence
+# (spec R38, finding A15).
+sub arm {
+    install();
+    $ARMED = 1;
+    return;
+}
+
+# is_installed() - reports whether install() has wired the overrides. The
+# overrides are process-global and cannot be cleanly uninstalled; this
+# predicate exists for the tests and for diagnostics.
 sub is_installed { return $INSTALLED ? 1 : 0 }
+
+# is_armed() - reports whether arm() has activated trapping. A process whose
+# workers all pass disable_determinism_guard never arms, leaving the installed
+# overrides as permanent transparent passthroughs.
+sub is_armed { return $ARMED ? 1 : 0 }
 
 1;
 
@@ -181,27 +218,74 @@ the same main thread where C<$Runner::CURRENT> is set), for little gain.
 
 =head2 Documented gaps
 
-The guard cannot trap C<CORE::>-qualified calls (e.g. C<CORE::time>),
-pre-compiled call sites (overrides only affect call sites compiled after
-install), or raw socket builtins. The deterministic replacement surface
+The guard cannot trap C<CORE::>-qualified calls (e.g. C<CORE::time>), call
+sites compiled before the L<Temporalio::Workflow::Definition> base was loaded
+(e.g. a utility module loaded before any Temporal module and later called from
+a workflow body), or raw socket builtins. The deterministic replacement surface
 (L<Temporalio::Workflow/now>, C<time>, C<random>, C<sleep>) remains the primary
 correctness mechanism; this guard is a secondary net.
+
+=head2 Lifecycle
+
+The override lifecycle has two one-way stages (spec R27/R38, findings
+R13/A15):
+
+=over
+
+=item 1. Install (Definition load)
+
+Loading L<Temporalio::Workflow::Definition> - which every workflow class does
+before its own method bodies compile, via C<use Temporalio::Workflow> or the
+C<:isa> auto-require - wires the overrides. C<CORE::GLOBAL> overrides only
+affect call sites compiled after they exist, so this install point guarantees
+every workflow's C<time>/C<rand> call sites are covered regardless of whether
+the workflow module was loaded before or after worker construction.
+
+=item 2. Arm (Worker construction)
+
+Constructing a L<Temporalio::Worker> arms the guard (unless
+C<disable_determinism_guard> is set), activating trapping. An installed but
+unarmed guard is a transparent passthrough even inside workflow context - this
+is what keeps the replay test harness (which never arms) free to exercise the
+time surface.
+
+=back
+
+Both stages are B<permanent for the process lifetime>: the overrides cannot be
+cleanly removed from already-compiled call sites, and a process-global trap
+cannot be disarmed per-worker, so there is no uninstall for the
+last-worker-destroyed case - the overrides simply revert to transparent
+passthroughs whenever no workflow body is on the stack. Outside workflow
+context every override delegates straight to the real builtin (verified by
+test, not assumed).
 
 =head1 FUNCTIONS
 
 =head2 install
 
 C<< Temporalio::Workflow::DeterminismGuard::install() >> wires the overrides.
-Idempotent: a second call is a no-op. Default ON (the worker installs it unless
-C<disable_determinism_guard> is set). Installing the guard is safe outside
-workflow context: each override delegates straight to the real builtin unless a
-workflow body is on the stack (C<defined $Runner::CURRENT>) and tracing is not
-suppressed.
+Idempotent: a second call is a no-op. Called automatically when
+L<Temporalio::Workflow::Definition> loads. Installing the guard is safe outside
+workflow context: each override delegates straight to the real builtin unless
+the guard is armed, a workflow body is on the stack
+(C<defined $Runner::CURRENT>), and tracing is not suppressed.
+
+=head2 arm
+
+C<< Temporalio::Workflow::DeterminismGuard::arm() >> activates trapping
+(calling L</install> first if needed). Idempotent and one-way. Default ON: the
+worker arms at construction unless C<disable_determinism_guard> is set.
 
 =head2 is_installed
 
-Returns true once L</install> has run. The guard cannot be cleanly uninstalled,
-so a worker that disables the guard simply never installs it.
+Returns true once L</install> has run. The overrides cannot be cleanly
+uninstalled; see L</Lifecycle>.
+
+=head2 is_armed
+
+Returns true once L</arm> has run. A process whose workers all disable the
+guard never arms, leaving the installed overrides as permanent transparent
+passthroughs.
 
 =head1 SEE ALSO
 

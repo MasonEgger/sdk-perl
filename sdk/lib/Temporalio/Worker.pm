@@ -103,11 +103,15 @@ class Temporalio::Worker {
     field $no_remote_activities                :param = 0;
     field $disable_eager_activity_execution    :param = 0;
 
-    # Determinism guard (spec §29.4). Default ON: the worker installs the
+    # Determinism guard (spec §29.4, R27/R38). Default ON: the worker ARMS the
     # best-effort time/entropy guard (Temporalio::Workflow::DeterminismGuard) so
-    # a workflow body that calls a trapped builtin throws Nondeterminism. Set
-    # true to skip installation (the guard is process-global and cannot be
-    # cleanly uninstalled, so "disable" means this worker never installs it).
+    # a workflow body that calls a trapped builtin throws Nondeterminism. The
+    # overrides themselves install earlier, at Definition load (finding R13:
+    # CORE::GLOBAL overrides only cover call sites compiled after install, so
+    # worker-construction install missed pre-loaded workflow modules); the
+    # worker only flips trapping on. Set true to skip arming (arming is
+    # process-global and one-way, so "disable" means this worker never arms it;
+    # a guard armed by another worker still traps - finding A15).
     field $disable_determinism_guard           :param = 0;
 
     # IO::Async::Function fork-pool size for sync activities (spec section 8.1
@@ -132,11 +136,13 @@ class Temporalio::Worker {
             message => 'Temporalio::Worker->new requires a non-empty task_queue')
             unless defined $task_queue && length $task_queue;
 
-        # Determinism guard (spec §29.4): default ON. Installing it is safe even
-        # if there is no workflow on this worker — the overrides delegate to the
-        # real builtin unless a workflow body is on the stack. Idempotent, so
-        # multiple workers (or a re-run) share one install.
-        Temporalio::Workflow::DeterminismGuard::install()
+        # Determinism guard (spec §29.4, R27/R38): default ON. Arming activates
+        # trapping for the already-installed overrides (installed at Definition
+        # load, finding R13); it is safe even if there is no workflow on this
+        # worker — the overrides delegate to the real builtin unless a workflow
+        # body is on the stack. Idempotent and one-way, so multiple workers (or
+        # a re-run) share one armed guard (finding A15).
+        Temporalio::Workflow::DeterminismGuard::arm()
             unless $disable_determinism_guard;
 
         # Worker versioning (spec §29.1): exactly one strategy reaches core.
@@ -1117,6 +1123,36 @@ driving them that await would deadlock. The full graceful sequence
 (initiate, drain in-flight activities up to C<graceful_shutdown_period>,
 finalize, free) is issued from C<run> once the poll loops have drained;
 C<run> and those loops arrive in later plan steps (P2.4 / P3.6).
+
+=head2 Determinism guard lifecycle
+
+Constructing a worker B<arms> the process-global determinism guard
+(L<Temporalio::Workflow::DeterminismGuard>, spec §29.4) unless
+C<disable_determinism_guard> is set. The override residency is two-stage and
+B<permanent for the process lifetime> (spec R27/R38, findings R13/A15):
+
+=over
+
+=item *
+
+The C<CORE::GLOBAL> time/entropy overrides are B<installed> when
+L<Temporalio::Workflow::Definition> loads - before any workflow class's method
+bodies compile - so trapping does not depend on whether a workflow module was
+loaded before or after worker construction.
+
+=item *
+
+The worker's construction B<arms> trapping. Until then (and always outside a
+workflow body, or under the L<Temporalio::Workflow::Unsafe> escape hatch)
+every override is a transparent passthrough to the real builtin.
+
+=back
+
+There is no uninstall or disarm: overrides cannot be cleanly removed from
+already-compiled call sites, so when the last worker is destroyed the armed
+overrides simply remain as passthroughs for all non-workflow code.
+C<disable_determinism_guard> means this worker never arms the guard; it cannot
+un-arm a guard another worker armed.
 
 =head1 METHODS
 

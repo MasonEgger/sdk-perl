@@ -20,11 +20,51 @@ use Temporalio::Workflow ();
 use Temporalio::Workflow::Unsafe ();
 use Temporalio::Workflow::DeterminismGuard ();
 use Temporalio::Converter::Payload ();
+use Temporalio::Worker ();
 
-# The guard is process-global; install it once for the whole test run. It is a
-# no-op outside workflow context, so installing it here does not perturb the
-# test harness itself.
-Temporalio::Workflow::DeterminismGuard::install();
+# A client double just rich enough for Worker construction (the pattern from
+# worker_new.t): the worker only reads namespace + identity during option
+# building. Used by the R38 lifecycle subtest below.
+class FakeClient {
+    field $namespace :param = 'default';
+    field $identity  :param = 'pid@host';
+    method namespace { $namespace }
+    method identity  { $identity }
+}
+
+# ---------------------------------------------------------------------------
+# R27 (finding R13): loading the workflow Definition base is the install point.
+# The `use Temporalio::Workflow ()` above pulled in
+# Temporalio::Workflow::Definition, and that load alone must have wired the
+# CORE::GLOBAL overrides - no explicit install(), no Worker construction. This
+# is what guarantees the overrides exist before ANY workflow class's method
+# bodies compile (a class must load the base before its `class :isa` statement,
+# which precedes its methods), so trapping no longer depends on whether the
+# workflow module was loaded before or after worker construction.
+#
+# Installed-but-not-armed is a transparent passthrough EVEN IN workflow
+# context: trapping additionally requires arm() (the worker arms at
+# construction unless disable_determinism_guard). This is what keeps the
+# replay harness (which never arms) free to run fixtures that poke at the
+# time surface.
+# ---------------------------------------------------------------------------
+T2->subtest('Definition load installs; unarmed stays passthrough (R27/R13)' => sub {
+    T2->ok(Temporalio::Workflow::DeterminismGuard::is_installed(),
+        'loading Temporalio::Workflow::Definition installed the overrides');
+    T2->ok(!Temporalio::Workflow::DeterminismGuard::is_armed(),
+        'no worker constructed yet - the guard is not armed');
+
+    # Unarmed, a workflow body calling `time` is NOT trapped (the replay
+    # harness contract): the body completes and returns a real epoch.
+    my $completion = run_once('WfDef::IllegalTime');
+    T2->isnt($completion->which_status, 'failed',
+        'unarmed guard does not trap a workflow body (replay-harness freedom)');
+});
+
+# Arm the guard for the trap tests below - the same call a guard-enabled
+# worker construction makes. Arming is process-global and one-way (documented
+# permanence, R38/A15); everything after this line runs armed.
+Temporalio::Workflow::DeterminismGuard::arm();
 
 sub activation ($args) {
     my $class = 'Temporalio::Proto::Coresdk::WorkflowActivation::WorkflowActivation';
@@ -214,6 +254,36 @@ T2->subtest('CORE::time and system/open NOT trapped by default (T-det-7)' => sub
         'open is not overridden by the default guard');
     T2->ok(!defined &CORE::GLOBAL::fork,
         'fork is not overridden by the default guard');
+});
+
+# ---------------------------------------------------------------------------
+# R38 (finding A15): the process-global overrides are accountable. With a
+# worker ALIVE (construction arms the guard) but no workflow body on the
+# stack, every override is a verified transparent passthrough - time/rand/
+# localtime/Time::HiRes::time all behave stock. This is asserted, not assumed:
+# the overrides live for the process lifetime (documented permanence), so
+# their outside-context behavior is part of the contract.
+# ---------------------------------------------------------------------------
+T2->subtest('overrides are stock outside workflow context with a worker alive (R38/A15)' => sub {
+    my $worker = Temporalio::Worker->new(
+        client     => FakeClient->new,
+        task_queue => 'det-guard-r38',
+    );
+    T2->isa_ok($worker, 'Temporalio::Worker');
+    T2->ok(Temporalio::Workflow::DeterminismGuard::is_armed(),
+        'worker construction armed the guard (default ON)');
+    T2->ok(!defined $Temporalio::Workflow::Runner::CURRENT,
+        'no workflow body on the stack');
+
+    my $t = time;
+    T2->ok($t > 1_700_000_000, 'time returns a real epoch with a worker alive');
+    my $r = rand;
+    T2->ok($r >= 0 && $r < 1, 'rand returns a real value with a worker alive');
+    my @lt = localtime;
+    T2->is(scalar @lt, 9, 'localtime returns its 9-element list with a worker alive');
+    require Time::HiRes;
+    T2->ok(Time::HiRes::time() > 1_700_000_000,
+        'Time::HiRes::time returns a real value with a worker alive');
 });
 
 T2->done_testing;
