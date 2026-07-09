@@ -197,10 +197,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R32.4 Verify: cancel-and-ack assertions pass and a normal op still completes/deregisters; prove -lj4 t green
 
 ### Step R36: Complete the Workflow info() Surface
-- [ ] R36.1 RED: replay workflow_info.t asserts workflow_id, attempt, task_queue carry init-activation values; existing fields unchanged
-- [ ] R36.2 GREEN: populate the three fields from init data at Runner.pm:391-407 and correct the POD at Workflow.pm:470-471
-- [ ] R36.3 REFACTOR: source all info() fields from one init struct; cite A5 + Python info() field list
-- [ ] R36.4 Verify: three-fields assertion passes; xt POD green; prove -lj4 t and xt green
+- [x] R36.1 RED: replay workflow_info.t asserts workflow_id, attempt, task_queue carry init-activation values; existing fields unchanged
+- [x] R36.2 GREEN: populate the three fields from init data at Runner.pm:391-407 and correct the POD at Workflow.pm:470-471
+- [x] R36.3 REFACTOR: source all info() fields from one init struct; cite A5 + Python info() field list
+- [x] R36.4 Verify: three-fields assertion passes; xt POD green; prove -lj4 t and xt green
 
 ### Step R35: Validate Activity Options at the Call Site
 - [ ] R35.1 RED: replay activity_option_validation.t asserts typed error for no-timeout and unknown-key (both activity kinds); valid call succeeds

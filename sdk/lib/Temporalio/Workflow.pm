@@ -77,8 +77,9 @@ sub random { return _runner()->random }
 # return true so user code can build messages regardless of replay state.
 sub logger { return _runner()->logger }
 
-# info -> the WorkflowInfo hashref (run_id, workflow_type, patches, ... grows in
-# later phases as more fields are threaded through the activation).
+# info -> the workflow info hashref (workflow_id, run_id, workflow_type,
+# namespace, task_queue, attempt, patches, search_attributes, memo; spec R36,
+# Python-parity field names).
 sub info { return _runner()->info }
 
 # --- versioning / patching (spec section 10.4) ------------------------------
@@ -467,7 +468,10 @@ workflow body.
 
 =head2 info
 
-Returns the L<Temporalio::Workflow::Info> for the running workflow.
+Returns the workflow info hashref for the running workflow: C<workflow_id>,
+C<run_id>, C<workflow_type>, C<namespace>, C<task_queue>, C<attempt>,
+C<patches>, C<search_attributes>, and C<memo> (spec R36; field names match
+Python's C<workflow.info()>). A fresh copy per call.
 
 =head2 is_replaying
 

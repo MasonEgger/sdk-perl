@@ -375,6 +375,17 @@ class Temporalio::Workflow::Runner {
     field %search_attributes_view;
     field %memo_view;
 
+    # The static info() fields seeded from the InitializeWorkflow job (spec R36
+    # / finding A5): workflow_id and attempt, seeded once in _apply_initialize
+    # so every init-derived info() field is sourced from this one struct.
+    # Field names MUST-match Python's workflow.info() (sdk-python
+    # workflow/_context.py Info: workflow_id, attempt, task_queue, ...), and
+    # the sourcing matches Python's Info construction (worker/_workflow.py):
+    # workflow_id/attempt from the init job, task_queue from the worker (the
+    # $task_queue constructor param above), run_id from the activation,
+    # namespace from the worker.
+    field %init_info;
+
     ADJUST {
         $payload_converter //= Temporalio::Converter::Payload->default;
         $failure_converter //= Temporalio::Converter::Failure->default;
@@ -415,8 +426,15 @@ class Temporalio::Workflow::Runner {
 
     method info {
         return {
+            # The init-derived static fields (workflow_id, attempt), seeded in
+            # _apply_initialize (spec R36 / finding A5; Python-parity names).
+            %init_info,
             run_id        => $run_id,
             workflow_type => $workflow_type,
+            # The workflow execution's task queue, worker-injected at
+            # construction (Python sources Info.task_queue from the worker
+            # too; the activation carries no queue).
+            task_queue    => $task_queue,
             # The workflow namespace (spec section 20): read by
             # get_external_workflow_handle to populate the
             # NamespacedWorkflowExecution arm of signal/cancel commands.
@@ -1841,6 +1859,15 @@ class Temporalio::Workflow::Runner {
     method _apply_initialize ($init) {
         # Seed the deterministic RNG from the job (NOT the run id).
         $rng = _make_rng($init->randomness_seed // 0);
+
+        # Seed the init-derived static info() fields (spec R36 / finding A5).
+        # Defaults are the proto3 scalar defaults, matching Python's direct
+        # init.workflow_id / init.attempt reads (a real activation from core
+        # always carries both; attempt starts at 1).
+        %init_info = (
+            workflow_id => $init->workflow_id // '',
+            attempt     => $init->attempt     // 0,
+        );
 
         # Seed the in-workflow search-attribute / memo views from the start-time
         # values on the InitializeWorkflow job (spec section 24 / T-upsert-4). Each
@@ -4068,7 +4095,11 @@ cancel hook honouring the C<NexusOperationCancellationType>.
 
 =head2 info
 
-Returns the workflow info hash (run id, workflow type, namespace, etc.) for the run.
+Returns the workflow info hashref for the run: C<workflow_id>, C<run_id>,
+C<workflow_type>, C<namespace>, C<task_queue>, C<attempt>, C<patches>,
+C<search_attributes>, and C<memo> (spec R36; field names match Python's
+C<workflow.info()>). A fresh copy per call, so callers cannot mutate the
+runner's view through it.
 
 =head2 is_replaying
 

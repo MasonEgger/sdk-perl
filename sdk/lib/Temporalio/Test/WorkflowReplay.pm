@@ -34,6 +34,12 @@ class Temporalio::Test::WorkflowReplay {
     # defaults to a fixed value so external-handle replay tests can assert it.
     field $namespace :param = 'default';
 
+    # The workflow execution's task queue (spec R36 / finding A5): surfaced
+    # through Temporalio::Workflow::info->{task_queue} and used as the default
+    # queue for scheduled activities. The real worker injects its own queue;
+    # the harness default (undef) mirrors a runner built without one.
+    field $task_queue :param = undef;
+
     # Eager activity dispatch (spec section 23.2): the worker-side flag, threaded
     # to the Runner so a replay test can assert do_not_eagerly_execute on the
     # emitted ScheduleActivity command (T-eager-6). Defaults to a worker with
@@ -85,6 +91,7 @@ class Temporalio::Test::WorkflowReplay {
             workflow_failure_exception_types => $workflow_failure_exception_types,
             nondeterminism_as_workflow_fail  => $nondeterminism_as_workflow_fail,
             namespace                        => $namespace,
+            task_queue                       => $task_queue,
             disable_eager_activity_execution => $disable_eager_activity_execution,
             interceptors                     => $interceptors,
         );
@@ -205,6 +212,11 @@ Constructs a Temporalio::Test::WorkflowReplay. Named parameters:
 =item C<nondeterminism_as_workflow_fail>
 
 (optional, default C<0>)
+
+=item C<task_queue>
+
+(optional, default C<undef>): the workflow execution's task queue, surfaced
+through C<Temporalio::Workflow::info-E<gt>{task_queue}>.
 
 =back
 
