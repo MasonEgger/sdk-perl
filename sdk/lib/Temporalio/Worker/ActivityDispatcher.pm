@@ -162,12 +162,19 @@ class Temporalio::Worker::ActivityDispatcher {
             # (the inbound half of Temporalio::Interceptor::Headers' contract);
             # re-encoding them here would double-encode (GAP B).
             my $start_headers = $start->header_fields // {};
+            # The activity info hashref rides the input too (spec R22): the
+            # OTel tracing interceptor reads activity_type for the
+            # RunActivity:{type} span name and the activity/workflow/run ids
+            # for its span attributes, on both the sync and async paths (the
+            # dynamically-scoped Activity::Context is not available to the
+            # inbound chain on the sync/fork-pool path).
             my $result;
             if ($def->{sync}) {
                 my $input =
                     Temporalio::Worker::Interceptor::Input::ExecuteActivity->new(
                         args    => [@args],
                         headers => { %$start_headers },
+                        info    => $info,
                         _root => sub ($in) {
                             return $self->_run_in_pool($task_token, $info,
                                 $cancellation, @{ $in->args });
@@ -193,6 +200,7 @@ class Temporalio::Worker::ActivityDispatcher {
                     Temporalio::Worker::Interceptor::Input::ExecuteActivity->new(
                         args    => [@args],
                         headers => { %$start_headers },
+                        info    => $info,
                         _root => sub ($in) {
                             return $self->_invoke($def->{code}, @{ $in->args });
                         },

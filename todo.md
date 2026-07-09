@@ -259,10 +259,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R45.4 Verify: perl -c passes offline, prove -l passes with server, skip_all offline; prove -lj4 t and xt green
 
 ### Step R22+R41+R42: Implement the OpenTelemetry TracingInterceptor and Point Its Tests at the Wired Behavior
-- [ ] R22+R41+R42.1 RED: rewrite t/unit/tracing.t on the fake-tracer scaffold to assert span creation per surface, header round-trip, R41 mutation note, R42 OTel-installed fixture
-- [ ] R22+R41+R42.2 GREEN: implement spans + header inject/extract at TracingInterceptor:205-233 matching Python contrib; correct POD at :286-290
-- [ ] R22+R41+R42.3 REFACTOR: extract span-naming/header-carrier helpers; comment with R1; note samples-perl R3 can lift
-- [ ] R22+R41+R42.4 Verify: spans/headers asserted, revert fails tests, gated subtest passes with/without OTel, POD matches; prove -lj4 t and xt green
+- [x] R22+R41+R42.1 RED: rewrite t/unit/tracing.t on the fake-tracer scaffold to assert span creation per surface, header round-trip, R41 mutation note, R42 OTel-installed fixture (t/lib/FakeOTel.pm; 7 of 14 subtests failed against the delegation-only stub)
+- [x] R22+R41+R42.2 GREEN: implement spans + header inject/extract at TracingInterceptor:205-233 matching Python contrib; correct POD at :286-290 (plus: RunWorkflow/CompleteWorkflow span names gain the Python-parity :{type} suffix; ActivityDispatcher threads `info` onto the ExecuteActivity input; new() defaults to a real OTel tracer when installed — the R42 fix)
+- [x] R22+R41+R42.3 REFACTOR: extract span-naming/header-carrier helpers; comment with R1; note samples-perl R3 can lift
+- [x] R22+R41+R42.4 Verify: spans/headers asserted, revert fails tests (the RED run), gated subtest passes with/without OTel (verified against a real OpenTelemetry 0.033 + SDK 0.028 side local::lib, headless and SDK-configured), POD matches (workflow-outbound spans documented as R71-pending); prove -lj4 t (159 files/734 tests) and xt (413) green
 
 ### Step R70: Convert Offline-Skipping Repro Guards to Replay Tests
 - [ ] R70.1 RED: new t/replay/<name>.t per convertible guard using the R8-R10 harness; each fails if the fix reverts (run LAST)
