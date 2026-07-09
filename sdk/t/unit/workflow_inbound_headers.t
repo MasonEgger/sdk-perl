@@ -2,6 +2,12 @@
 # ABOUTME: ExecuteWorkflow input the Runner builds must carry the start headers
 # ABOUTME: from the InitializeWorkflow activation job, so the inbound interceptor
 # ABOUTME: (e.g. context propagation) reads the real header instead of an empty map.
+#
+# Spec R70 / finding T10: this file is THE #10 C-ICEPT-HEADERS regression
+# guard; the live integration twin (t/integration/repro_interceptor_headers.t)
+# was deleted in the R70 conversion. The client-side half (start headers
+# encoded onto the StartWorkflowExecution request) is offline-guarded by
+# t/unit/start_workflow_request.t.
 use v5.38;
 use warnings;
 use utf8;

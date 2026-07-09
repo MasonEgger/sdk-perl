@@ -1,4 +1,4 @@
-# ABOUTME: Integration target workflow — counts inbound 'tick' signals and waits
+# ABOUTME: Replay target workflow (t/replay/repro_external_signal.t) — counts inbound 'tick' signals and waits
 # ABOUTME: until it has seen two, then returns the count. Pairs with
 # ABOUTME: WfDef::TwiceSignaller to guard cross-workflow signal hand-off (#2).
 use v5.38;

@@ -1,4 +1,5 @@
-# ABOUTME: LIVE integration fixture (B3 / #5): a workflow that parks on a
+# ABOUTME: Replay fixture (B3 / #5, t/replay/repro_cancel_wait_condition.t): a
+# ABOUTME: workflow that parks on a
 # ABOUTME: NEVER-TRUE wait_condition (no durable-timer workaround). A client
 # ABOUTME: cancel must raise a throwable Temporalio::Exception::Cancelled into
 # ABOUTME: the parked :Run so the body unwinds to CancelWorkflowExecution.

@@ -265,10 +265,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R22+R41+R42.4 Verify: spans/headers asserted, revert fails tests (the RED run), gated subtest passes with/without OTel (verified against a real OpenTelemetry 0.033 + SDK 0.028 side local::lib, headless and SDK-configured), POD matches (workflow-outbound spans documented as R71-pending); prove -lj4 t (159 files/734 tests) and xt (413) green
 
 ### Step R70: Convert Offline-Skipping Repro Guards to Replay Tests
-- [ ] R70.1 RED: new t/replay/<name>.t per convertible guard using the R8-R10 harness; each fails if the fix reverts (run LAST)
-- [ ] R70.2 GREEN: move convertible assertions into replay tests; keep server-only guards with a why comment
-- [ ] R70.3 REFACTOR: align new replay files with harness conventions; comment with T10
-- [ ] R70.4 Verify: offline suite fails on any reintroduced regression; server-only guards justified; prove -lj4 t and xt green
+- [x] R70.1 RED: new t/replay/<name>.t per convertible guard using the R8-R10 harness; each fails if the fix reverts (run LAST) (new: repro_cancel_wait_condition.t #5, repro_cancel_mid_update.t #8, repro_external_signal.t #2; #4 and both #10 guards already had offline twins)
+- [x] R70.2 GREEN: move convertible assertions into replay tests; keep server-only guards with a why comment (deleted 6 converted integration guards; why-comments on repro_fd_signal/repro_local_activity/repro_nexus/repro_nexus_callback)
+- [x] R70.3 REFACTOR: align new replay files with harness conventions; comment with T10 (offline twins annotated as the R70 replacements)
+- [x] R70.4 Verify: offline suite fails on any reintroduced regression (mutation check: @conditions sweep disabled -> both cancel guards fail); server-only guards justified; prove -lj4 t and xt green
 
 ## Phase P8: Converter, POD, and Parity Edges
 

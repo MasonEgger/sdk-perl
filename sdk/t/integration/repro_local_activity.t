@@ -5,6 +5,14 @@
 # ABOUTME: lifecycle runs in a forked child under a hard timeout; the child exits 0
 # ABOUTME: only on a verified-clean local-activity result, so the SEGV reads as a
 # ABOUTME: non-zero exit (RED) instead of wedging the suite.
+#
+# Server-only guard (spec R70 / finding T10): NOT expressible as a replay test.
+# The Runner's ScheduleLocalActivity command emission and resolution ARE
+# replay-covered (t/replay/local_activities.t, t/replay/post_cancel_local_activity.t);
+# the regression guarded HERE is the live worker's core options
+# (enable_local_activities) and core's live validation/SEGV when the first
+# ScheduleLocalActivity reaches a worker built without them — the replay
+# harness builds its own replayer options, so it cannot see the live worker's.
 use v5.38;
 use warnings;
 use utf8;

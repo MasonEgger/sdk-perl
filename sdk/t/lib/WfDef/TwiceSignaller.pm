@@ -1,4 +1,4 @@
-# ABOUTME: Integration driver workflow — gets an external handle to a target by
+# ABOUTME: Replay driver workflow (t/replay/repro_external_signal.t) — gets an external handle to a target by
 # ABOUTME: id and signals it TWICE in a row, exercising the cross-workflow signal
 # ABOUTME: hand-off after the first grant (#2 regression guard).
 use v5.38;

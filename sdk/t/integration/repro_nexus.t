@@ -6,6 +6,13 @@
 # ABOUTME: lifecycle runs in a forked child under a hard timeout (SubprocessGuard):
 # ABOUTME: the child exits 0 only on a verified greeting, so the hang reads as a
 # ABOUTME: non-zero exit (RED) instead of wedging the suite.
+#
+# Server-only guard (spec R70 / finding T10): NOT expressible as a replay test.
+# The caller workflow's Nexus commands ARE replay-covered (t/replay/nexus.t);
+# the regression guarded HERE is the handler side — the worker's Nexus poll
+# loop servicing NexusTask dispatches against a server-provisioned endpoint.
+# The replay harness replays workflow activations only; it has no Nexus task
+# stream and no endpoint registry.
 use v5.38;
 use warnings;
 use utf8;

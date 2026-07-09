@@ -3,6 +3,11 @@
 # ABOUTME: execute_activity / execute_workflow / handle_signal / handle_query /
 # ABOUTME: handle_update through the built chain (client then worker, outermost
 # ABOUTME: first) to the real impl, not bypass it.
+#
+# Spec R70 / finding T10: this file is THE #10 C-ICEPT regression guard; the
+# live integration twin (t/integration/repro_interceptor_inbound.t) was deleted
+# in the R70 conversion because this offline form covers both the workflow and
+# activity inbound-chain regressions without a dev server.
 use v5.38;
 use warnings;
 use utf8;

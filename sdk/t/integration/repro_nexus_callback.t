@@ -9,6 +9,14 @@
 # ABOUTME: `Pending Nexus Operations: 1`). The whole lifecycle runs in a forked
 # ABOUTME: child under a hard timeout (SubprocessGuard): a park reads as a
 # ABOUTME: non-zero exit (RED) instead of wedging the suite.
+#
+# Server-only guard (spec R70 / finding T10): NOT expressible as a replay test.
+# The regression is the handler's backing-workflow START REQUEST carrying the
+# Nexus async completion callback, and the SERVER honoring that callback to
+# resolve the caller's pending operation. Neither leg runs through the workflow
+# Runner: the start request is issued by the Nexus handler's operation-context
+# client, and the resolution is a server-side notification — the replay
+# harness replays workflow activations only.
 use v5.38;
 use warnings;
 use utf8;

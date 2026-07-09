@@ -4,6 +4,11 @@
 # ABOUTME: NOT cover this distinct timeout-timer cancel/re-arm path: arm a long timer, an
 # ABOUTME: :Update moves the deadline earlier, re-arm a short timer. Today the stale long
 # ABOUTME: timer is not cleanly cancelled before the new one arms and the body wedges Running.
+#
+# Spec R70 / finding T10: this file is THE #4 regression guard; the live
+# integration twin (t/integration/repro_condition_timeout_rearm.t) was deleted
+# in the R70 conversion because this replay form covers the SDK-side regression
+# offline (live :Update coverage remains in t/integration/updates.t).
 use v5.38;
 use warnings;
 use utf8;

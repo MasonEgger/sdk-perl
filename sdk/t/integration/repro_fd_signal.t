@@ -5,6 +5,13 @@
 # ABOUTME: process-wide SIGCHLD reaper steals sdk-core's dev-server CLI child at
 # ABOUTME: $server->shutdown and core SEGVs (exit 139 / signal 11), so the child
 # ABOUTME: exits non-zero (RED) instead of 0.
+#
+# Server-only guard (spec R70 / finding T10): NOT expressible as a replay test.
+# The regression is process-level, not workflow-semantic — IO::Async's fork-pool
+# SIGCHLD reaper stealing sdk-core's dev-server CLI child at $server->shutdown
+# and SEGV-ing core. The replay harness drives the Runner (or core's replayer)
+# with no fork pool, no dev-server child, and no live teardown, so the crash
+# site cannot exist offline.
 use v5.38;
 use warnings;
 use utf8;

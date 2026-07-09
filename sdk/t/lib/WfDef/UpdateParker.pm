@@ -1,4 +1,5 @@
-# ABOUTME: LIVE integration fixture (B3 / #8): an :Update handler that parks
+# ABOUTME: Replay fixture (B3 / #8, t/replay/repro_cancel_mid_update.t): an
+# ABOUTME: :Update handler that parks
 # ABOUTME: mid-flight on a never-true wait_condition while :Run also parks. A
 # ABOUTME: client cancel landing mid-update must surface a clean Cancelled
 # ABOUTME: (CancelWorkflowExecution) rather than hanging the workflow task.
