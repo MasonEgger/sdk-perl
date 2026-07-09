@@ -31,6 +31,7 @@ use Temporalio::Exception::Workflow::NoRunner ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::ReadOnly ();
 use Temporalio::Exception::NexusOperation ();
+use Temporalio::Common::Options ();
 use Temporalio::Common::SearchAttributeUpdate ();
 use Temporalio::Worker::Interceptor ();          # build_workflow_inbound + Input::*
 use Temporalio::Worker::_RootWorkflowInbound ();
@@ -484,6 +485,36 @@ class Temporalio::Workflow::Runner {
 
     # --- activity scheduling (spec section 10.2 / 10.3) ----------------------
 
+    # The known option keys for the two activity call sites, and the ONE
+    # strictness rule they share (spec R35, finding A2; aligned with the client
+    # surface R44 and typed missing-arg R55 so the SDK has a single strictness
+    # story): an unknown key raises Temporalio::Exception::Argument (a typo
+    # must never vanish silently), and at least one of start_to_close_timeout /
+    # schedule_to_close_timeout is required (Python parity; without one the
+    # activity retries forever and the call hangs). Validation runs BEFORE any
+    # command state changes, so a rejected call burns no seq.
+    my %ACTIVITY_OPTION_KEYS = map { $_ => 1 } qw(
+        activity_type args task_queue activity_id
+        schedule_to_close_timeout schedule_to_start_timeout
+        start_to_close_timeout heartbeat_timeout
+        retry_policy cancellation_type headers
+    );
+    # Local activities: no task_queue (core runs the LA in-process) and no
+    # heartbeat_timeout (LAs do not heartbeat at the lang level), but
+    # local_retry_threshold and summary in addition.
+    my %LOCAL_ACTIVITY_OPTION_KEYS = map { $_ => 1 } qw(
+        activity_type args activity_id
+        schedule_to_close_timeout schedule_to_start_timeout
+        start_to_close_timeout
+        retry_policy local_retry_threshold cancellation_type summary headers
+    );
+
+    sub _validate_activity_options ($what, $known, $opts) {
+        Temporalio::Common::Options::assert_known_keys($what, $opts, $known);
+        Temporalio::Common::Options::assert_activity_timeouts($what, $opts);
+        return;
+    }
+
     # schedule_activity(%opts) -> a Temporalio::Workflow::Future resolved when
     # the matching ResolveActivity job arrives. Allocates the next seq, builds
     # the ScheduleActivity command, buffers it, and registers the pending
@@ -495,6 +526,10 @@ class Temporalio::Workflow::Runner {
     #   (Temporalio::Common::RetryPolicy), cancellation_type (string), headers.
     method schedule_activity (%opts) {
         $self->_assert_writable('execute_activity/start_activity');
+        # Option strictness first (spec R35, finding A2): unknown keys and a
+        # missing required timeout raise typed, before the seq is allocated.
+        _validate_activity_options('execute_activity/start_activity',
+            \%ACTIVITY_OPTION_KEYS, \%opts);
         my $activity_type = $opts{activity_type}
             // die "Temporalio::Workflow::Runner: schedule_activity needs an "
                  . "activity_type";
@@ -608,6 +643,12 @@ class Temporalio::Workflow::Runner {
     # per-LA state needed to re-schedule lives in %local_activity_state.
     method schedule_local_activity (%opts) {
         $self->_assert_writable('execute_local_activity/start_local_activity');
+        # Option strictness first (spec R35, finding A2): caller-argument
+        # errors surface before the worker-configuration guard below, and
+        # before any command state changes.
+        _validate_activity_options(
+            'execute_local_activity/start_local_activity',
+            \%LOCAL_ACTIVITY_OPTION_KEYS, \%opts);
 
         # Boundary guard (#9): a worker with no registered activities builds with
         # enable_local_activities => 0, so core silently drops any
@@ -4142,10 +4183,12 @@ Returns the run id of the workflow execution.
 =head2 schedule_activity
 
 Emits a ScheduleActivity command and returns the cancellable awaitable that resolves when the activity is resolved.
+Options are validated first (spec R35): an unknown option key, or a call missing both C<start_to_close_timeout> and C<schedule_to_close_timeout>, raises L<Temporalio::Exception::Argument> before any command state changes.
 
 =head2 schedule_local_activity
 
-Emits a ScheduleLocalActivity command (sharing the activity seq space and pending-activity map) and returns the single stable cancellable awaitable that resolves on the local activity's terminal outcome (spec section 21). The backoff-to-server-timer retry loop is owned here: a C<backoff> resolution starts a timer and re-schedules under a new seq when it fires, leaving the returned future untouched.
+Emits a ScheduleLocalActivity command (sharing the activity seq space and pending-activity map) and returns the single stable cancellable awaitable that resolves on the local activity's terminal outcome (spec section 21).
+Options are validated first under the same strictness rule as L</schedule_activity> (spec R35), against the local-activity key set (no C<task_queue> or C<heartbeat_timeout>; C<local_retry_threshold> and C<summary> in addition). The backoff-to-server-timer retry loop is owned here: a C<backoff> resolution starts a timer and re-schedules under a new seq when it fires, leaving the returned future untouched.
 
 =head2 start_child_workflow
 

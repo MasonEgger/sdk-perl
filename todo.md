@@ -203,10 +203,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R36.4 Verify: three-fields assertion passes; xt POD green; prove -lj4 t and xt green
 
 ### Step R35: Validate Activity Options at the Call Site
-- [ ] R35.1 RED: replay activity_option_validation.t asserts typed error for no-timeout and unknown-key (both activity kinds); valid call succeeds
-- [ ] R35.2 GREEN: require a timeout and reject unknown keys with Temporalio::Exception::Argument at Runner.pm:449-511 and :562 onward
-- [ ] R35.3 REFACTOR: factor a shared known-keys + required-timeout validator (aligned with R44/R55); cite A2
-- [ ] R35.4 Verify: no-timeout-raises, unknown-key-raises, and valid-succeeds assertions pass by class; prove -lj4 t green
+- [x] R35.1 RED: replay activity_option_validation.t asserts typed error for no-timeout and unknown-key (both activity kinds); valid call succeeds
+- [x] R35.2 GREEN: require a timeout and reject unknown keys with Temporalio::Exception::Argument at Runner.pm:449-511 and :562 onward
+- [x] R35.3 REFACTOR: factor a shared known-keys + required-timeout validator (aligned with R44/R55); cite A2
+- [x] R35.4 Verify: no-timeout-raises, unknown-key-raises, and valid-succeeds assertions pass by class; prove -lj4 t green
 
 ### Step R44: Unify Unknown-Option Strictness on the Client Surface
 - [ ] R44.1 RED: unit client_option_strictness.t sweeps public client methods asserting the typo raises the typed error; known keys accepted
