@@ -71,6 +71,27 @@ sub is_replaying { return _runner()->is_replaying }
 # random -> the deterministic RNG seeded from the activation's randomness_seed.
 sub random { return _runner()->random }
 
+# uuid4 -> a determinism-safe v4 UUID string drawn from the SAME deterministic
+# RNG that random() returns (never a fresh generator, never OS entropy), so the
+# value is stable across replay and re-seeds with UpdateRandomSeed. Parity
+# audit, in-workflow finding 1 (spec R77); MUST-match sdk-python
+# workflow/_context.py:866, which draws getrandbits(16 * 8) big-endian from the
+# seeded RNG and stamps version 4: four 32-bit ISAAC draws packed big-endian
+# are the same 128 RNG bits, then the version nibble is forced to 4 and the
+# variant bits to RFC 4122 10xx exactly as uuid.UUID(version=4) does. Like
+# random, this touches no builtin, so the determinism guard's self-exemption
+# contract (T-det-4 / spec section 29.4) holds naturally. Not cryptographically
+# safe; do not use for security purposes.
+sub uuid4 {
+    my $rng   = _runner()->random;
+    my @bytes = unpack('C16', pack('N4', map { $rng->irand } 1 .. 4));
+    $bytes[6] = ($bytes[6] & 0x0f) | 0x40;    # version nibble -> 4
+    $bytes[8] = ($bytes[8] & 0x3f) | 0x80;    # variant bits -> RFC 4122 10xx
+    return sprintf(
+        '%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x',
+        @bytes);
+}
+
 # logger -> the replay-aware workflow logger (spec section 10.4). Its level
 # methods (info/warn/error/...) emit only while not replaying so history
 # re-application does not duplicate lines (T-wf-9); the is_* predicates always
@@ -567,6 +588,17 @@ section 24). The hashref maps names to values; an C<undef> value removes that ke
 (a null Payload, the deletion convention) and is emitted even for an absent key.
 Empty updates early-return with no command. Values are converted before the
 command is buffered, so a conversion failure leaves no partial command. Raises
+L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
+
+=head2 uuid4
+
+    my $uuid = Temporalio::Workflow::uuid4();   # e.g. "9bcd6d3f-0a2f-4e8b-a1c4-..."
+
+Returns a determinism-safe v4 UUID string (canonical lowercase 8-4-4-4-12
+form) drawn from the same deterministic RNG C<random> returns (spec R77;
+sdk-python C<workflow.uuid4>). Stable across replay of the same run; a second
+call in the same run advances the RNG and yields a different value. Not
+cryptographically safe; do not use for security purposes. Raises
 L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
 
 =head2 wait_condition

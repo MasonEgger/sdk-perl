@@ -362,10 +362,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R76.4 Verify: reason/details assertions green; prove -lj4 t and xt green under the memory guard (t: 173 files/782 tests green incl. live integration; xt: 422 green with the new module's POD)
 
 ### Step R77: Add workflow.uuid4 Deterministic UUID
-- [ ] R77.1 RED: replay test asserting uuid4() is a valid v4, stable across replay, differs from a second call, and is seeded from the activation randomness seed
-- [ ] R77.2 GREEN: add Workflow::uuid4 returning a v4 UUID from the workflow deterministic RNG (Workflow.pm)
-- [ ] R77.3 REFACTOR: reuse the existing deterministic RNG; comment citing in-workflow finding 1 / _context.py:866
-- [ ] R77.4 Verify: stability/uniqueness/seed assertions green; prove -lj4 t and xt green under the memory guard
+- [x] R77.1 RED: replay test asserting uuid4() is a valid v4, stable across replay, differs from a second call, and is seeded from the activation randomness seed (t/replay/workflow_uuid4.t + WfDef::UuidCaller fixture; pre-fix failure confirmed as "Undefined subroutine &Temporalio::Workflow::uuid4")
+- [x] R77.2 GREEN: add Workflow::uuid4 returning a v4 UUID from the workflow deterministic RNG (Workflow.pm) (four ISAAC irand draws packed big-endian = Python's getrandbits(16*8).to_bytes(16,"big"); version nibble forced to 4, variant to RFC 4122 10xx per uuid.UUID(version=4); canonical lowercase string like Client::_new_uuid)
+- [x] R77.3 REFACTOR: reuse the existing deterministic RNG; comment citing in-workflow finding 1 / _context.py:866 (uuid4 draws from _runner()->random, the same generator random() returns, so it re-seeds with UpdateRandomSeed; comment also notes the T-det-4 self-exemption holds since no builtin is touched; =head2 uuid4 POD added)
+- [x] R77.4 Verify: stability/uniqueness/seed assertions green; prove -lj4 t and xt green under the memory guard (t: 174 files/786 tests green incl. live integration; xt: 422 green)
 
 ### Step R78: Carry a Summary on Timers, sleep, and wait_condition Timeouts
 - [ ] R78.1 RED: replay test asserting StartTimer carries the user-metadata summary when passed (sleep/start_timer/wait_condition) and none when omitted
