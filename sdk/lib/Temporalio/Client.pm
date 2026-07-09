@@ -27,6 +27,7 @@ use Temporalio::Client::ScheduleHandle ();
 use Temporalio::Client::ScheduleListIterator ();
 use Temporalio::Common::Options ();
 use Temporalio::Common::TypedSearchAttributes ();
+use Temporalio::Common::VersioningOverride ();
 use Temporalio::Interceptor::Headers ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
@@ -465,9 +466,7 @@ class Temporalio::Client {
 
     # The start_workflow/signal_with_start_workflow option contract. The
     # signal/signal_args pair is consumed by the SignalWithStart builder before
-    # this set is checked. static_summary/static_details/versioning_override
-    # are parked for a later phase (spec R37): accepted here, quietly ignored
-    # below.
+    # this set is checked.
     my %START_WORKFLOW_OPTION_KEYS = map { $_ => 1 } qw(
         id task_queue id_reuse_policy id_conflict_policy cron_schedule
         request_eager_start execution_timeout run_timeout task_timeout
@@ -593,9 +592,29 @@ class Temporalio::Client {
             });
         }
 
-        # Quietly ignore fields parked for later phases (static_summary/
-        # static_details/versioning_override, spec R37); genuine typos were
-        # rejected against %START_WORKFLOW_OPTION_KEYS above.
+        # static_summary/static_details -> the request user_metadata (spec
+        # R37, finding A7): each encodes to a single Payload via the shared
+        # converter helper, MUST-match sdk-python client/_helpers.py
+        # _encode_user_metadata / _impl.py _build_start_workflow_execution.
+        my $summary = delete $k{static_summary};
+        my $details = delete $k{static_details};
+        if (defined $summary || defined $details) {
+            $fields{user_metadata} =
+                await $data_converter->encode_user_metadata($summary, $details);
+        }
+
+        # versioning_override -> its proto field (spec R37): accepts a
+        # Temporalio::Common::VersioningOverride (pinned / auto_upgrade);
+        # anything else raises the typed error rather than being dropped.
+        if (defined(my $override = delete $k{versioning_override})) {
+            Temporalio::Exception::Argument->throw(
+                message => 'versioning_override must be a '
+                         . 'Temporalio::Common::VersioningOverride '
+                         . '(->pinned or ->auto_upgrade)')
+                unless Scalar::Util::blessed($override)
+                    && $override->isa('Temporalio::Common::VersioningOverride');
+            $fields{versioning_override} = $override->to_proto;
+        }
 
         # Merge caller-supplied extras (e.g. signal_name/signal_input for the
         # SignalWithStart variant) — the generated proto accessors are
@@ -1168,6 +1187,13 @@ Async. Atomically signals a workflow, starting it first if it is not already run
 =head2 start_workflow
 
 Async. Starts a workflow execution and returns a L<Future> resolving to a L<Temporalio::Client::WorkflowHandle>.
+
+C<static_summary> and C<static_details> (fixed single-line summary and
+multi-line details shown in the UI) encode through the data converter into
+the request's user-metadata payloads (spec R37). C<versioning_override>
+takes a L<Temporalio::Common::VersioningOverride> (C<< ->pinned >> or
+C<< ->auto_upgrade >>); any other value raises
+L<Temporalio::Exception::Argument>.
 
 =head2 update_api_key
 

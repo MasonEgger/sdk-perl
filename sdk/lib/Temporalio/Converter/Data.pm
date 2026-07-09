@@ -114,6 +114,32 @@ class Temporalio::Converter::Data {
         return;
     }
 
+    # (summary, details) -> temporal.api.sdk.v1.UserMetadata or undef when
+    # both are undef (spec R37, finding A7). MUST-match sdk-python
+    # client/_helpers.py _encode_user_metadata: each value encodes to a
+    # SINGLE Payload through the full converter (payload converter + codec
+    # chain); a value that is already a Payload passes through untouched.
+    # Shared by every user_metadata-emitting request builder so the encoding
+    # lives in one place.
+    async method encode_user_metadata ($summary, $details = undef) {
+        return undef unless defined $summary || defined $details;
+        my $Payload = Temporalio::Core::Proto::resolve(
+            'temporal.api.common.v1.Payload');
+        my %fields;
+        for my $pair ([ summary => $summary ], [ details => $details ]) {
+            my ($field, $value) = @$pair;
+            next unless defined $value;
+            if (Scalar::Util::blessed($value) && $value->isa($Payload)) {
+                $fields{$field} = $value;
+                next;
+            }
+            ($fields{$field}) = await $self->to_payloads([$value]);
+        }
+        my $UserMetadata = Temporalio::Core::Proto::resolve(
+            'temporal.api.sdk.v1.UserMetadata');
+        return $UserMetadata->new(\%fields);
+    }
+
     # \@values -> list of Payloads: convert each value, then codec-encode.
     async method to_payloads ($values) {
         my @payloads;
@@ -251,6 +277,14 @@ reference SDKs. Resolves to the Failure proto.
 Codec-decodes the embedded payloads (on a copy — the caller's proto is
 not mutated), then converts through the failure converter. Resolves to
 the L<Temporalio::Exception> instance.
+
+=head2 encode_user_metadata($summary, $details?)
+
+Async. Encodes a C<static_summary>/C<static_details> pair into a
+C<temporal.api.sdk.v1.UserMetadata> message (spec R37), resolving to undef
+when both are undef. Each defined value becomes a single Payload through
+C<to_payloads>; a value that is already a Payload passes through untouched.
+Mirrors sdk-python's C<_encode_user_metadata>.
 
 =head2 payload_converter / failure_converter / payload_codecs
 

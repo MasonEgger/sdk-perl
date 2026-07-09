@@ -221,10 +221,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R55.4 Verify: both sites raise catchable typed errors asserted by class; prove -lj4 t green
 
 ### Step R37: Wire or Reject start_workflow Extended Options
-- [ ] R37.1 RED: unit start_workflow_extended_options.t captures the request and asserts static_summary/static_details in user-metadata and versioning_override wired (or typed-reject)
-- [ ] R37.2 GREEN: stop deleting the three options at Client.pm:572-574; wire summary/details to user-metadata and versioning_override to its field, else raise the typed error
-- [ ] R37.3 REFACTOR: reuse the user-metadata encoding helper; cite A7 + Python encoding
-- [ ] R37.4 Verify: fields-in-request (or typed-reject) assertions pass; prove -lj4 t green + start_workflow.t skip_all offline
+- [x] R37.1 RED: unit start_workflow_extended_options.t captures the request and asserts static_summary/static_details in user-metadata and versioning_override wired (or typed-reject)
+- [x] R37.2 GREEN: stop deleting the three options at Client.pm:572-574; wire summary/details to user-metadata and versioning_override to its field, else raise the typed error
+- [x] R37.3 REFACTOR: reuse the user-metadata encoding helper; cite A7 + Python encoding
+- [x] R37.4 Verify: fields-in-request (or typed-reject) assertions pass; prove -lj4 t green + start_workflow.t skip_all offline
 
 ## Phase P7: Test Infrastructure and Tracing
 
