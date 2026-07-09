@@ -47,6 +47,12 @@ my %RETRY_STATE_NUMBER = reverse %RETRY_STATE_NAME;
 # the first time only, per process (T-fail-3).
 my $WARNED_UNKNOWN_INFO = 0;
 
+# The on-wire sentinel message left behind when encode_common_attributes
+# relocates the real message into encoded_attributes. MUST match sdk-python
+# _failure_converter.py:312-327 (parity audit, activity/conversion finding 2;
+# spec R75); the reference SDKs all use this exact string.
+my $ENCODED_FAILURE_MESSAGE = 'Encoded failure';
+
 # Proto classes, resolved once at require time (Temporalio::Core::Proto loads
 # the vendored protos on first resolve).
 my $FAILURE = Temporalio::Core::Proto::resolve('temporal.api.failure.v1.Failure');
@@ -66,8 +72,14 @@ my $WF_TYPE       = Temporalio::Core::Proto::resolve('temporal.api.common.v1.Wor
 
 class Temporalio::Converter::Failure {
 
+    # When set, to_failure relocates message and stack_trace into an
+    # encoded_attributes payload the codec chain can encrypt (spec R75;
+    # sdk-python _failure_converter.py:84,119-127). from_failure restores
+    # unconditionally, so the flag only affects the encode side.
+    field $encode_common_attributes :param = 0;
+
     # The default failure converter — spec section 5.1's
-    # Temporalio::Converter::Failure->default (the converter is stateless,
+    # Temporalio::Converter::Failure->default (encode_common_attributes off,
     # so this is just a fresh instance).
     sub default ($class) { return $class->new }
 
@@ -127,6 +139,20 @@ class Temporalio::Converter::Failure {
         my ($info_field, $info) = $self->_info_for($exception, $payload_converter);
         $fields{$info_field} = $info;
 
+        # spec R75 (parity finding 2): relocate message/stack_trace into an
+        # encoded_attributes payload the codec chain can encrypt, leaving the
+        # sentinel behind, matching sdk-python _failure_converter.py:119-127.
+        # The cause chain recurses through this method, so every level of a
+        # nested failure relocates, exactly as Python's public to_failure does.
+        if ($encode_common_attributes) {
+            $fields{encoded_attributes} = $payload_converter->to_payload({
+                message     => $fields{message} // '',
+                stack_trace => $fields{stack_trace} // '',
+            });
+            $fields{message}     = $ENCODED_FAILURE_MESSAGE;
+            $fields{stack_trace} = '';
+        }
+
         return $FAILURE->new(\%fields);
     }
 
@@ -138,6 +164,28 @@ class Temporalio::Converter::Failure {
         # hashrefs and instances the caller built — is a materialized class
         # instance with working accessors.
         $failure = $FAILURE->decode($failure->encode);
+
+        # spec R75: restore message/stack_trace relocated by
+        # encode_common_attributes, unconditionally on any converter:
+        # Python's from_failure checks the field, not the flag
+        # (_failure_converter.py:312-327), and swallows decode errors so a
+        # bad payload degrades to the sentinel message. Mutating $failure is
+        # safe: the decode above already made a private copy (Python clones
+        # for the same reason). The cause chain recurses through this method.
+        if (defined(my $attributes = $failure->encoded_attributes)) {
+            eval {
+                my $decoded = $payload_converter->from_payload($attributes);
+                if (ref $decoded eq 'HASH') {
+                    my ($message, $trace) =
+                        @{$decoded}{qw(message stack_trace)};
+                    $failure->set_message($message)
+                        if defined $message && !ref $message;
+                    $failure->set_stack_trace($trace)
+                        if defined $trace && !ref $trace;
+                }
+                1;
+            };
+        }
 
         my %common;
         if (defined(my $trace = $failure->stack_trace)) {
@@ -488,13 +536,29 @@ The Perl-side C<category> strings C<application> (default) and C<benign> map
 to C<APPLICATION_ERROR_CATEGORY_UNSPECIFIED> and
 C<APPLICATION_ERROR_CATEGORY_BENIGN> respectively.
 
+=item *
+
+With C<encode_common_attributes> set, C<to_failure> moves each failure's
+C<message> and C<stack_trace> into an C<encoded_attributes> payload (which
+the codec chain then encrypts alongside the other embedded payloads),
+leaving the sentinel message C<Encoded failure> and an empty stack trace on
+the wire. C<from_failure> restores them whenever C<encoded_attributes> is
+present, regardless of the flag, and ignores payloads it cannot decode.
+
 =back
 
 =head1 CONSTRUCTOR
 
 =head2 new
 
-Constructs a Temporalio::Converter::Failure.
+    my $fc = Temporalio::Converter::Failure->new(
+        encode_common_attributes => 0,   # default
+    );
+
+Constructs a Temporalio::Converter::Failure. Pass a true
+C<encode_common_attributes> to protect failure messages and stack traces
+behind the codec chain (the equivalent of sdk-python's
+C<DefaultFailureConverterWithEncodedAttributes>).
 
 =head1 METHODS
 

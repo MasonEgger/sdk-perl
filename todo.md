@@ -350,10 +350,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R74.4 Verify: survives round-trip and appears in proto field; prove -lj4 t green under the memory guard (t: 171 files/774 tests green incl. live integration; xt: 420 green, next_retry_delay POD added to Application.pm and the seconds-crossing note to Failure.pm DESCRIPTION)
 
 ### Step R75: Support encode_common_attributes on the Failure Converter
-- [ ] R75.1 RED: test with encode_common_attributes on + marker codec asserting on-wire message "Encoded failure" and codec-tagged encoded_attributes, and from_failure recovery
-- [ ] R75.2 GREEN: accept encode_common_attributes; to_failure relocates message/stack_trace into encoded_attributes, from_failure restores (Failure.pm)
-- [ ] R75.3 REFACTOR: name the "Encoded failure" sentinel constant; comment citing parity finding 2 / _failure_converter.py:312-327
-- [ ] R75.4 Verify: on-wire encoded + recovery assertions green; prove -lj4 t green under the memory guard
+- [x] R75.1 RED: test with encode_common_attributes on + marker codec asserting on-wire message "Encoded failure" and codec-tagged encoded_attributes, and from_failure recovery (t/unit/failure_encode_common_attributes.t: XOR-codec relocation via Converter::Data, per-level cause relocation matching Python's recursive to_failure, no-codec json/plain payload, flag-off cleartext; failed pre-wire with "Unrecognised parameters ... encode_common_attributes")
+- [x] R75.2 GREEN: accept encode_common_attributes; to_failure relocates message/stack_trace into encoded_attributes, from_failure restores (Failure.pm) (new `field $encode_common_attributes :param = 0`; to_failure builds the {message, stack_trace} payload via the payload converter then leaves the sentinel + empty trace, per _failure_converter.py:119-127; from_failure restores unconditionally (field-presence check, not the flag, per :312-327), swallowing decode errors, before %common/_message read the proto)
+- [x] R75.3 REFACTOR: name the "Encoded failure" sentinel constant; comment citing parity finding 2 / _failure_converter.py:312-327 ($ENCODED_FAILURE_MESSAGE file-scoped next to the enum maps; comments cite finding 2 and the Python lines; POD documents the constructor param as the DefaultFailureConverterWithEncodedAttributes equivalent)
+- [x] R75.4 Verify: on-wire encoded + recovery assertions green; prove -lj4 t green under the memory guard (t: 172 files/778 tests green incl. live integration; xt: 420 green; Data.pm:99-102 codec transform of encoded_attributes confirmed by the binary/xor-test tag assertion)
 
 ### Step R76: Expose Activity Cancellation Details and Reason
 - [ ] R76.1 RED: unit test delivering WORKER_SHUTDOWN and PAUSED cancels and asserting the context reports the matching reason and details
