@@ -60,6 +60,11 @@ class Temporalio::Worker {
     field $max_concurrent_workflow_tasks       :param = 100;
     field $max_concurrent_activities           :param = 100;
     field $max_concurrent_local_activities     :param = 100;
+    # Parity, worker finding 1: the fourth slot kwarg, feeding the synthesized
+    # fixed tuner's nexus pool exactly like its three siblings above
+    # (_worker.py:118 declares it; :545-563 feeds create_fixed and adds it to
+    # the tuner mutual-exclusion set; plan R80 cites the block as :129-133).
+    field $max_concurrent_nexus_tasks          :param = 100;
     # Legacy poll-count kwargs (spec §29.3, DEPRECATED). undef means "unset" so
     # an explicitly-passed value can override a poller-behavior object with
     # SimpleMaximum(that) per the Python override model (_worker.py:587-598).
@@ -303,7 +308,7 @@ class Temporalio::Worker {
                 workflow_slots       => $max_concurrent_workflow_tasks,
                 activity_slots       => $max_concurrent_activities,
                 local_activity_slots => $max_concurrent_local_activities,
-                nexus_task_slots     => 100,
+                nexus_task_slots     => $max_concurrent_nexus_tasks,
             );
         }
 
@@ -418,8 +423,8 @@ class Temporalio::Worker {
             max_cached_workflows => $max_cached_workflows,
 
             # Slot suppliers (spec §29.2): an explicit tuner packs each pool's
-            # supplier directly; otherwise synthesize a FixedSize tuner from the
-            # max_concurrent_* slots (nexus is a fixed 100 in v0.1, spec 8.1).
+            # supplier directly; otherwise synthesize a FixedSize tuner from
+            # the four max_concurrent_* slots (each defaulting 100).
             $self->_slot_supplier_options,
 
             # task_types (spec 8.1): workflows always; remote activities unless
@@ -1025,6 +1030,7 @@ sub Temporalio::Worker::_attach_secondary_error ($primary, $secondary) {
         max_concurrent_workflow_tasks
         max_concurrent_activities
         max_concurrent_local_activities
+        max_concurrent_nexus_tasks
     );
     *Temporalio::Worker::new = sub ($class, %args) {
         if (defined $args{tuner}) {
@@ -1244,6 +1250,11 @@ C<tuner>.
 (integer; default 100) Local activity slot count; mutually exclusive with
 C<tuner>.
 
+=item C<max_concurrent_nexus_tasks>
+
+(integer; default 100) Nexus task slot count; mutually exclusive with
+C<tuner>.
+
 =item C<max_concurrent_workflow_task_polls>
 
 (integer; default unset; deprecated, spec 29.3) Legacy workflow poller
@@ -1278,7 +1289,7 @@ C<::Autoscaling>; default C<SimpleMaximum(5)>) Nexus task poller behavior
 
 (L<Temporalio::Worker::Tuner>; default a C<FixedSize> tuner synthesized
 from the C<max_concurrent_*> slot kwargs) Slot-supplier tuner (spec 29.2);
-mutually exclusive with the three C<max_concurrent_*> slot kwargs.
+mutually exclusive with the four C<max_concurrent_*> slot kwargs.
 
 =item C<nonsticky_to_sticky_poll_ratio>
 

@@ -380,10 +380,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R79.4 Verify: per-activation accessor assertions green; prove -lj4 t and xt green under the memory guard (t: 176 files/792 tests green incl. live integration; xt: 422 green after adding the four Runner =head2 entries pod-coverage demanded)
 
 ### Step R80: Add the max_concurrent_nexus_tasks Worker Kwarg
-- [ ] R80.1 RED: unit test asserting max_concurrent_nexus_tasks => N packs a FixedSize nexus supplier of N, unset keeps 100, and alongside tuner throws mutual-exclusion
-- [ ] R80.2 GREEN: accept the kwarg (Worker.pm:60-62), feed the synthesized fixed tuner (Worker.pm:300,416), add to mutual-exclusion set (Worker.pm:959-961)
-- [ ] R80.3 REFACTOR: fold into the existing max_concurrent_* handling; comment citing worker finding 1 / _worker.py:129-133
-- [ ] R80.4 Verify: supplier-packing and mutual-exclusion assertions green; prove -lj4 t green under the memory guard
+- [x] R80.1 RED: unit test asserting max_concurrent_nexus_tasks => N packs a FixedSize nexus supplier of N, unset keeps 100, and alongside tuner throws mutual-exclusion (t/unit/worker_max_concurrent_nexus_tasks.t via the P0.10 debug_worker_options echo; the mutual-exclusion subtest pins the "mutually exclusive" message so the unrecognised-parameter fallback cannot fake a pass; honest RED on subtests 1 and 3)
+- [x] R80.2 GREEN: accept the kwarg (Worker.pm:60-62), feed the synthesized fixed tuner (Worker.pm:300,416), add to mutual-exclusion set (Worker.pm:959-961) (field default 100 beside its three siblings; _slot_supplier_options fallback now passes it as nexus_task_slots; @SLOT_KWARGS gained the fourth entry; POD item added and the tuner item now says "four")
+- [x] R80.3 REFACTOR: fold into the existing max_concurrent_* handling; comment citing worker finding 1 / _worker.py:129-133 (implementation already lives inside the sibling handling; field comment cites worker finding 1 and the verified anchors _worker.py:118,:545-563, noting the plan's :129-133 drift)
+- [x] R80.4 Verify: supplier-packing and mutual-exclusion assertions green; prove -lj4 t green under the memory guard (t: 177 files/795 tests PASS incl. live integration; xt: 422 PASS)
 
 ### Step R81: Add fairness_key and fairness_weight to Priority
 - [ ] R81.1 RED: unit test asserting to_proto sets priority_key, fairness_key, and fairness_weight (and leaves the latter two unset when absent)
