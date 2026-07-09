@@ -26,14 +26,15 @@ class Temporalio::Exception {
     # Unlike $cause, entries may be any exception object or plain string.
     field $secondary_errors = [];
 
+    # Any defined value is accepted as a cause and stored as-is (spec R68,
+    # finding A16; probe verify-45/pool-payload/probe_cause_mojibake.pl).
+    # An earlier isa-check rejected non-Temporalio causes here, which dropped
+    # the chain whenever an arbitrary die (a plain string, a Throwable or
+    # Exception::Class object) was wrapped. The Python-parity contract is
+    # __cause__: any raised value chains; the failure converter's plain-die
+    # wrapper (Converter/Failure.pm to_failure, T-fail-4) handles the
+    # non-exception shapes at the wire boundary.
     ADJUST {
-        if (defined $cause
-            && !(Scalar::Util::blessed($cause) && $cause->isa('Temporalio::Exception'))) {
-            require Temporalio::Exception::Argument;
-            Temporalio::Exception::Argument->throw(
-                message => 'cause must be a Temporalio::Exception instance',
-            );
-        }
         # ignore_class skips frames inside this class and its subclasses, so
         # the trace starts at the code that constructed or threw the exception.
         $stack_trace //= Devel::StackTrace->new(ignore_class => __PACKAGE__);
@@ -60,11 +61,19 @@ class Temporalio::Exception {
 
     # Message plus the recursively stringified cause chain, e.g.
     # "foo: caused by: bar: caused by: baz", then any attached secondary
-    # errors, each as " [also failed: ...]".
+    # errors, each as " [also failed: ...]". A non-Temporalio cause (spec
+    # R68) renders through plain stringification with the trailing newline
+    # chomped, so a verbatim die string reads cleanly in the chain.
     method as_string () {
-        my $string = defined $cause
-            ? "$message: caused by: " . $cause->as_string
-            : $message;
+        my $string = $message;
+        if (defined $cause) {
+            my $cause_text =
+                Scalar::Util::blessed($cause)
+                    && $cause->isa('Temporalio::Exception')
+                ? $cause->as_string
+                : do { my $text = "$cause"; chomp $text; $text };
+            $string .= ": caused by: $cause_text";
+        }
         for my $secondary (@$secondary_errors) {
             my $text = "$secondary";
             chomp $text;
@@ -98,10 +107,36 @@ Temporalio::Exception - base class for all Temporalio SDK exceptions
 
 Every exception raised by the SDK is an instance of this class or one of
 its C<Temporalio::Exception::*> subclasses. Instances carry a C<message>,
-an optional C<cause> (which must itself be a Temporalio::Exception), and a
-L<Devel::StackTrace> captured at construction unless one is supplied.
-Stringification is overloaded to render the message followed by the full
-cause chain and any attached secondary errors.
+an optional C<cause>, and a L<Devel::StackTrace> captured at construction
+unless one is supplied. Stringification is overloaded to render the message
+followed by the full cause chain and any attached secondary errors.
+
+=head2 The cause contract
+
+Any defined value is accepted as a C<cause> and stored as-is (spec R68):
+
+=over 4
+
+=item *
+
+A C<Temporalio::Exception> cause renders its own full chain inside
+L</as_string>, giving C<"outer: caused by: inner: caused by: ...">.
+
+=item *
+
+Any other value - a plain string from an un-objected C<die>, or a foreign
+error object from another exception system - is returned unchanged by the
+L</cause> accessor and rendered in L</as_string> via ordinary
+stringification with one trailing newline chomped.
+
+=item *
+
+At the wire boundary, L<Temporalio::Converter::Failure> wraps a
+non-Temporalio cause as an Application failure: a plain string gets the
+sentinel type C<Temporalio::Exception::Plain>, a foreign object its class
+name. The chain therefore survives into the Failure proto.
+
+=back
 
 Instances also carry a mutable list of B<secondary errors> (spec R62): a
 failure raised while this exception was being handled or unwound, such as a
@@ -134,7 +169,8 @@ Constructs a Temporalio::Exception. Named parameters:
 
 =item C<cause>
 
-(optional, default C<undef>)
+(optional, default C<undef>; any defined value is accepted, see
+L</The cause contract>)
 
 =back
 
@@ -156,7 +192,9 @@ exception object or plain string.
 
 =head2 cause
 
-Accessor returning the C<cause> value.
+Accessor returning the C<cause> value exactly as it was passed to the
+constructor: a C<Temporalio::Exception>, a plain string, or a foreign
+object per L</The cause contract>.
 
 =head2 secondary_errors
 

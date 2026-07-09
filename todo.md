@@ -309,10 +309,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R67.4 Verify: named values map, invalid raises, POD lists names; prove -lj4 t green (162 files, 746 tests, live integration) and prove -lj4 xt green (414)
 
 ### Step R68: Accept Non-Temporalio Causes in Exception Chaining
-- [ ] R68.1 RED: exception_cause_chaining.t chains a plain string die and a foreign object (adapted probe cause assertions)
-- [ ] R68.2 GREEN: accept any defined cause at Exception:20-27; stringify/store non-exception causes per contract
-- [ ] R68.3 REFACTOR: document the cause contract in POD; comment with A16 and the shared probe
-- [ ] R68.4 Verify: string die and foreign object survive as causes, POD states contract; prove -lj4 t and xt green
+- [x] R68.1 RED: exception_cause_chaining.t chains a plain string die and a foreign object (adapted probe cause assertions); 4 subtests incl. wire encoding via the T-fail-4 wrapper; 3 of 4 failed honestly on the old Argument throw
+- [x] R68.2 GREEN: accept any defined cause (store-as-is, Python __cause__ parity) by dropping the ADJUST isa-throw; as_string discriminates and chomps non-exception causes; exception.t's old rejection subtest repinned to the new contract
+- [x] R68.3 REFACTOR: POD gains "The cause contract" section (accessor as-is, as_string rendering, T-fail-4 wire wrapping); ADJUST comment cites A16 and the shared probe_cause_mojibake.pl probe
+- [x] R68.4 Verify: string die and foreign object survive as causes (identity preserved), POD states contract; prove -lj4 t green (163 files, 750 tests, live integration) and prove -lj4 xt green (414)
 
 ### Step R69: Close the Four Verified Cross-SDK Divergences
 - [ ] R69.1 RED: four tests: parity_backfills, parity_activity_priority_summary, parity_list_page_size, parity_execute_update_wait_for_stage

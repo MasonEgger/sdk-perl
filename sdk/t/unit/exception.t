@@ -56,22 +56,23 @@ T2->subtest('stringification walks the cause chain (T-exc-3)' => sub {
     T2->ref_is($foo->cause, $bar, 'cause accessor returns the inner exception');
 });
 
-T2->subtest('cause must be an exception object' => sub {
-    my $ok = eval {
-        Temporalio::Exception->new(message => 'x', cause => 'plain scalar');
-        1;
-    };
-    T2->ok(!$ok, 'plain-scalar cause is rejected at construction');
-    T2->isa_ok($@, 'Temporalio::Exception::Argument');
-    T2->like($@->message, qr/cause/, 'diagnostic names the cause field');
+# Spec R68 reversed the original narrow contract: any defined value is now
+# accepted as a cause and stored as-is. The full contract (string dies,
+# foreign objects, stringification, wire encoding) is pinned in
+# t/unit/exception_cause_chaining.t; this keeps the acceptance visible here.
+T2->subtest('any defined value is accepted as a cause (R68)' => sub {
+    my $string_cause = Temporalio::Exception->new(
+        message => 'x', cause => 'plain scalar',
+    );
+    T2->is($string_cause->cause, 'plain scalar',
+        'a plain-scalar cause is accepted and stored as-is');
 
-    my $blessed_but_wrong = bless {}, 'Some::Other::Thing';
-    $ok = eval {
-        Temporalio::Exception->new(message => 'x', cause => $blessed_but_wrong);
-        1;
-    };
-    T2->ok(!$ok, 'non-exception object cause is rejected');
-    T2->isa_ok($@, 'Temporalio::Exception::Argument');
+    my $foreign = bless {}, 'Some::Other::Thing';
+    my $object_cause = Temporalio::Exception->new(
+        message => 'x', cause => $foreign,
+    );
+    T2->ref_is($object_cause->cause, $foreign,
+        'a non-exception object cause is accepted and stored as-is');
 });
 
 T2->subtest('stack_trace is populated via Devel::StackTrace' => sub {
