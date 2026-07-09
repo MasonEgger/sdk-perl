@@ -344,19 +344,15 @@ sub continue_as_new ($workflow_or_string = undef, %opts) {
     );
 }
 
-# Resolve a continue_as_new first argument to a workflow-type name string.
-# Accepts a plain string (verbatim), a workflow definition class/object
-# exposing _workflow_type / workflow_type, mirroring _activity_type_name.
+# Resolve a start_child_workflow / continue_as_new first argument to a
+# workflow-type name string. Accepts a plain string (verbatim), a workflow
+# definition class/object, or a workflow function ref. Resolution is
+# single-sourced in the definition side's resolve_workflow_type (spec R63,
+# finding A8: the client's start_workflow shares it); an unresolvable
+# argument falls through unchanged, preserving the pre-R63 behavior here.
 sub _workflow_type_name ($workflow) {
-    if (Scalar::Util::blessed($workflow)) {
-        return $workflow->workflow_type if $workflow->can('workflow_type');
-        return $workflow->_workflow_type if $workflow->can('_workflow_type');
-    }
-    if (!ref $workflow && $workflow->can('_workflow_type')) {
-        return $workflow->_workflow_type;
-    }
-    # A plain string (the common case) is the workflow type verbatim.
-    return $workflow;
+    return Temporalio::Workflow::Definition::resolve_workflow_type($workflow)
+        // $workflow;
 }
 
 1;

@@ -654,13 +654,33 @@ class Temporalio::Client {
     # bare `class`; keep them here so the methods above can call them) -----
 
     sub _workflow_name ($workflow) {
-        # A workflow function ref carries its registered name elsewhere
-        # (P3.1); v0.1's client takes the type name as a string. A coderef is
-        # not yet resolvable, so require a non-empty string here.
+        # The archived v1 spec (section 7.4) promises the workflow argument
+        # as "class name OR a workflow function ref" alongside the plain
+        # type-name string; v0.1 shipped strings only (spec R63, finding
+        # A8). Resolution is single-sourced in the definition side's
+        # Temporalio::Workflow::Definition::resolve_workflow_type (the same
+        # helper behind start_child_workflow / continue_as_new). The lazy
+        # require keeps client-only string callers from loading the
+        # definition layer (and its determinism-guard install) until a
+        # non-string form actually arrives; a class-name string with
+        # _workflow_type implies Definition.pm is already loaded.
+        my $resolved;
+        if (defined $workflow && !ref $workflow && length $workflow) {
+            $resolved = $workflow->can('_workflow_type')
+                ? Temporalio::Workflow::Definition::resolve_workflow_type($workflow)
+                : $workflow;    # plain workflow-type string, verbatim
+        }
+        elsif (ref $workflow) {
+            require Temporalio::Workflow::Definition;
+            $resolved =
+                Temporalio::Workflow::Definition::resolve_workflow_type($workflow);
+        }
         Temporalio::Exception::Argument->throw(
-            message => 'start_workflow requires a workflow type name (string)')
-            unless defined $workflow && !ref $workflow && length $workflow;
-        return $workflow;
+            message => 'start_workflow requires a workflow type name '
+                     . '(string), a workflow definition class, or its '
+                     . 'workflow function ref')
+            unless defined $resolved && !ref $resolved && length $resolved;
+        return $resolved;
     }
 
     sub _policy_enum ($name, $value, $table) {
@@ -1282,6 +1302,12 @@ Async. Atomically signals a workflow, starting it first if it is not already run
 =head2 start_workflow
 
 Async. Starts a workflow execution and returns a L<Future> resolving to a L<Temporalio::Client::WorkflowHandle>.
+
+The first argument names the workflow (spec R63): a plain workflow type-name
+string, a L<Temporalio::Workflow::Definition> subclass name (resolving to its
+C<:Run> type), or that class's workflow function ref (the C<:Run> method
+ref). Anything unresolvable raises L<Temporalio::Exception::Argument> before
+any RPC.
 
 C<static_summary> and C<static_details> (fixed single-line summary and
 multi-line details shown in the UI) encode through the data converter into

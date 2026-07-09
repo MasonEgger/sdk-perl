@@ -297,10 +297,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R60.4 Verify: all 4 metric_meter_drop.t subtests green, existing metric_meter.t untouched-green; prove -lj4 t green (160 files, 737 tests, live integration) and prove -lj4 xt green (414, after rewording a comment that tripped the R65 arrives-later guard)
 
 ### Step R63: Accept the Spec-Promised Workflow Argument Forms in start_workflow
-- [ ] R63.1 RED: start_workflow_argforms.t passes a definition class and a ref, asserts resolved type in the request, keeps string form
-- [ ] R63.2 GREEN: accept definition-class and ref forms at Client:617-625, resolve to the workflow type name
-- [ ] R63.3 REFACTOR: reuse existing type-name resolution; comment with A8 and the archived spec promise
-- [ ] R63.4 Verify: both forms resolve, string form unchanged; prove -lj4 t and xt green
+- [x] R63.1 RED: start_workflow_argforms.t covers the archived-spec §7.4 forms (type-name string regression, definition class name, :Run method ref), the shared signal_with_start path, and five unresolvable shapes; 4 of 5 subtests failed honestly pre-fix
+- [x] R63.2 GREEN: Client `_workflow_name` accepts the definition-class and function-ref forms via the new single-sourced `Temporalio::Workflow::Definition::resolve_workflow_type` (coderef looked up by refaddr in the per-class %_DEFS registry); unresolvable forms (incl. a Definition subclass with no :Run) raise the typed Argument error pre-RPC; plain strings stay verbatim without loading the definition layer (lazy require only on ref forms)
+- [x] R63.3 REFACTOR: Workflow.pm `_workflow_type_name` (start_child_workflow / continue_as_new) now delegates to the same resolver with a verbatim fallback; comments cite A8 and the archived v1 spec §7.4 promise; start_workflow POD documents the three forms; resolver documented in Definition.pm POD
+- [x] R63.4 Verify: both forms resolve (CustomRun -> CustomWorkflow, Plain -> execute), string form unchanged; prove -lj4 t green (161 files, 742 tests, live integration) and prove -lj4 xt green (414)
 
 ### Step R67: Map and Validate query reject_condition
 - [ ] R67.1 RED: query_reject_condition.t covers each named value's enum mapping and one invalid value raising the typed error

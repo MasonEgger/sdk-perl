@@ -5,6 +5,8 @@ use warnings;
 use feature 'class';
 no warnings 'experimental::class';
 
+use Scalar::Util ();
+
 use Temporalio::Workflow::Attributes ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Workflow::DeterminismGuard ();
@@ -194,6 +196,42 @@ class Temporalio::Workflow::Definition {
         return ($_DEFS{$class} // {})->{run_type};
     }
 
+    # Resolve any archived-v1-spec §7.4 workflow argument to its workflow
+    # type name (spec R63, finding A8): a plain type-name string (verbatim),
+    # a definition class name or blessed instance (its :Run type), or a
+    # workflow function ref (the :Run method ref, looked up in the per-class
+    # registry). Returns undef when the argument does not resolve. This is
+    # THE type-name resolution: the client's start_workflow and the
+    # workflow-side start_child_workflow / continue_as_new all route here so
+    # resolution stays single-sourced.
+    sub resolve_workflow_type ($workflow) {
+        return undef unless defined $workflow;
+        if (ref $workflow eq 'CODE') {
+            my $addr = Scalar::Util::refaddr($workflow);
+            for my $pkg (sort keys %_DEFS) {
+                my $run = $_DEFS{$pkg}{run};
+                return $_DEFS{$pkg}{run_type}
+                    if defined $run && Scalar::Util::refaddr($run) == $addr;
+            }
+            return undef;
+        }
+        if (Scalar::Util::blessed($workflow)) {
+            return $workflow->workflow_type if $workflow->can('workflow_type');
+            # _workflow_type is a class method keyed on the package name, so
+            # resolve an instance through its class.
+            return (ref $workflow)->_workflow_type
+                if $workflow->can('_workflow_type');
+            return undef;
+        }
+        return undef if ref $workflow;      # other unblessed refs never resolve
+        return undef unless length $workflow;
+        # A loaded definition class name resolves to its :Run type (undef if
+        # the class has no :Run); any other non-empty string is the workflow
+        # type verbatim.
+        return $workflow->_workflow_type if $workflow->can('_workflow_type');
+        return $workflow;
+    }
+
     # Class method: the per-workflow versioning behavior string (spec §29.1),
     # 'unspecified' when no :VersioningBehavior attribute is present.
     sub _versioning_behavior ($class) {
@@ -289,6 +327,18 @@ C<queries>, C<updates>, C<validators>, C<init>, C<dynamic>).
 The resolved workflow type name (C<undef> if the class has no C<:Run>).
 
 =back
+
+=head2 resolve_workflow_type
+
+    my $type = Temporalio::Workflow::Definition::resolve_workflow_type($workflow);
+
+Package function resolving any archived-v1-spec section 7.4 workflow argument
+to its workflow type name (spec R63): a plain type-name string (returned
+verbatim), a definition class name or blessed instance (its C<:Run> type), or
+a workflow function ref (the C<:Run> method ref, looked up in the per-class
+registry). Returns C<undef> when the argument does not resolve. This is the
+single-sourced resolution behind the client's C<start_workflow> and the
+workflow-side C<start_child_workflow> / C<continue_as_new>.
 
 =head1 CONSTRUCTOR
 
