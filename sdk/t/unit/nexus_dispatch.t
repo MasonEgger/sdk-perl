@@ -1,6 +1,7 @@
 # ABOUTME: Unit tests for the Nexus dispatcher (spec section 26.2/26.3/26.4):
 # ABOUTME: start-operation routing, Sync/Async completions, handler-error and
-# ABOUTME: operation-error mapping, cancel-operation ack (T-nexus-12/13/14).
+# ABOUTME: operation-error mapping, cancel-operation ack (T-nexus-12/13/14),
+# ABOUTME: and core cancel_task abort + ack_cancel (R32, finding L20).
 use v5.38;
 use warnings;
 use utf8;
@@ -173,6 +174,47 @@ T2->subtest('cancel_task variant aborts without a completion' => sub {
     })->encode;
     await_f($d->dispatch_task($bytes));
     T2->is(scalar(@$comps), 0, 'no completion sent for a cancel_task');
+});
+
+# R32 (finding L20): a core cancel_task aborts the matching in-flight task: the
+# operation's future is cancelled (the handler observes cancellation) and the
+# task's single completion is ack_cancel. A normal op still completes and
+# deregisters through the same register/deregister pair.
+T2->subtest('R32: cancel_task cancels the running op and acks (finding L20)' => sub {
+    my ($d, $dc, $comps) = build_dispatcher();
+    my $dispatch_f = $d->dispatch_task(
+        start_task_bytes($dc, 'tok-c1', 'test-service', 'park', 'x'));
+    T2->ok(!$dispatch_f->is_ready, 'the parked task is still in flight');
+    T2->ok($d->is_running('tok-c1'), 'the running map tracks the in-flight task');
+    T2->is(scalar(@$comps), 0, 'no completion before the cancel');
+
+    await_f($d->dispatch_task($NexusTask->new({
+        cancel_task => $CancelNexusTask->new({ task_token => 'tok-c1' }),
+    })->encode));
+
+    T2->ok($NexusDef::Handler::PARKED->is_cancelled,
+        'the operation future is cancelled (the handler observes cancellation)');
+    T2->is(scalar(@$comps), 1, 'exactly one completion for the aborted task');
+    my $c = decode_completion($comps->[0]);
+    T2->is($c->task_token, 'tok-c1', 'the ack carries the task token');
+    T2->is($c->which_status, 'ack_cancel', 'the completion variant is ack_cancel');
+    T2->ok($c->ack_cancel, 'ack_cancel is true');
+    T2->ok(!$d->is_running('tok-c1'), 'the cancelled task deregisters');
+    T2->ok($dispatch_f->is_ready, 'the original dispatch future settles');
+
+    # A second cancel_task for the same (now-finished) token is a no-op.
+    await_f($d->dispatch_task($NexusTask->new({
+        cancel_task => $CancelNexusTask->new({ task_token => 'tok-c1' }),
+    })->encode));
+    T2->is(scalar(@$comps), 1, 'a late duplicate cancel_task sends nothing');
+
+    # Regression: a normal (uncancelled) op still completes and deregisters.
+    await_f($d->dispatch_task(
+        start_task_bytes($dc, 'tok-c2', 'test-service', 'say-hello', 'Still')));
+    T2->is(scalar(@$comps), 2, 'the normal op sends its completion');
+    T2->is(decode_completion($comps->[1])->which_status, 'completed',
+        'the normal op completes as usual');
+    T2->ok(!$d->is_running('tok-c2'), 'the normal op deregisters');
 });
 
 T2->done_testing;

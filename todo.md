@@ -191,10 +191,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R31.4 Verify: no-permit-while-pending and permit-matches-value assertions pass; prove -lj4 t green
 
 ### Step R32: Implement Nexus cancel_task
-- [ ] R32.1 RED: extend replay nexus.t to dispatch a task, deliver cancel_task, and assert the operation future is cancelled and ack_cancel fires
-- [ ] R32.2 GREEN: register running operations in %running and wire cancel_task to cancel the future and send ack_cancel at NexusDispatcher.pm:109,:93-98,:350-353
-- [ ] R32.3 REFACTOR: pair register/deregister across completion, failure, and cancel; cite L20
-- [ ] R32.4 Verify: cancel-and-ack assertions pass and a normal op still completes/deregisters; prove -lj4 t green
+- [x] R32.1 RED: extend replay nexus.t to dispatch a task, deliver cancel_task, and assert the operation future is cancelled and ack_cancel fires
+- [x] R32.2 GREEN: register running operations in %running and wire cancel_task to cancel the future and send ack_cancel at NexusDispatcher.pm:109,:93-98,:350-353
+- [x] R32.3 REFACTOR: pair register/deregister across completion, failure, and cancel; cite L20
+- [x] R32.4 Verify: cancel-and-ack assertions pass and a normal op still completes/deregisters; prove -lj4 t green
 
 ### Step R36: Complete the Workflow info() Surface
 - [ ] R36.1 RED: replay workflow_info.t asserts workflow_id, attempt, task_queue carry init-activation values; existing fields unchanged

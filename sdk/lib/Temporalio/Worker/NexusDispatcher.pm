@@ -88,13 +88,22 @@ class Temporalio::Worker::NexusDispatcher {
         return;
     }
 
-    # cancel_task (core-abort): cancel the tracked task and ack. Distinct from a
-    # server cancel_operation request (which cancels a backing workflow).
+    # cancel_task (core-abort): abort the tracked task. Distinct from a server
+    # cancel_operation request (which cancels a backing workflow). Fix for
+    # finding L20 (%running held no abort mechanism, so this was a silent
+    # no-op): mark the entry cancelled and fail its `abort` future; the
+    # wait_any in _handle_task then cancels the in-flight branch (the
+    # handler's future observes ->cancel) and the mark routes the task's
+    # single completion to ack_cancel. An unknown or already-finished token is
+    # a no-op (mirrors sdk-python _nexus.py, which debug-logs and moves on).
     method _handle_cancel_task ($cancel) {
         my $entry = $running{$cancel->task_token};
-        if (defined $entry && defined $entry->{cancellation}) {
-            $entry->{cancellation}->();
-        }
+        return if !defined $entry || $entry->{cancelled};
+        $entry->{cancelled} = 1;
+        # Guard: if the branch settled first, wait_any already cancelled the
+        # abort future; failing a settled future would croak.
+        $entry->{abort}->fail('Nexus task cancelled by core', 'nexus_cancel_task')
+            unless $entry->{abort}->is_ready;
         return;
     }
 
@@ -106,16 +115,26 @@ class Temporalio::Worker::NexusDispatcher {
         my $request     = $poll->request;
         my $req_variant = $request->which_variant // '';
 
-        $running{$task_token} = {};
+        # Register BEFORE running so a core cancel_task finds the task
+        # (finding L20: the old empty entry carried no abort mechanism, so
+        # cancel_task was a silent no-op and ack_cancel was dead code). This
+        # is the single register site; the delete below is the single
+        # deregister site, so completion, handler failure, and cancel all
+        # pair through the same path and the map cannot leak.
+        my $entry = $running{$task_token} = {
+            abort     => Future->new,
+            cancelled => 0,
+        };
 
         my $completion;
         try {
+            my $branch;
             if ($req_variant eq 'start_operation') {
-                $completion = await $self->_handle_start(
+                $branch = $self->_handle_start(
                     $task_token, $request, $task->endpoint);
             }
             elsif ($req_variant eq 'cancel_operation') {
-                $completion = await $self->_handle_cancel_operation(
+                $branch = $self->_handle_cancel_operation(
                     $task_token, $request, $task->endpoint);
             }
             else {
@@ -124,9 +143,24 @@ class Temporalio::Worker::NexusDispatcher {
                     type    => 'NOT_IMPLEMENTED',
                 );
             }
+            # Race the request branch against the abort future: when
+            # _handle_cancel_task fails `abort`, wait_any cancels the pending
+            # branch (Future::AsyncAwait propagates ->cancel down to the
+            # handler's awaited future, so the handler observes cancellation)
+            # and the failure lands in the catch below.
+            $completion = await Future->wait_any($branch, $entry->{abort});
         }
         catch ($error) {
-            $completion = await $self->_handler_error_completion($task_token, $error);
+            if ($entry->{cancelled}) {
+                # Aborted by a core cancel_task: the response content is
+                # irrelevant, acknowledge the cancel (the ack_cancel variant
+                # is for exactly this handler-aborted-by-cancellation case).
+                $completion = $self->_completion($task_token, ack_cancel => 1);
+            }
+            else {
+                $completion = await $self->_handler_error_completion(
+                    $task_token, $error);
+            }
         }
 
         try {
@@ -191,10 +225,20 @@ class Temporalio::Worker::NexusDispatcher {
 
         my $result;
         try {
-            $result = do {
+            # Invoke under the dynamically-scoped Nexus context, but end the
+            # `dynamically` scope BEFORE the await: a cancel_task abort (R32,
+            # finding L20) cancels this frame via the wait_any in
+            # _handle_task, and cancelling a frame suspended across a
+            # `dynamically` assignment segfaults perl 5.38.2
+            # (Syntax::Keyword::Dynamically + Future::AsyncAwait cancel;
+            # verified empirically). Handler code up to its first await still
+            # sees the context, and the old shape restored $CURRENT for the
+            # suspension anyway, so the observable semantics are unchanged.
+            my $op_future = do {
                 dynamically $Temporalio::Nexus::CURRENT = $ctx;
-                await $self->_invoke($def->{code}, $ctx, $input);
+                $self->_invoke($def->{code}, $ctx, $input);
             };
+            $result = await $op_future;
         }
         catch ($error) {
             # A handler OperationError is an operation-level failure, not a
@@ -387,6 +431,11 @@ C<StartOperationResponse.Async{operation_token}>. A handler
 L<Temporalio::Exception::Nexus::OperationError> becomes a failure-carrying
 C<StartOperationResponse>; any other error becomes a C<HandlerError> whose Nexus
 type follows the MUST-match table in L<Temporalio::Nexus> (spec section 26.4).
+
+A core C<cancel_task> aborts the matching in-flight task: the running
+operation's future is cancelled (the handler observes the cancellation) and the
+task's single completion is the C<ack_cancel> variant. An unknown or
+already-finished task token is a no-op.
 
 =head1 CONSTRUCTOR
 
