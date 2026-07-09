@@ -920,11 +920,10 @@ class Temporalio::Workflow::Runner {
             } if %$m;
         }
 
-        # Search attributes -> proto when given (the value already exposes
-        # to_proto, mirroring the start_workflow request builder).
+        # Search attributes -> proto when given, via the encoder shared with
+        # the continue-as-new builder (spec R25).
         if (defined(my $sa = $opts{search_attributes})) {
-            $fields{search_attributes} = $sa->can('to_proto')
-                ? $sa->to_proto : $sa;
+            $fields{search_attributes} = _search_attributes_proto($sa);
         }
 
         push @commands,
@@ -3352,6 +3351,18 @@ class Temporalio::Workflow::Runner {
             }
         }
 
+        # search_attributes (field 8) and versioning_intent (field 10) were
+        # dropped here despite the POD and the proto (spec R25, finding R11;
+        # temporal/sdk/core/workflow_commands/workflow_commands.proto:212,217).
+        # Both share the encoders used by the child-start builder; omitted
+        # options keep the proto defaults.
+        if (defined(my $sa = $opts{search_attributes})) {
+            $fields{search_attributes} = _search_attributes_proto($sa);
+        }
+        if (defined(my $vi = $opts{versioning_intent})) {
+            $fields{versioning_intent} = _versioning_intent_number($vi);
+        }
+
         return Temporalio::Workflow::Commands::continue_as_new_workflow_execution(
             \%fields);
     }
@@ -3532,6 +3543,32 @@ class Temporalio::Workflow::Runner {
         return $NEXUS_CANCELLATION_TYPE{$name}
             // die "Temporalio::Workflow::Runner: unknown nexus operation "
                  . "cancellation_type '$name'";
+    }
+
+    # versioning_intent: spec string -> coresdk.common.VersioningIntent enum
+    # number (verified against temporal/sdk/core/common/common.proto:20):
+    # UNSPECIFIED=0, COMPATIBLE=1, DEFAULT=2. UNSPECIFIED is expressed by
+    # OMITTING the option so the field keeps the proto default, matching
+    # sdk-python, whose _apply_command only sets the field for a truthy intent
+    # (_workflow_instance.py). A bad string dies at command-build time.
+    my %VERSIONING_INTENT = (
+        compatible => 1,
+        default    => 2,
+    );
+    sub _versioning_intent_number ($name) {
+        return $VERSIONING_INTENT{$name}
+            // die "Temporalio::Workflow::Runner: unknown versioning_intent "
+                 . "'$name'";
+    }
+
+    # Shared outbound search-attribute encoder (child start + continue-as-new,
+    # spec R25): a typed collection exposing to_proto (the spec section 7.4
+    # TypedSearchAttributes surface, mirroring the client start_workflow
+    # request builder) is encoded once into a temporal.api.common.v1.
+    # SearchAttributes message; an already-built proto passes through.
+    sub _search_attributes_proto ($sa) {
+        return Scalar::Util::blessed($sa) && $sa->can('to_proto')
+            ? $sa->to_proto : $sa;
     }
 
     # parent_close_policy: spec string -> ParentClosePolicy enum number (verified

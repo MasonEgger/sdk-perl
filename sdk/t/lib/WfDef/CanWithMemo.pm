@@ -6,6 +6,8 @@ use feature 'class';
 no warnings 'experimental::class';
 
 use Future::AsyncAwait;
+use Temporalio::Common::SearchAttributeKey;
+use Temporalio::Common::TypedSearchAttributes;
 use Temporalio::Converter::Payload;
 use Temporalio::Workflow;
 use Temporalio::Workflow::Definition;
@@ -15,9 +17,15 @@ class WfDef::CanWithMemo :isa(Temporalio::Workflow::Definition) {
         my $pc = Temporalio::Converter::Payload->default;
         Temporalio::Workflow::continue_as_new(
             'NextRun',
-            args    => [ $n + 1 ],
-            memo    => { note => 'can-memo' },
-            headers => { h_can => $pc->to_payload('can-header') },
+            args              => [ $n + 1 ],
+            memo              => { note => 'can-memo' },
+            headers           => { h_can => $pc->to_payload('can-header') },
+            # Populated since spec R25; drives the SA-not-codec-wrapped
+            # negative on the CAN surface.
+            search_attributes => Temporalio::Common::TypedSearchAttributes->new([
+                [ Temporalio::Common::SearchAttributeKey->keyword(
+                      'CustomKeywordField') => 'can-sa' ],
+            ]),
         );
         return 'unreachable';
     }

@@ -15,10 +15,12 @@ use warnings;
 # application/Temporal failure: the runner identifies it by class.
 #
 # %opts mirror Temporalio::Workflow::continue_as_new (spec section 10.2):
-#   workflow (type name string, optional — defaults to the current type),
+#   workflow (type name string, optional; defaults to the current type),
 #   args (arrayref), task_queue, retry_policy (Temporalio::Common::RetryPolicy),
-#   memo (hashref), search_attributes (hashref), headers (hashref),
-#   run_timeout / task_timeout (seconds), versioning_intent.
+#   memo (hashref), search_attributes
+#   (Temporalio::Common::TypedSearchAttributes), headers (hashref),
+#   run_timeout / task_timeout (seconds), versioning_intent ('compatible' or
+#   'default', spec R25).
 sub new ($class, %opts) {
     return bless { %opts }, $class;
 }
@@ -62,9 +64,11 @@ handling, which is caught before the generic failure branch.
 
 Constructs the control object. C<%opts> mirror
 L<Temporalio::Workflow/continue_as_new> (spec section 10.2): C<workflow> (type
-name, optional — defaults to the current type), C<args> (arrayref),
-C<task_queue>, C<retry_policy>, C<memo>, C<search_attributes>, C<headers>,
-C<run_timeout> / C<task_timeout> (seconds), and C<versioning_intent>.
+name, optional; defaults to the current type), C<args> (arrayref),
+C<task_queue>, C<retry_policy>, C<memo>, C<search_attributes>
+(a L<Temporalio::Common::TypedSearchAttributes>), C<headers>,
+C<run_timeout> / C<task_timeout> (seconds), and C<versioning_intent>
+(C<'compatible'> or C<'default'>; omit for the server default).
 
 =head1 METHODS
 

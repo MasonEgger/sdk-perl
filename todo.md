@@ -161,10 +161,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P6: Workflow and Client Semantics
 
 ### Step R25: Send search_attributes and versioning_intent on Continue-as-New
-- [ ] R25.1 RED: replay continue_as_new_options.t asserts both fields present with values when set, proto defaults when omitted
-- [ ] R25.2 GREEN: carry both options into the ContinueAsNewWorkflowExecution command at Runner.pm:2933-2980 using confirmed proto field names
-- [ ] R25.3 REFACTOR: reuse the shared search-attribute encoder; cite R11 + proto path
-- [ ] R25.4 Verify: present-with-values and omitted-defaults assertions pass; prove -lj4 t green
+- [x] R25.1 RED: replay continue_as_new_options.t asserts both fields present with values when set, proto defaults when omitted
+- [x] R25.2 GREEN: carry both options into the ContinueAsNewWorkflowExecution command at Runner.pm:2933-2980 using confirmed proto field names
+- [x] R25.3 REFACTOR: reuse the shared search-attribute encoder; cite R11 + proto path
+- [x] R25.4 Verify: present-with-values and omitted-defaults assertions pass; prove -lj4 t green
 
 ### Step R26: Deliver Init Signals Before the Main Routine Starts
 - [ ] R26.1 RED: replay init_signal_ordering.t asserts an init-activation signal handler's side effect is visible to the main routine's prologue
