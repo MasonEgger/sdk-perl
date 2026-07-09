@@ -444,12 +444,23 @@ class Temporalio::Workflow::Runner {
             # 10.3 "record in workflow info"). Sorted for a stable view.
             patches       => [ sort keys %patches_notified ],
             # The in-workflow search-attribute / memo views (spec section 24),
-            # seeded from start-time values and kept in sync by upsert_*. Copied
-            # so callers cannot mutate the runner's view through info.
-            search_attributes => { %search_attributes_view },
-            memo              => { %memo_view },
+            # seeded from start-time values and kept in sync by upsert_*.
+            # Sourced through the R54 readers so info and the readers cannot
+            # drift (both copy, so callers cannot mutate the runner's view).
+            search_attributes => $self->search_attributes,
+            memo              => $self->memo,
         };
     }
+
+    # The Workflow::memo / Workflow::search_attributes readers (spec R54 /
+    # finding A6; the archived v1 spec promises both at lines 1869-1870). Each
+    # reads the very field its upsert_* counterpart writes (%memo_view /
+    # %search_attributes_view, seeded from the InitializeWorkflow job in
+    # _apply_initialize), so a read after an upsert always sees the update.
+    # Returned as fresh copies per call, matching the info() copy contract.
+    method memo { return { %memo_view } }
+
+    method search_attributes { return { %search_attributes_view } }
 
     # patched($patch_id, deprecated => $bool) -> a boolean: should the workflow
     # take the "with change" branch? (spec section 10.4 versioning; MUST-match
@@ -4169,6 +4180,18 @@ Returns true while a L</durable_scheduler_disabled> block is on the stack.
 =head2 logger
 
 Returns the run's replay-aware workflow logger.
+
+=head2 memo
+
+Returns the current in-workflow memo view as a name-to-converted-value
+hashref, including upserted changes (spec R54; backs
+C<Temporalio::Workflow::memo>). A fresh copy per call.
+
+=head2 search_attributes
+
+Returns the current in-workflow search-attribute view as a name-to-value
+hashref, including upserted changes (spec R54; backs
+C<Temporalio::Workflow::search_attributes>). A fresh copy per call.
 
 =head2 patched
 

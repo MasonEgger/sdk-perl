@@ -285,10 +285,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R64-R66.4 Verify: grep returns nothing, xt cross-check passes, return type matches test; prove -lj4 t and xt green
 
 ### Step R54: Ship the Promised Workflow memo and search_attributes Readers
-- [ ] R54.1 RED: t/replay/workflow_memo_sa_readers.t reads both before and after an upsert
-- [ ] R54.2 GREEN: add memo and search_attributes readers in Workflow.pm/Runner.pm returning current values, Python-parity shapes
-- [ ] R54.3 REFACTOR: source readers from the upsert-written state; comment with A6 and archived spec lines
-- [ ] R54.4 Verify: initial then updated values returned; xt pod covers readers; prove -lj4 t and xt green
+- [x] R54.1 RED: t/replay/workflow_memo_sa_readers.t reads both before and after an upsert (new WfDef::MemoSaReader fixture snapshots both readers around an upsert and returns them as the result; both subtests failed undefined-subroutine)
+- [x] R54.2 GREEN: add memo and search_attributes readers in Workflow.pm/Runner.pm returning current values, Python-parity shapes (fresh copies of %memo_view / %search_attributes_view; NoRunner outside a body via _runner())
+- [x] R54.3 REFACTOR: source readers from the upsert-written state; comment with A6 and archived spec lines (readers read the exact fields upsert_* writes; info() now delegates to them so the views cannot drift)
+- [x] R54.4 Verify: initial then updated values returned; xt pod covers readers; prove -lj4 t and xt green (t: 159 files/733 tests incl. live integration; xt: 414 after adding Workflow.pm + Runner.pm POD entries)
 
 ### Step R60: Align Metric-Drop Behavior with Its Documentation
 - [ ] R60.1 RED: metric_meter_drop.t asserts documented unbound-record behavior and warn rate-limiting

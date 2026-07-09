@@ -82,6 +82,16 @@ sub logger { return _runner()->logger }
 # Python-parity field names).
 sub info { return _runner()->info }
 
+# memo / search_attributes -> the current in-workflow views as fresh copies,
+# including upserted changes (spec R54 / finding A6; the archived v1 spec
+# promised both readers at lines 1869-1870 and they fell out of the v0.1 scope
+# cut). Shapes match sdk-python: memo() is workflow.memo()'s name -> converted-
+# value mapping; search_attributes() is the info search-attribute view kept in
+# sync by upsert_search_attributes.
+sub memo { return _runner()->memo }
+
+sub search_attributes { return _runner()->search_attributes }
+
 # --- versioning / patching (spec section 10.4) ------------------------------
 
 # patched($patch_id) -> a boolean: should this run take the "with change"
@@ -481,6 +491,16 @@ Returns true while the workflow is replaying history.
 
 Returns the replay-aware L<Temporalio::Workflow::Logger> for the running workflow.
 
+=head2 memo
+
+    my $memo = Temporalio::Workflow::memo();
+
+Returns the current workflow memo as a name-to-converted-value hashref,
+including changes applied by C<upsert_memo> (spec R54; matches Python's
+C<workflow.memo()>). Seeded from the start-time memo on the initializing
+activation. A fresh copy per call. Raises
+L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
+
 =head2 now
 
 Returns the deterministic current time as a L<DateTime> at the activation timestamp (never the OS clock).
@@ -492,6 +512,16 @@ Returns true if the given patch id is active, recording a patch marker for deter
 =head2 random
 
 Returns the workflow's deterministic RNG (seeded from the activation randomness seed).
+
+=head2 search_attributes
+
+    my $sa = Temporalio::Workflow::search_attributes();
+
+Returns the current workflow search attributes as a name-to-value hashref,
+including changes applied by C<upsert_search_attributes> (spec R54; the same
+view Python keeps in sync on C<workflow.info()>). Seeded from the start-time
+search attributes on the initializing activation. A fresh copy per call.
+Raises L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
 
 =head2 sleep
 
