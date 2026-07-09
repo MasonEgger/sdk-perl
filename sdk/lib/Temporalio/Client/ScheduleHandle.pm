@@ -8,6 +8,7 @@ no warnings 'experimental::class';
 
 use Future::AsyncAwait;
 use Scalar::Util ();
+use Temporalio::Common::Options ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Schedule::Description ();
@@ -68,11 +69,11 @@ class Temporalio::Client::ScheduleHandle {
     # immediately, even while the schedule is paused. The overlap override
     # defaults to unspecified (0) when not given.
     async method trigger (%opts) {
+        # One strictness rule across the client surface (spec R44, finding
+        # A10), shared with pause/unpause below.
+        Temporalio::Common::Options::assert_known_keys(
+            'ScheduleHandle->trigger', \%opts, { overlap => 1 });
         my $overlap = delete $opts{overlap};
-        if (my @unknown = sort keys %opts) {
-            Temporalio::Exception::Argument->throw(
-                message => 'unknown trigger option(s): ' . join(', ', @unknown));
-        }
         my $trigger = _resolve(
             'temporal.api.schedule.v1.TriggerImmediatelyRequest')->new({
                 overlap_policy =>
@@ -88,11 +89,9 @@ class Temporalio::Client::ScheduleHandle {
     # pause(note => 'Paused via Perl SDK') — async (spec section 25.2). The
     # SchedulePatch `pause` string both flips the paused state and sets notes.
     async method pause (%opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'ScheduleHandle->pause', \%opts, { note => 1 });
         my $note = delete $opts{note} // 'Paused via Perl SDK';
-        if (my @unknown = sort keys %opts) {
-            Temporalio::Exception::Argument->throw(
-                message => 'unknown pause option(s): ' . join(', ', @unknown));
-        }
         my $patch = _resolve('temporal.api.schedule.v1.SchedulePatch')->new({
             pause => $note,
         });
@@ -102,11 +101,9 @@ class Temporalio::Client::ScheduleHandle {
 
     # unpause(note => 'Unpaused via Perl SDK') — async (spec section 25.2).
     async method unpause (%opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'ScheduleHandle->unpause', \%opts, { note => 1 });
         my $note = delete $opts{note} // 'Unpaused via Perl SDK';
-        if (my @unknown = sort keys %opts) {
-            Temporalio::Exception::Argument->throw(
-                message => 'unknown unpause option(s): ' . join(', ', @unknown));
-        }
         my $patch = _resolve('temporal.api.schedule.v1.SchedulePatch')->new({
             unpause => $note,
         });

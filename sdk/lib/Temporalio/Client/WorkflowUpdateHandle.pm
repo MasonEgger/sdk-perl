@@ -7,6 +7,7 @@ use feature 'class';
 no warnings 'experimental::class';
 
 use Future::AsyncAwait;
+use Temporalio::Common::Options ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Server ();
 use Temporalio::Exception::WorkflowUpdateFailed ();
@@ -39,6 +40,10 @@ class Temporalio::Client::WorkflowUpdateHandle {
     # COMPLETED wait stage (looping on a transient/empty response like result()'s
     # long-poll) until an outcome is returned.
     async method result (%opts) {
+        # One strictness rule across the client surface (spec R44, finding
+        # A10): this method takes no options; any key is a typo and raises.
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowUpdateHandle->result', \%opts, {});
         my $outcome = $known_outcome;
         if (!defined $outcome) {
             $outcome = await $self->_poll_until_outcome;

@@ -10,6 +10,7 @@ no warnings 'experimental::class';
 
 use Future::AsyncAwait;
 
+use Temporalio::Common::Options ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Activity::AsyncActivityCancelled ();
 
@@ -67,6 +68,11 @@ class Temporalio::Client::AsyncActivityHandle {
     }
 
     async method _build_fail_request ($error, %opts) {
+        # One strictness rule across the client surface (spec R44, finding
+        # A10): an unknown option key raises before any encoding or RPC.
+        Temporalio::Common::Options::assert_known_keys(
+            'AsyncActivityHandle->fail', \%opts,
+            { last_heartbeat_details => 1 });
         my $last = delete $opts{last_heartbeat_details} // [];
         my $failure   = await $client->data_converter->to_failure($error);
         my $hb_payloads = @$last ? await $self->_payloads($last) : undef;

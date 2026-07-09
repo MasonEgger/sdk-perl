@@ -10,16 +10,20 @@ use warnings;
 use Temporalio::Exception::Argument ();
 
 # assert_known_keys($what, $opts, $known): reject unknown option keys, the ONE
-# strictness rule (spec R35, finding A2; the client surface R44 shares it): a
-# typo must raise, never vanish silently. $known is a { key => 1 } set; on the
-# first unknown key (sorted, for a deterministic message) this throws a
-# Temporalio::Exception::Argument naming the key and the known set.
+# strictness rule (spec R35 finding A2; spec R44 finding A10 applies it across
+# the whole client surface): a typo must raise, never vanish silently. $known
+# is a { key => 1 } set; on the first unknown key (sorted, for a deterministic
+# message) this throws a Temporalio::Exception::Argument naming the key and
+# the known set. An empty $known set means the method takes no options at all.
 sub assert_known_keys ($what, $opts, $known) {
+    my $known_list = join(', ', sort keys %$known);
     for my $key (sort keys %$opts) {
         next if $known->{$key};
         Temporalio::Exception::Argument->throw(
-            message => "$what: unknown option '$key' (known options: "
-                     . join(', ', sort keys %$known) . ')');
+            message => "$what: unknown option '$key' "
+                     . ($known_list
+                        ? "(known options: $known_list)"
+                        : '(no options are accepted)'));
     }
     return;
 }
@@ -55,7 +59,8 @@ typed L<Temporalio::Exception::Argument> instead of vanishing silently, and
 that a workflow-side activity call carries at least one of the two required
 timeouts (spec R35, finding A2). The workflow activity call sites
 (C<schedule_activity> / C<schedule_local_activity>) and the client surface
-share this contract so the SDK has a single strictness story.
+(spec R44, finding A10: L<Temporalio::Client> and every handle class it
+returns) share this contract so the SDK has a single strictness story.
 
 =head1 FUNCTIONS
 

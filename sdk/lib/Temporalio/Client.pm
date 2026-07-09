@@ -25,6 +25,7 @@ use Temporalio::Client::WorkflowHandle ();
 use Temporalio::Client::WorkflowExecutionIterator ();
 use Temporalio::Client::ScheduleHandle ();
 use Temporalio::Client::ScheduleListIterator ();
+use Temporalio::Common::Options ();
 use Temporalio::Common::TypedSearchAttributes ();
 use Temporalio::Interceptor::Headers ();
 use Temporalio::Core::Proto ();
@@ -107,6 +108,9 @@ class Temporalio::Client {
     # => ...) — returns a Temporalio::Client::WorkflowHandle without an RPC
     # (spec section 7.4).
     method get_workflow_handle ($workflow_id, %opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'get_workflow_handle', \%opts,
+            { run_id => 1, first_execution_run_id => 1 });
         Temporalio::Exception::Argument->throw(
             message => 'get_workflow_handle requires a workflow id')
             unless defined $workflow_id && length $workflow_id;
@@ -142,16 +146,14 @@ class Temporalio::Client {
     # activity_id. No RPC at construction. Returns a
     # Temporalio::Client::AsyncActivityHandle.
     method async_activity_handle (%kw) {
+        Temporalio::Common::Options::assert_known_keys(
+            'async_activity_handle', \%kw,
+            { task_token => 1, workflow_id => 1, run_id => 1,
+              activity_id => 1 });
         my $task_token  = delete $kw{task_token};
         my $workflow_id = delete $kw{workflow_id};
         my $run_id      = delete $kw{run_id};
         my $activity_id = delete $kw{activity_id};
-
-        if (my @unknown = sort keys %kw) {
-            Temporalio::Exception::Argument->throw(
-                message => 'unknown async_activity_handle option(s): '
-                         . join(', ', @unknown));
-        }
 
         my $has_token = defined $task_token;
         my $has_any_id = defined $workflow_id
@@ -273,6 +275,8 @@ class Temporalio::Client {
     # sdk-python _impl.py list_workflows 391-394). No RPC until the first
     # ->next is awaited.
     method list_workflows ($query = undef, %opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'list_workflows', \%opts, { page_size => 1 });
         return Temporalio::Client::_WorkflowExecutionIterator->new(
             client    => $self,
             query     => $query,
@@ -283,6 +287,8 @@ class Temporalio::Client {
     # count_workflows($query) — async; returns { count => N, groups => [...] }
     # (spec section 7.4; sdk-python _impl.py count_workflows 396-409).
     async method count_workflows ($query = undef, %opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'count_workflows', \%opts, {});
         my $request = Temporalio::Core::Proto::resolve(
             'temporal.api.workflowservice.v1.CountWorkflowExecutionsRequest')
             ->new({
@@ -315,16 +321,14 @@ class Temporalio::Client {
     #   %opts: trigger_immediately => 0, backfills => [], memo => undef,
     #          search_attributes => undef
     async method create_schedule ($id, $schedule, %opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'create_schedule', \%opts,
+            { trigger_immediately => 1, backfills => 1, memo => 1,
+              search_attributes => 1 });
         my $trigger   = delete $opts{trigger_immediately} // 0;
         my $backfills = delete $opts{backfills} // [];
         my $memo      = delete $opts{memo};
         my $sa        = delete $opts{search_attributes};
-
-        if (my @unknown = sort keys %opts) {
-            Temporalio::Exception::Argument->throw(
-                message => 'unknown create_schedule option(s): '
-                         . join(', ', @unknown));
-        }
         Temporalio::Exception::Argument->throw(
             message => 'create_schedule requires a schedule id')
             unless defined $id && length $id;
@@ -411,6 +415,8 @@ class Temporalio::Client {
     # over Schedule::ListDescription records (spec section 25.1). No RPC until
     # the first ->next is awaited.
     method list_schedules ($query = undef, %opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'list_schedules', \%opts, { page_size => 1 });
         return Temporalio::Client::_ScheduleListIterator->new(
             client    => $self,
             query     => $query,
@@ -457,10 +463,28 @@ class Temporalio::Client {
             $args, \%kwargs, \%extra);
     }
 
+    # The start_workflow/signal_with_start_workflow option contract. The
+    # signal/signal_args pair is consumed by the SignalWithStart builder before
+    # this set is checked. static_summary/static_details/versioning_override
+    # are parked for a later phase (spec R37): accepted here, quietly ignored
+    # below.
+    my %START_WORKFLOW_OPTION_KEYS = map { $_ => 1 } qw(
+        id task_queue id_reuse_policy id_conflict_policy cron_schedule
+        request_eager_start execution_timeout run_timeout task_timeout
+        start_delay retry_policy priority search_attributes memo headers
+        completion_callbacks links request_id
+        static_summary static_details versioning_override
+    );
+
     # Shared body for both request kinds. Mutates and returns a fresh request
     # message of $class. Async because args/memo/header encode through the
     # data converter.
     async method _populate_start_request ($class, $workflow, $args, $kwargs, $extra = {}) {
+        # One strictness rule across the client surface (spec R44, finding
+        # A10, shared with R35): an unknown option key raises the typed
+        # argument error before any RPC.
+        Temporalio::Common::Options::assert_known_keys(
+            'start_workflow', $kwargs, \%START_WORKFLOW_OPTION_KEYS);
         my %k = %$kwargs;
         my $id         = delete $k{id};
         my $task_queue = delete $k{task_queue};
@@ -570,13 +594,8 @@ class Temporalio::Client {
         }
 
         # Quietly ignore fields parked for later phases (static_summary/
-        # static_details/versioning_override) — but reject genuine typos.
-        delete @k{qw(static_summary static_details versioning_override)};
-        if (my @unknown = sort keys %k) {
-            Temporalio::Exception::Argument->throw(
-                message => 'unknown start_workflow option(s): '
-                         . join(', ', @unknown));
-        }
+        # static_details/versioning_override, spec R37); genuine typos were
+        # rejected against %START_WORKFLOW_OPTION_KEYS above.
 
         # Merge caller-supplied extras (e.g. signal_name/signal_input for the
         # SignalWithStart variant) — the generated proto accessors are
@@ -703,17 +722,15 @@ class Temporalio::Client {
     #   error_context  => hashref merged into the rpc_error_for arguments
     #                     (e.g. workflow_id/workflow_type for ALREADY_EXISTS)
     async method _rpc_call ($rpc, $request, %opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            '_rpc_call', \%opts,
+            { service => 1, retry => 1, timeout => 1, response_class => 1,
+              error_context => 1 });
         my $service        = delete $opts{service} // 'workflow';
         my $retry          = exists $opts{retry} ? !!delete $opts{retry} : 1;
         my $timeout        = delete $opts{timeout} // 0;
         my $response_class = delete $opts{response_class};
         my $error_context  = delete $opts{error_context} // {};
-
-        if (my @unknown = sort keys %opts) {
-            Temporalio::Exception::Argument->throw(
-                message => 'unknown _rpc_call option(s): '
-                         . join(', ', @unknown));
-        }
         my $service_code = $RPC_SERVICE{$service}
             // Temporalio::Exception::Argument->throw(
                 message => "unknown RPC service '$service' (expected one of "
@@ -798,6 +815,12 @@ class Temporalio::Client {
     # any RPC), then awaits temporal_core_client_connect via the callback
     # bridge and returns a connected client.
     async sub connect ($class, $target, %options) {
+        Temporalio::Common::Options::assert_known_keys(
+            'Temporalio::Client->connect', \%options,
+            { runtime => 1, namespace => 1, api_key => 1, tls => 1,
+              identity => 1, rpc_metadata => 1, retry => 1, keep_alive => 1,
+              data_converter => 1, interceptors => 1, lazy => 1,
+              http_connect_proxy => 1 });
         my $runtime        = delete $options{runtime};
         my $namespace      = delete $options{namespace} // 'default';
         my $api_key        = delete $options{api_key};
@@ -817,11 +840,6 @@ class Temporalio::Client {
         my $lazy           = delete $options{lazy} // 0;
         my $http_proxy     = delete $options{http_connect_proxy};
 
-        if (my @unknown = sort keys %options) {
-            Temporalio::Exception::Argument->throw(
-                message => 'unknown Temporalio::Client->connect option(s): '
-                         . join(', ', @unknown));
-        }
         Temporalio::Exception::Argument->throw(
             message => 'Temporalio::Client->connect requires a target'
                      . ' host:port')
@@ -1009,6 +1027,15 @@ table in L<Temporalio::Core::Callback>.
 
 Workflow operations (C<start_workflow> and friends, spec section 7.4)
 arrive in later plan steps.
+
+=head2 Option strictness
+
+Every public method on the client surface (this class and the handle classes
+it returns) rejects unknown option keys through the shared
+L<Temporalio::Common::Options> validator, raising a
+L<Temporalio::Exception::Argument> that names the offending key and the known
+set (spec R44). A mistyped option never vanishes silently and never reaches
+an RPC.
 
 =head1 CONSTRUCTOR
 

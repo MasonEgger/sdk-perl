@@ -209,10 +209,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R35.4 Verify: no-timeout-raises, unknown-key-raises, and valid-succeeds assertions pass by class; prove -lj4 t green
 
 ### Step R44: Unify Unknown-Option Strictness on the Client Surface
-- [ ] R44.1 RED: unit client_option_strictness.t sweeps public client methods asserting the typo raises the typed error; known keys accepted
-- [ ] R44.2 GREEN: reject unknown option keys at Client/WorkflowHandle.pm:56 via the shared validator (Temporalio::Exception::Argument)
-- [ ] R44.3 REFACTOR: extract one client-surface unknown-option validator aligned with R35; cite A10
-- [ ] R44.4 Verify: typo-raises sweep passes and known keys still pass; prove -lj4 t green
+- [x] R44.1 RED: unit client_option_strictness.t sweeps public client methods asserting the typo raises the typed error; known keys accepted
+- [x] R44.2 GREEN: reject unknown option keys at Client/WorkflowHandle.pm:56 via the shared validator (Temporalio::Exception::Argument)
+- [x] R44.3 REFACTOR: extract one client-surface unknown-option validator aligned with R35; cite A10
+- [x] R44.4 Verify: typo-raises sweep passes and known keys still pass; prove -lj4 t green
 
 ### Step R55: Raise Typed Errors for Missing Workflow-Context Arguments
 - [ ] R55.1 RED: replay workflow_arg_errors.t asserts Temporalio::Exception::Argument by class at Runner.pm:451-453 and :579-581

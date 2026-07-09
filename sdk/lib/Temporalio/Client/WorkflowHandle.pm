@@ -10,6 +10,7 @@ use Future::AsyncAwait;
 use Scalar::Util ();
 use Temporalio::Client::Interceptor ();
 use Temporalio::Client::HistoryEventIterator ();
+use Temporalio::Common::Options ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::Cancelled ();
@@ -53,6 +54,13 @@ class Temporalio::Client::WorkflowHandle {
     # GetWorkflowExecutionHistory with the CLOSE_EVENT filter on the current
     # run id; the single returned event is the terminal event, mapped here.
     async method result (%opts) {
+        # One strictness rule across the client surface (spec R44, finding
+        # A10): the audit's defect was exactly result(follow_run => 0), a typo
+        # that silently followed continue-as-new. Unknown keys raise the typed
+        # argument error before any RPC; same contract for every public method
+        # in this class.
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->result', \%opts, { follow_runs => 1 });
         my $follow_runs = exists $opts{follow_runs} ? $opts{follow_runs} : 1;
 
         # Base the result on result_run_id if present, else the handle run id
@@ -164,6 +172,8 @@ class Temporalio::Client::WorkflowHandle {
     # the populated execution record. Verified against sdk-python _impl.py
     # describe_workflow (lines 361-384).
     async method describe (%opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->describe', \%opts, {});
         my $request = _resolve(
             'temporal.api.workflowservice.v1.DescribeWorkflowExecutionRequest')
             ->new({
@@ -177,6 +187,8 @@ class Temporalio::Client::WorkflowHandle {
     # cancel_workflow 344-359). Issues RequestCancelWorkflowExecution against
     # the run, threading first_execution_run_id so the run chain is honored.
     async method cancel (%opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->cancel', \%opts, { reason => 1 });
         my $reason = $opts{reason};
         my %fields = (
             namespace          => $client->namespace,
@@ -197,6 +209,9 @@ class Temporalio::Client::WorkflowHandle {
     # / sdk-python _impl.py terminate_workflow 506-534). Encodes details via the
     # data converter and threads first_execution_run_id.
     async method terminate (%opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->terminate', \%opts,
+            { reason => 1, details => 1 });
         my $reason  = $opts{reason};
         my $details = $opts{details} // [];
         my %fields = (
@@ -247,6 +262,11 @@ class Temporalio::Client::WorkflowHandle {
     # UUID. reset_reapply_type (deprecated proto field) maps signal|none|
     # all_eligible; reset_reapply_exclude_types maps signal|update|nexus.
     method _build_reset_request (%kwargs) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->reset', \%kwargs,
+            { workflow_task_finish_event_id => 1, reason => 1,
+              reset_reapply_type => 1, reset_reapply_exclude_types => 1,
+              request_id => 1 });
         my $finish_event_id = $kwargs{workflow_task_finish_event_id};
         Temporalio::Exception::Argument->throw(
             message => 'reset requires a workflow_task_finish_event_id'
@@ -303,6 +323,8 @@ class Temporalio::Client::WorkflowHandle {
     # signal($name, \@args, ...) — async (spec section 7.6 / sdk-python _impl.py
     # signal_workflow 474-504).
     async method signal ($name, $args = [], %opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->signal', \%opts, { headers => 1 });
         Temporalio::Exception::Argument->throw(
             message => 'signal requires a signal name (string)')
             unless defined $name && !ref $name && length $name;
@@ -343,6 +365,9 @@ class Temporalio::Client::WorkflowHandle {
     # 7.6 / sdk-python _impl.py query_workflow 411-472). Returns the decoded
     # single query result; a server-rejected query raises QueryRejected.
     async method query ($name, $args = [], %opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->query', \%opts,
+            { headers => 1, reject_condition => 1 });
         Temporalio::Exception::Argument->throw(
             message => 'query requires a query name (string)')
             unless defined $name && !ref $name && length $name;
@@ -421,6 +446,10 @@ class Temporalio::Client::WorkflowHandle {
     # returned outcome. 'admitted' is rejected with Argument before any RPC.
     # %opts: update_id (default a fresh UUID), wait_for_stage.
     async method start_update ($name, $args = [], %opts) {
+        # Also guards execute_update, which funnels its caller options here.
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->start_update', \%opts,
+            { headers => 1, wait_for_stage => 1, update_id => 1 });
         Temporalio::Exception::Argument->throw(
             message => 'start_update requires an update name (string)')
             unless defined $name && !ref $name && length $name;
@@ -508,6 +537,10 @@ class Temporalio::Client::WorkflowHandle {
     # history events (spec section 7.6 / sdk-python _workflow.py
     # fetch_history_events 417-456). Defaults to ALL_EVENT, no waiting.
     method fetch_history_events (%opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->fetch_history_events', \%opts,
+            { page_size => 1, wait_new_event => 1, event_filter_type => 1,
+              skip_archival => 1 });
         my $filter = $opts{event_filter_type};
         $filter = 1 unless defined $filter;    # ALL_EVENT
         return $self->_history_iterator(
@@ -595,6 +628,12 @@ C<< ->get_workflow_handle >>. It carries the C<workflow_id>, the C<run_id>
 (first run id from start, or the run id supplied to
 C<get_workflow_handle>), C<first_execution_run_id>, and C<result_run_id>,
 plus a back-reference to the owning L<Temporalio::Client>.
+
+Every method here rejects unknown option keys with a typed
+L<Temporalio::Exception::Argument> before any RPC, via the shared
+L<Temporalio::Common::Options> validator (spec R44): a typo such as
+C<< result(follow_run => 0) >> raises instead of silently following
+continue-as-new.
 
 =head2 result
 
