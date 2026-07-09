@@ -102,19 +102,27 @@ sub _dispatch ($class, $tag, $request_ptr) {
 
     if ($tag == REQ_RESERVE) {
         my $ctx = $class->_reserve_ctx($request_ptr);
-        # reserve_slot is async per the contract; an immediate return value is
-        # treated as a resolved reservation. A Future return is awaited via its
-        # ->get when already done (best-effort: the drain runs synchronously, so
-        # a still-pending Future cannot complete here — impls should resolve
-        # promptly, matching the spec's "block until a slot is available").
+        # reserve_slot is async per the contract; an immediate (non-Future)
+        # return value is a resolved reservation, completed right here on the
+        # drain. A Future return is honored as real backpressure: a
+        # still-pending future DEFERS the completion until it resolves
+        # (finding L19 / spec R31) instead of fabricating an instant permit.
         my $permit = $impl->reserve_slot($ctx);
-        $permit = $class->_resolve_permit($permit);
+        # Read the completion ctx BEFORE the drain frees the request box: the
+        # ctx is core-owned and was copied into the parked request as a plain
+        # usize, so it stays valid for a deferred completion fired after
+        # supplier_free_request. See the shim reserve-timing note above
+        # _resolve_permit.
         my $completion =
             Temporalio::Core::FFI::slot_req_completion_ctx($request_ptr);
-        if (defined $completion && $completion) {
+        return unless defined $completion && $completion;
+        $class->_resolve_permit($permit, sub ($permit_id) {
+            # A false return means core cancelled the reserve before this
+            # completion; the permit is simply dropped (that path's ctx leak
+            # is the shim's pre-existing cancel_reserve no-op behavior).
             Temporalio::Core::FFI::supplier_complete_reserve(
-                $completion, $permit // 0);
-        }
+                $completion, $permit_id);
+        });
         return;
     }
     if ($tag == REQ_TRY_RESERVE) {
@@ -135,16 +143,69 @@ sub _dispatch ($class, $tag, $request_ptr) {
     return;
 }
 
-# A permit id must be a non-negative integer the shim hands back to core for
-# mark_used/release. A Future that is already done yields its value; anything
-# else is coerced to a small positive integer fallback so the reservation still
-# completes (a permit of 0 means "no permit" to core).
-sub _resolve_permit ($class, $permit) {
+# Resolve a reserve_slot return value into a permit id and hand it to $issue
+# exactly once (finding L19 / spec R31). Pre-fix, a still-pending Future was
+# collapsed to a fabricated instant permit 1, turning supplier backpressure
+# into an unconditional grant and discarding the eventual resolved value.
+#
+# Shim reserve-timing note (checked for R31; the shim is UNCHANGED): the
+# shim's supplier_cancel_reserve is a no-op whose comment assumed the drain
+# resolved every reserve immediately. Deferred completion stays safe because
+#   - the completion ctx is core-owned (an Arc leaked to lang) and is copied
+#     into the parked SlotRequest as a usize, so it remains valid after
+#     supplier_free_request frees the request box;
+#   - temporal_core_complete_async_reserve on a reservation core already
+#     cancelled returns false WITHOUT freeing (no double-free); the ctx leak
+#     on that path is the shim's pre-existing cancel_reserve behavior, not
+#     new with the deferral;
+#   - a permit id of 0 panics core ("permit_id cannot be 0"), so every
+#     issuing path coerces the value through _permit_id (always >= 1).
+sub _resolve_permit ($class, $permit, $issue) {
     if (Scalar::Util::blessed($permit) && $permit->can('is_ready')) {
-        return $permit->is_ready ? ($permit->get // 1) : 1;
+        # PENDING branch: the supplier is exerting backpressure. Defer the
+        # completion to a continuation on the future; issue nothing now.
+        if (!$permit->is_ready && $permit->can('on_ready')) {
+            $permit->on_ready(sub ($f) {
+                # The continuation runs in the resolver's context (user code
+                # or the loop), outside the drain's per-entry eval; it must
+                # never unwind into the resolver.
+                eval { $issue->($class->_future_permit_id($f)); 1 } or warn
+                    "Temporalio::Worker::SlotSupplierRegistry: deferred"
+                    . " reserve completion threw, ignoring: $@";
+            });
+            return;
+        }
+        # RESOLVED branch: an already-settled future yields its value now
+        # (failed/cancelled shapes fall back inside _future_permit_id).
+        $issue->($class->_future_permit_id($permit));
+        return;
     }
-    return 1 unless defined $permit;
-    return $permit if $permit =~ /\A[0-9]+\z/ && $permit > 0;
+    # IMMEDIATE branch: a plain return value is a resolved reservation.
+    $issue->($class->_permit_id($permit));
+    return;
+}
+
+# Extract a permit id from a settled reserve future. A failed or cancelled
+# future (or a duck-typed pending one we could not defer on) warns and falls
+# back to permit 1: reservation cannot error toward core, and never
+# completing would wedge that reserve in core forever.
+sub _future_permit_id ($class, $f) {
+    my $value = eval { my ($v) = $f->get; $v };
+    if (my $err = $@) {
+        warn "Temporalio::Worker::SlotSupplierRegistry: reserve future did"
+            . " not yield a value, issuing fallback permit 1: $err";
+        return 1;
+    }
+    return $class->_permit_id($value);
+}
+
+# A permit id must be a POSITIVE integer the shim hands back to core for
+# mark_used/release; temporal_core_complete_async_reserve panics on 0.
+# Anything non-conforming is coerced to the small positive fallback 1 so the
+# reservation still completes.
+sub _permit_id ($class, $value) {
+    return 1 unless defined $value && !ref $value;
+    return $value if $value =~ /\A[0-9]+\z/ && $value > 0;
     return 1;
 }
 

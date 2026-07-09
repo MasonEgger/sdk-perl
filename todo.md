@@ -185,10 +185,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R29.4 Verify: both DESTROY-after-drop assertions pass and callers still get the handle; prove -lj4 t green
 
 ### Step R31: Honor Pending Futures from Custom Slot Suppliers
-- [ ] R31.1 RED: unit slot_supplier_pending.t asserts no permit while the reserve future is pending and the permit matches the resolved value
-- [ ] R31.2 GREEN: defer the permit for a pending reserve future in _resolve_permit at SlotSupplierRegistry.pm:102-117,:141-148
-- [ ] R31.3 REFACTOR: clearly name the pending-vs-resolved branch; cite L19 + shim reserve-timing note
-- [ ] R31.4 Verify: no-permit-while-pending and permit-matches-value assertions pass; prove -lj4 t green
+- [x] R31.1 RED: unit slot_supplier_pending.t asserts no permit while the reserve future is pending and the permit matches the resolved value
+- [x] R31.2 GREEN: defer the permit for a pending reserve future in _resolve_permit at SlotSupplierRegistry.pm:102-117,:141-148
+- [x] R31.3 REFACTOR: clearly name the pending-vs-resolved branch; cite L19 + shim reserve-timing note
+- [x] R31.4 Verify: no-permit-while-pending and permit-matches-value assertions pass; prove -lj4 t green
 
 ### Step R32: Implement Nexus cancel_task
 - [ ] R32.1 RED: extend replay nexus.t to dispatch a task, deliver cancel_task, and assert the operation future is cancelled and ack_cancel fires
