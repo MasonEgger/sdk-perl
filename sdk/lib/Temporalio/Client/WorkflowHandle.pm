@@ -245,7 +245,11 @@ class Temporalio::Client::WorkflowHandle {
         nexus  => 3,          # RESET_REAPPLY_EXCLUDE_TYPE_NEXUS
     );
 
-    sub _reapply_enum ($name, $value, $table) {
+    # Shared name-to-proto-enum validator for every named-value option on this
+    # handle (the reapply maps above, the query reject map below; spec R67,
+    # finding A13): a raw proto number passes through; an unknown name raises
+    # the typed Argument error before any RPC.
+    sub _named_enum ($name, $value, $table) {
         return $value if $value =~ /\A[0-9]+\z/;    # already a proto number
         my $num = $table->{$value};
         Temporalio::Exception::Argument->throw(
@@ -286,7 +290,7 @@ class Temporalio::Client::WorkflowHandle {
 
         if (defined(my $type = $kwargs{reset_reapply_type})) {
             $fields{reset_reapply_type} =
-                _reapply_enum('reset_reapply_type', $type,
+                _named_enum('reset_reapply_type', $type,
                     \%RESET_REAPPLY_TYPE);
         }
 
@@ -301,7 +305,7 @@ class Temporalio::Client::WorkflowHandle {
         # after construction.
         if (defined(my $exclude = $kwargs{reset_reapply_exclude_types})) {
             $request->set_reset_reapply_exclude_types([
-                map { _reapply_enum('reset_reapply_exclude_types', $_,
+                map { _named_enum('reset_reapply_exclude_types', $_,
                         \%RESET_REAPPLY_EXCLUDE_TYPE) } @$exclude
             ]);
         }
@@ -361,6 +365,16 @@ class Temporalio::Client::WorkflowHandle {
         return;
     }
 
+    # temporal.api.enums.v1.QueryRejectCondition (enums/v1/query.proto), spec
+    # R67 (finding A13): reject_condition used to pass verbatim into the proto
+    # enum. Names are Python-parity (sdk-python common.py
+    # QueryRejectCondition: NONE/NOT_OPEN/NOT_COMPLETED_CLEANLY).
+    my %QUERY_REJECT_CONDITION = (
+        none                  => 1,    # QUERY_REJECT_CONDITION_NONE
+        not_open              => 2,    # QUERY_REJECT_CONDITION_NOT_OPEN
+        not_completed_cleanly => 3,    # ..._NOT_COMPLETED_CLEANLY
+    );
+
     # query($name, \@args, reject_condition => ..., ...) — async (spec section
     # 7.6 / sdk-python _impl.py query_workflow 411-472). Returns the decoded
     # single query result; a server-rejected query raises QueryRejected.
@@ -402,7 +416,11 @@ class Temporalio::Client::WorkflowHandle {
             query     => $WorkflowQuery->new(\%query_fields),
         );
         if (defined(my $rc = $opts{reject_condition})) {
-            $fields{query_reject_condition} = $rc;
+            # Spec R67 (finding A13): map the named value; a raw proto number
+            # still passes through; an unknown name raises Argument pre-RPC.
+            $fields{query_reject_condition} =
+                _named_enum('reject_condition', $rc,
+                    \%QUERY_REJECT_CONDITION);
         }
         my $request = _resolve(
             'temporal.api.workflowservice.v1.QueryWorkflowRequest')
@@ -671,7 +689,13 @@ C<cancel> and C<terminate> issue their respective RPCs (threading
 C<first_execution_run_id> through the run chain); C<terminate> encodes
 C<details> through the data converter. C<signal> and C<query> send the named
 signal/query with converter-encoded arguments; a server-rejected query
-raises L<Temporalio::Exception::QueryRejected>. C<fetch_history_events>
+raises L<Temporalio::Exception::QueryRejected>. C<query> also accepts a
+C<reject_condition> option naming a
+C<temporal.api.enums.v1.QueryRejectCondition> value: C<'none'>,
+C<'not_open'>, or C<'not_completed_cleanly'> (the same names as sdk-python's
+C<QueryRejectCondition>); a raw proto enum number is passed through
+unchanged, and any other value raises L<Temporalio::Exception::Argument>
+before any RPC. C<fetch_history_events>
 returns an async iterator over the workflow's history events.
 
 =head2 reset

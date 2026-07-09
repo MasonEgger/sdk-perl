@@ -303,10 +303,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R63.4 Verify: both forms resolve (CustomRun -> CustomWorkflow, Plain -> execute), string form unchanged; prove -lj4 t green (161 files, 742 tests, live integration) and prove -lj4 xt green (414)
 
 ### Step R67: Map and Validate query reject_condition
-- [ ] R67.1 RED: query_reject_condition.t covers each named value's enum mapping and one invalid value raising the typed error
-- [ ] R67.2 GREEN: map names to the proto enum at WorkflowHandle:379-381, raise on invalid, add POD with Python-parity names
-- [ ] R67.3 REFACTOR: single-source the name-to-enum map near the proto enum; comment with A13
-- [ ] R67.4 Verify: named values map, invalid raises, POD lists names; prove -lj4 t and xt green
+- [x] R67.1 RED: query_reject_condition.t covers the three Python-parity named values' enum mapping, raw-number pass-through and omitted-field regressions, and one invalid value raising the typed error pre-RPC; named-value and invalid subtests failed honestly pre-fix
+- [x] R67.2 GREEN: %QUERY_REJECT_CONDITION map (none=>1, not_open=>2, not_completed_cleanly=>3, Python-parity per sdk-python common.py) wired into _root_query; raw proto numbers pass through; unknown names raise Temporalio::Exception::Argument before any RPC; POD lists the names
+- [x] R67.3 REFACTOR: the map lives next to the proto-enum comment (enums/v1/query.proto) and validates through the shared _named_enum helper (renamed from _reapply_enum, now single-sourced across the reset and query maps); comments cite A13
+- [x] R67.4 Verify: named values map, invalid raises, POD lists names; prove -lj4 t green (162 files, 746 tests, live integration) and prove -lj4 xt green (414)
 
 ### Step R68: Accept Non-Temporalio Causes in Exception Chaining
 - [ ] R68.1 RED: exception_cause_chaining.t chains a plain string die and a foreign object (adapted probe cause assertions)
