@@ -282,7 +282,10 @@ class Temporalio::Client {
         return Temporalio::Client::_WorkflowExecutionIterator->new(
             client    => $self,
             query     => $query,
-            page_size => $opts{page_size},
+            # Python sends page_size 1000 when the caller omits it (finding
+            # A17 / spec R69; ../sdk-python/temporalio/client/_client.py:1230);
+            # before R69 this SDK sent no page_size at all.
+            page_size => $opts{page_size} // 1000,
         );
     }
 
@@ -432,7 +435,10 @@ class Temporalio::Client {
         return Temporalio::Client::_ScheduleListIterator->new(
             client    => $self,
             query     => $query,
-            page_size => $opts{page_size},
+            # Python sends page_size 1000 when the caller omits it (finding
+            # A17 / spec R69; ../sdk-python/temporalio/client/_client.py:2732);
+            # the ListSchedulesRequest field is maximum_page_size.
+            page_size => $opts{page_size} // 1000,
         );
     }
 
@@ -1233,6 +1239,7 @@ Returns a L<Temporalio::Client::ScheduleHandle> for an existing schedule id with
 =head2 list_schedules
 
 Returns a lazy L<Temporalio::Client::_ScheduleListIterator> over schedules matching the given visibility query; no RPC is made until the first C<next> is awaited.
+Pages are C<page_size> rows each (default 1000, as in the Python SDK).
 
 =head2 async_activity_handle
 
@@ -1277,7 +1284,7 @@ C<< await $iter->next >> yields one
 C<temporal.api.workflow.v1.WorkflowExecutionInfo> proto message for an
 execution matching the given visibility query, then C<undef> once every
 page is exhausted. Pages of the C<ListWorkflowExecutions> RPC are fetched
-lazily (C<page_size> rows per page, the server default when omitted), so
+lazily (C<page_size> rows per page, default 1000 as in the Python SDK), so
 the first RPC happens when the first C<next> is awaited. The iterator's
 class name is private; rely on the C<next> contract described here (spec
 R64).
