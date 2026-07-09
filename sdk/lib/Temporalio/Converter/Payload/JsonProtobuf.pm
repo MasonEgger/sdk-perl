@@ -45,8 +45,25 @@ class Temporalio::Converter::Payload::JsonProtobuf
         my $class = Temporalio::Core::Proto::resolve($full_name);
 
         my $data = $payload->data // '';
-        utf8::decode($data);    # Protobuf::JSON expects character data
-        my $values = Temporalio::Core::Proto::json()->decode($full_name, $data);
+        # Protobuf::JSON expects character data. Finding L23 (spec R57):
+        # utf8::decode returns false on malformed UTF-8 and leaves the bytes
+        # untouched, which used to sail through as latin-1 mojibake (probe
+        # verify-45/pool-payload/probe_cause_mojibake.pl, shared with R68).
+        unless (utf8::decode($data)) {
+            Temporalio::Exception::DataConverter->throw(
+                message => 'json/protobuf payload data is not valid UTF-8');
+        }
+        # Finding ADJ1 (spec R58): parser deaths (empty data included) must
+        # not escape raw; sdk-python wraps the ParseError the same way
+        # (RuntimeError "Failed parsing").
+        my $values =
+            eval { Temporalio::Core::Proto::json()->decode($full_name, $data) };
+        if ($@) {
+            my $message = "$@";
+            chomp $message;
+            Temporalio::Exception::DataConverter->throw(
+                message => "json/protobuf decoding failed: $message");
+        }
 
         # Materialize nested message fields into generated-class instances by
         # round-tripping the plain decoded hashref through the wire form.
@@ -74,7 +91,10 @@ type name from C<< $value->descriptor->full_name >>. C<from_payload>
 resolves C<messageType> back to the generated class via
 L<Temporalio::Core::Proto> and materializes a fully-blessed instance,
 raising L<Temporalio::Exception::DataConverter> when the metadata is
-missing. C<encoding> returns C<json/protobuf>. See
+missing, when the payload data is not valid UTF-8 (spec R57), or when
+the JSON parse fails, empty data included (spec R58, matching
+sdk-python's typed wrap of the parse error). C<encoding> returns
+C<json/protobuf>. See
 L<Temporalio::Converter::Payload> for the converter contract.
 
 =head1 CONSTRUCTOR

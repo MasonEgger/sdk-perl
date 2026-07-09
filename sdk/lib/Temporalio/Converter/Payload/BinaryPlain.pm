@@ -49,13 +49,17 @@ Temporalio::Converter::Payload::BinaryPlain - the binary/plain encoding
 
 =head1 DESCRIPTION
 
-Handles raw bytes: values wrapped in L<Temporalio::Payload::RawBytes>, and
-plain Perl strings without the internal UTF-8 flag (per spec section 5.2, an
-unflagged string is bytes; numeric scalars are not strings and fall through
-to the C<json/plain> catch-all). C<to_payload> stores the bytes verbatim
-under encoding C<binary/plain>; C<from_payload> returns the data bytes as a
-plain scalar (not re-wrapped). C<encoding> returns C<binary/plain>. See
-L<Temporalio::Converter::Payload> for the converter contract.
+Handles raw bytes: C<to_payload> claims only values wrapped in
+L<Temporalio::Payload::RawBytes> (spec R59; the isa-check in the claiming
+code is the whole condition). Bare Perl scalars, with or without the
+internal UTF-8 flag, are never claimed here and fall through to the
+C<json/plain> catch-all, matching sdk-python (only C<bytes> is binary)
+and sdk-ruby (only ASCII_8BIT strings). C<to_payload> stores the bytes
+verbatim under encoding C<binary/plain>; C<from_payload> returns the data
+bytes as a plain scalar (not re-wrapped), the empty string when the data
+is empty or unset (spec R58, Python parity with C<b''>). C<encoding>
+returns C<binary/plain>. See L<Temporalio::Converter::Payload> for the
+converter contract.
 
 =head1 CONSTRUCTOR
 

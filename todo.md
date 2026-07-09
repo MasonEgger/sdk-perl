@@ -273,10 +273,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P8: Converter, POD, and Parity Edges
 
 ### Step R56-R59: Converter Batch
-- [ ] R56-R59.1 RED: converter_errors.t for poisoned failure converter, malformed UTF-8, empty-data json/plain; xt pod check for BinaryPlain/Json claim conditions
-- [ ] R56-R59.2 GREEN: wrap failure errors (Data:152-153,:182), check utf8::decode (JsonProtobuf:48), define empty-data outcome, fix POD (BinaryPlain:25-27 + Json)
-- [ ] R56-R59.3 REFACTOR: comment sites with L22/L23/ADJ1/L24; note R57/R68 shared probe
-- [ ] R56-R59.4 Verify: typed wrapper, UTF-8 raise, empty-data Python parity, POD maps to code; prove -lj4 t and xt green
+- [x] R56-R59.1 RED: converter_errors.t for poisoned failure converter, malformed UTF-8, empty-data json/plain; xt pod check for BinaryPlain/Json claim conditions
+- [x] R56-R59.2 GREEN: wrap failure errors (Data:152-153,:182), check utf8::decode (JsonProtobuf:48), define empty-data outcome, fix POD (BinaryPlain:25-27 + Json)
+- [x] R56-R59.3 REFACTOR: comment sites with L22/L23/ADJ1/L24; note R57/R68 shared probe
+- [x] R56-R59.4 Verify: typed wrapper, UTF-8 raise, empty-data Python parity, POD maps to code; prove -lj4 t and xt green
 
 ### Step R64-R66: POD Pass
 - [ ] R64-R66.1 RED: xt grep probe for "arrives later"; xt kwarg-vs-POD cross-check for Worker->new and connect; list_workflows behavior test

@@ -47,7 +47,17 @@ class Temporalio::Converter::Payload::Json
     }
 
     method from_payload ($payload, $type_hint = undef) {
-        my $value = eval { $json->decode($payload->data // 'null') };
+        my $data = $payload->data;
+        # Finding ADJ1 (spec R58): empty payload data never reaches the JSON
+        # parser raw. sdk-python raises on the same payload (json.loads(b'')
+        # dies, wrapped as RuntimeError "Failed parsing"), so the typed error
+        # is the parity direction. An unset proto bytes field is Python's
+        # b'', so undef data gets the same treatment as the empty string.
+        unless (defined $data && length $data) {
+            Temporalio::Exception::DataConverter->throw(
+                message => 'json/plain payload has empty data');
+        }
+        my $value = eval { $json->decode($data) };
         if ($@) {
             Temporalio::Exception::DataConverter->throw(
                 message => "json/plain decoding failed: $@");
@@ -69,16 +79,18 @@ Temporalio::Converter::Payload::Json - the json/plain catch-all encoding
 =head1 DESCRIPTION
 
 The catch-all converter: hashrefs, arrayrefs, JSON::PP boolean scalar
-refs, and plain scalars that aren't bytes (UTF-8-flagged strings and
-numbers — unflagged strings are claimed by
-L<Temporalio::Converter::Payload::BinaryPlain> first). Serialization is
-L<JSON::PP> in canonical mode with C<allow_blessed> off, so output is
-deterministic and blessed objects are never silently stringified —
-C<to_payload> declines blessed values (the composite then raises
+refs, and every plain non-reference scalar, strings (with or without the
+internal UTF-8 flag) and numbers alike (spec R59: bare scalars are never
+claimed as bytes; wrap bytes in L<Temporalio::Payload::RawBytes> to
+target C<binary/plain>). Serialization is L<JSON::PP> in canonical mode
+with C<allow_blessed> off, so output is deterministic and blessed
+objects are never silently stringified: C<to_payload> declines blessed
+values (the composite then raises
 L<Temporalio::Exception::DataConverter> naming the class). Encode/decode
-failures raise L<Temporalio::Exception::DataConverter>. C<encoding>
-returns C<json/plain>. See L<Temporalio::Converter::Payload> for the
-converter contract.
+failures raise L<Temporalio::Exception::DataConverter>, as does a
+payload whose data is empty or unset (spec R58, matching sdk-python,
+which raises on the same payload). C<encoding> returns C<json/plain>.
+See L<Temporalio::Converter::Payload> for the converter contract.
 
 =head1 CONSTRUCTOR
 

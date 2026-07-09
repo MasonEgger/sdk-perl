@@ -175,8 +175,17 @@ class Temporalio::Converter::Data {
 
     # Exception -> Failure proto, embedded payloads codec-encoded.
     async method to_failure ($exception) {
-        my $failure =
-            $failure_converter->to_failure($exception, $payload_converter);
+        # Finding L22 (spec R56): the failure converter itself gets the same
+        # DataConverter wrapping the payload converter gets; only the codec
+        # traversal below was wrapped before.
+        my $failure;
+        try {
+            $failure =
+                $failure_converter->to_failure($exception, $payload_converter);
+        }
+        catch ($error) {
+            _propagate_as_data_converter($error, 'failure encoding');
+        }
         if (@$payload_codecs) {
             try {
                 # Normalize through the wire so every nested field is a
@@ -205,7 +214,16 @@ class Temporalio::Converter::Data {
                     'failure payload decoding');
             }
         }
-        return $failure_converter->from_failure($failure, $payload_converter);
+        # Finding L22 (spec R56): wrap the failure converter like to_failure.
+        my $exception;
+        try {
+            $exception =
+                $failure_converter->from_failure($failure, $payload_converter);
+        }
+        catch ($error) {
+            _propagate_as_data_converter($error, 'failure decoding');
+        }
+        return $exception;
     }
 }
 
@@ -292,10 +310,11 @@ Readers for the composed parts.
 
 =head1 FAILURE MODES
 
-A raising codec or payload converter propagates as
+A raising codec, payload converter, or failure converter propagates as
 L<Temporalio::Exception::DataConverter>: an existing DataConverter
 passes through unchanged, another Temporalio exception is attached as
-the C<cause>, and anything else is folded into the message.
+the C<cause>, and anything else is folded into the message. Failure
+conversion gets the same wrapping as payload conversion (spec R56).
 
 =head1 CONSTRUCTOR
 
