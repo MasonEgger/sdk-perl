@@ -229,10 +229,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P7: Test Infrastructure and Tracing
 
 ### Step R33+R46+R47+R48: DevServer and Test-Helper Future-State Fixes
-- [ ] R33+R46+R47+R48.1 RED: unit tests in devserver_shutdown.t (shared with R3) + test_await_helpers.t force timeout/throw/wedge cases with the adapted future_semantics probe
-- [ ] R33+R46+R47+R48.2 GREEN: reap late completions (DevServer:174-187, Client:39-57), flag-after-success (DevServer:207-208), reachable diagnostics (DevServer:35-37, Worker:45-46), reachable retry (Client:43-51)
-- [ ] R33+R46+R47+R48.3 REFACTOR: factor the shared wait_any loser-reaper helper; comment each site with L26/T5/T6 and the Future 0.52 state
-- [ ] R33+R46+R47+R48.4 Verify: reaper observed, retryable shutdown, diagnostic text, connect retry; prove -lj4 t and xt green
+- [x] R33+R46+R47+R48.1 RED: unit tests in devserver_shutdown.t (shared with R3) + test_await_helpers.t force timeout/throw/wedge cases with the adapted future_semantics probe
+- [x] R33+R46+R47+R48.2 GREEN: reap late completions (DevServer:174-187, Client:39-57), flag-after-success (DevServer:207-208), reachable diagnostics (DevServer:35-37, Worker:45-46), reachable retry (Client:43-51)
+- [x] R33+R46+R47+R48.3 REFACTOR: factor the shared wait_any loser-reaper helper; comment each site with L26/T5/T6 and the Future 0.52 state
+- [x] R33+R46+R47+R48.4 Verify: reaper observed, retryable shutdown, diagnostic text, connect retry; prove -lj4 t and xt green
 
 ### Step R34+R61: Remove the Ephemeral-Port Race and Fix the Net::EmptyPort Dependency Phase
 - [ ] R34+R61.1 RED: concurrent four-server integration test (skip_all offline) + emptyport_range unit probe + cpanfile dependency-audit assertion

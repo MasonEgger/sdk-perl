@@ -1,5 +1,5 @@
-# ABOUTME: Asserts the DevServer shutdown-timeout arm never frees the C server
-# ABOUTME: handle while the bridge future is pending (spec R3; finding L3).
+# ABOUTME: DevServer shutdown/start Future-state tests: timeout-arm deferred
+# ABOUTME: free (R3/L3), late-start reaper (R33/L26), retryable shutdown (R46/L25).
 use v5.38;
 use warnings;
 use utf8;
@@ -185,6 +185,153 @@ T2->subtest('R3 control: a prompt shutdown callback still frees exactly once' =>
         'the ready arm frees immediately, exactly once');
     T2->is(scalar @warnings, 0, 'no deferral warning on the prompt path');
     T2->ok($server->is_shutdown, 'server reports shutdown');
+
+    $runtime->shutdown;
+});
+
+# --- Phase P7 cases (findings L26/L25/T5; spec R33/R46/R47). The Future
+# 0.52 loser states behind them are pinned by t/unit/future_semantics.t. ---
+
+T2->subtest('R47: the shutdown timeout diagnostic names the wait and the timeout' => sub {
+    my $loop    = IO::Async::Loop->new;
+    my $runtime = Temporalio::Runtime->new(loop => $loop);
+    my $server  = make_server($runtime, 0.2);
+
+    my $bridge_future;
+    no warnings 'redefine';
+    local *Temporalio::Core::Callback::issue_async =
+        sub ($class, $rt, $kind, $invoke) {
+            return $bridge_future = $loop->new_future;
+        };
+    local *Temporalio::Core::FFI::ephemeral_server_free = sub ($handle) { };
+    use warnings 'redefine';
+    local $SIG{__WARN__} = sub { };
+
+    my $error = do { local $@; eval { $server->shutdown; 1 } ? undef : $@ };
+    # Finding T5 (spec R47): _await must branch on the ACTUAL loser state
+    # (the without_cancel shield leaves the bridge future pending on the
+    # timeout arm), so the diagnostic names what was awaited and for how
+    # long, never the raw Future "was cancelled" message.
+    T2->ok(
+        Scalar::Util::blessed($error)
+            && $error->isa('Temporalio::Exception::Runtime')
+            && $error->message
+                =~ /dev server shutdown did not complete within 0\.2s/,
+        'the diagnostic names the awaited operation and the timeout',
+    ) or T2->diag($error);
+
+    $bridge_future->done({});    # let the deferred free run
+    $runtime->shutdown;
+});
+
+T2->subtest('R46: a failed shutdown leaves the server retryable' => sub {
+    my $loop    = IO::Async::Loop->new;
+    my $runtime = Temporalio::Runtime->new(loop => $loop);
+    my $server  = make_server($runtime, 0.2);
+
+    my @issued;
+    my @free_calls;
+    no warnings 'redefine';
+    local *Temporalio::Core::Callback::issue_async =
+        sub ($class, $rt, $kind, $invoke) {
+            push @issued, $kind;
+            # First attempt: the callback fires with a NON-tolerable Bridge
+            # failure (a real shutdown bug shape, not the P10.0.4 teardown
+            # transport noise). Second attempt: clean success.
+            return $loop->new_future->fail(
+                Temporalio::Exception::Bridge->new(
+                    message => 'shutdown exploded'))
+                if @issued == 1;
+            return $loop->new_future->done(undef);
+        };
+    local *Temporalio::Core::FFI::ephemeral_server_free =
+        sub ($handle) { push @free_calls, $handle };
+    use warnings 'redefine';
+    local $SIG{__WARN__} = sub { };
+
+    my $error = do { local $@; eval { $server->shutdown; 1 } ? undef : $@ };
+    T2->ok(
+        Scalar::Util::blessed($error)
+            && $error->isa('Temporalio::Exception::Bridge')
+            && $error->message =~ /shutdown exploded/,
+        'the first shutdown surfaces its real failure',
+    ) or T2->diag($error);
+    T2->ok(!$server->is_shutdown,
+        'is_shutdown stays false after a failed shutdown (finding L25)');
+    T2->is(scalar @free_calls, 0,
+        'the handle is not freed on the failed attempt (kept for the retry)');
+
+    my $retried = eval { $server->shutdown; 1 };
+    T2->ok($retried, 'a second shutdown call still attempts the work and succeeds')
+        or T2->diag($@);
+    T2->is(\@issued, ['server_shutdown', 'server_shutdown'],
+        'the retry re-issued the bridge shutdown');
+    T2->is(\@free_calls, [$FAKE_HANDLE],
+        'the successful retry frees the handle exactly once');
+    T2->ok($server->is_shutdown, 'the flag is set only after success');
+
+    $runtime->shutdown;
+});
+
+T2->subtest('R33: a dev server that starts after the timeout is shut down, not leaked' => sub {
+    my $loop    = IO::Async::Loop->new;
+    my $runtime = Temporalio::Runtime->new(loop => $loop);
+
+    my ($start_future, $shutdown_future);
+    my @issued;
+    my @free_calls;
+    my @warnings;
+    no warnings 'redefine';
+    local *Temporalio::Core::Callback::issue_async =
+        sub ($class, $rt, $kind, $invoke) {
+            push @issued, $kind;
+            return $start_future = $loop->new_future
+                if $kind eq 'server_start';
+            return $shutdown_future = $loop->new_future;
+        };
+    local *Temporalio::Core::FFI::ephemeral_server_free =
+        sub ($handle) { push @free_calls, $handle };
+    use warnings 'redefine';
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+
+    my $error = do {
+        local $@;
+        eval {
+            Temporalio::Test::DevServer->start(
+                runtime       => $runtime,
+                start_timeout => 0.2,
+                existing_path => '/bin/true',
+            );
+            1;
+        } ? undef : $@;
+    };
+    # R47 sibling assertion: the start diagnostic names the wait + timeout.
+    T2->ok(
+        Scalar::Util::blessed($error)
+            && $error->isa('Temporalio::Exception::Runtime')
+            && $error->message
+                =~ /dev server start did not complete within 0\.2s/,
+        'start surfaces the named timeout diagnostic',
+    ) or T2->diag($error);
+    T2->is(\@issued, ['server_start'], 'only the start was issued so far');
+    T2->ok(!$start_future->is_ready,
+        'the abandoned start future is still pending (shielded from loser-cancel)');
+
+    # Finding L26 (spec R33): core finally starts the CLI after start()
+    # already threw. The reaper must shut the late server down (observe a
+    # shutdown call, not a leaked pid) and free its handle once the
+    # shutdown callback settles.
+    $start_future->done({ handle => $FAKE_HANDLE, target => '127.0.0.1:7233' });
+    T2->is(\@issued, ['server_start', 'server_shutdown'],
+        'the reaper issues a shutdown for the late-started CLI');
+    T2->is(scalar @free_calls, 0,
+        'the handle is not freed while the reaper shutdown is in flight');
+    T2->like(join('', @warnings), qr/started after the start timeout/,
+        'the reap is logged');
+
+    $shutdown_future->done(undef);
+    T2->is(\@free_calls, [$FAKE_HANDLE],
+        'the late handle is freed once the reaper shutdown settles');
 
     $runtime->shutdown;
 });

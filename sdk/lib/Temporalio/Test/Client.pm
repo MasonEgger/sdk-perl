@@ -37,26 +37,64 @@ sub connect_with_retry ($loop, $connector, %opts) {
     my $timeout  = $opts{timeout}  // 60;
     for my $attempt (1 .. $attempts) {
         my $future = $connector->();
+        # ->without_cancel shields the connect from wait_any's loser-cancel
+        # (Future 0.52, pinned by t/unit/future_semantics.t). Without the
+        # shield the timeout arm CANCELLED the connect future: a cancelled
+        # future is ready-but-not-failed, so the success branch matched it
+        # and ->get croaked "was cancelled" (finding T6 / spec R48), and
+        # the late connection delivered by core was discarded unreaped
+        # (finding L26 / spec R33).
         $loop->await(Future->wait_any(
-            $future, $loop->timeout_future(after => $timeout)));
+            $future->without_cancel,
+            $loop->timeout_future(after => $timeout)));
 
-        if ($future->is_ready && !$future->is_failed) {
+        if (!$future->is_ready) {
+            # Wedged connect (finding T6 / spec R48): still pending after
+            # $timeout. Treat it as a transient stall (same as a connect
+            # refused) and retry with a fresh connect; core may still
+            # complete THIS one later, so hand it to the reaper first
+            # (finding L26 / spec R33).
+            _reap_late_connect($future);
+            die "connect did not resolve within ${timeout}s\n"
+                if $attempt == $attempts;
+        }
+        elsif (!$future->is_failed) {
             return $future->get;
         }
-
-        # A wedged connect that never resolved within $timeout is treated as a
-        # transient stall (same as a connect refused) and retried; a resolved
-        # failure is classified.
-        my $err = $future->is_failed ? ($future->failure)[0]
-                                     : "connect did not resolve within ${timeout}s\n";
-
-        die $err
-            if $attempt == $attempts
-            || !Temporalio::Test::Worker::_is_transient_load_error($err);
+        else {
+            # A resolved failure is classified: only the transient
+            # connect-race shapes are retried.
+            my $err = ($future->failure)[0];
+            die $err
+                if $attempt == $attempts
+                || !Temporalio::Test::Worker::_is_transient_load_error($err);
+        }
 
         $loop->await($loop->delay_future(after => $backoff)) if $backoff > 0;
     }
     # Unreachable: the loop either returns or dies on the last attempt.
+    return;
+}
+
+# Finding L26 (spec R33): a connect abandoned by the retry loop is still in
+# flight in core, which completes it regardless — the late success is a
+# fully-built Temporalio::Client whose core connection would otherwise leak
+# (bounded: one connection per wedged attempt). Close it when it lands. A
+# late FAILURE has nothing to reap; retrieve it so the abandoned future
+# never warns as an unreported failure.
+sub _reap_late_connect ($future) {
+    $future->on_ready(sub ($f) {
+        if ($f->is_failed) {
+            my @reported = $f->failure;
+            return;
+        }
+        return if $f->is_cancelled;
+        my $client = $f->get;
+        warn 'Temporalio::Test::Client: connect completed after its'
+           . " timeout; closing the late connection\n";
+        $client->connection->close;
+        return;
+    });
     return;
 }
 
@@ -114,5 +152,10 @@ Awaits C<$connector> (a coderef returning a B<fresh> L<Future> per call) on
 C<$loop>, retrying only a transient dev-server connect race up to C<attempts>
 times (default 10) with a C<backoff> pause (default 1.5s) between tries.
 Returns the resolved client. Non-transient failures surface at once.
+
+A connect still pending after C<timeout> seconds (default 60) is treated as
+a wedged transient stall and retried the same way (spec R48); the abandoned
+attempt is handed to a reaper so a connection that core establishes late is
+closed rather than leaked (spec R33).
 
 =cut

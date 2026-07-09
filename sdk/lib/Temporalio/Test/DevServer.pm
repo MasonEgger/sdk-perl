@@ -178,8 +178,9 @@ class Temporalio::Test::DevServer {
             or Temporalio::Exception::Runtime->throw(
                 message => "could not redirect STDERR to $stderr_file: $!");
 
+        my $future;
         my $started = eval {
-            my $future = Temporalio::Core::Callback->issue_async(
+            $future = Temporalio::Core::Callback->issue_async(
                 $runtime, server_start => sub ($user_data, $trampoline) {
                     Temporalio::Core::FFI::ephemeral_server_start_dev_server(
                         $runtime->core_ptr, $dev_options,
@@ -191,7 +192,16 @@ class Temporalio::Test::DevServer {
         open STDERR, '>&', $saved_stderr
             or warn "could not restore STDERR: $!";
         close $saved_stderr;
-        die $error if !$started && $error;
+        if (!$started) {
+            # Finding L26 (spec R33): a start timeout leaves the bridge
+            # future pending (_await's ->without_cancel shield keeps it
+            # observable); core may still start the CLI after the deadline.
+            # Attach the reaper so a late-started server is shut down
+            # instead of leaked as an orphan process.
+            _reap_late_start($runtime, $future, \@keep)
+                if defined $future && !$future->is_ready;
+            die $error if $error;
+        }
 
         return $class->new(
             runtime          => $runtime,
@@ -215,12 +225,23 @@ class Temporalio::Test::DevServer {
     #     core may still hold the borrow — skip the free and leak the handle
     #     by design (bounded: one dev-server box near process end).
     # If the callback never fires at all, the handle leaks the same way.
-    # Related but distinct: R46 (the $is_shutdown flag order) and R33
-    # (abandoned futures leaking the CLI subprocess) share this shutdown
-    # path and land with the Phase P7 test-helper fixes.
+    # Related but distinct fixes sharing this shutdown path: R46 (the
+    # $is_shutdown flag is set only on success, see shutdown below) and R33
+    # (abandoned start/connect futures are reaped, see _reap_late_start).
     sub _free_handle_when_settled ($future, $server_handle) {
         warn 'Temporalio::Test::DevServer: shutdown timed out; deferring'
            . " server handle free until the bridge callback settles\n";
+        _free_when_borrow_released($future, $server_handle);
+        return;
+    }
+
+    # The shared settle continuation behind the two "reap the loser of a
+    # wait_any timeout race" sites (the shutdown-timeout deferral above and
+    # the late-start reaper below): free $server_handle once $future's
+    # settle proves core's borrow is over — done, or failed with
+    # Exception::Bridge (either way the trampoline fired). Any other
+    # failure is the fail_all_pending shape described above: skip the free.
+    sub _free_when_borrow_released ($future, $server_handle) {
         $future->on_ready(sub ($f) {
             if ($f->is_failed) {
                 my $error = $f->failure;
@@ -232,9 +253,49 @@ class Temporalio::Test::DevServer {
         return;
     }
 
-    # Idempotent (spec section 12.2). Frees the C server handle only after
-    # the shutdown callback fires — the bridge's async block borrows it; on
-    # the timeout arm the free is deferred via _free_handle_when_settled.
+    # Finding L26 (spec R33): the reaper for a dev server that starts AFTER
+    # start() gave up. The abandoned bridge future is still pending behind
+    # _await's ->without_cancel shield (Future 0.52 loser states, pinned by
+    # t/unit/future_semantics.t: an UNSHIELDED loser would be cancelled and
+    # a late ->done on it silently discarded), so a settle continuation can
+    # observe the late { handle, target } and shut the CLI down instead of
+    # leaking the process. $keep pins the C option records until the settle:
+    # testing.rs reads the options until the start callback fires, and the
+    # normal pin (start()'s stack frame) is gone by the time a late start
+    # lands. A late FAILURE has nothing to reap; retrieving it keeps the
+    # abandoned future from warning as an unreported failure.
+    sub _reap_late_start ($runtime, $future, $keep) {
+        $future->on_ready(sub ($f) {
+            undef $keep;    # the callback fired; release the options pin
+            if ($f->is_failed) {
+                my @reported = $f->failure;
+                return;
+            }
+            return if $f->is_cancelled;
+            my $started = $f->get;
+            warn 'Temporalio::Test::DevServer: dev server started after the'
+               . ' start timeout; shutting down the late CLI'
+               . " (target $started->{target})\n";
+            my $server_handle   = $started->{handle};
+            my $shutdown_future = Temporalio::Core::Callback->issue_async(
+                $runtime, server_shutdown => sub ($user_data, $trampoline) {
+                    Temporalio::Core::FFI::ephemeral_server_shutdown(
+                        $server_handle, $user_data, $trampoline);
+                });
+            _free_when_borrow_released($shutdown_future, $server_handle);
+            return;
+        });
+        return;
+    }
+
+    # Idempotent after success (spec section 12.2): repeat calls return
+    # immediately once a shutdown has completed. A shutdown that fails with
+    # a real (non-tolerable) error leaves the object retryable instead
+    # (finding L25 / spec R46): the flag stays unset and the handle stays
+    # alive, so a second call re-attempts the work. Frees the C server
+    # handle only after the shutdown callback fires — the bridge's async
+    # block borrows it; on the timeout arm the free is deferred via
+    # _free_handle_when_settled.
     #
     # Shutdown-time transport tolerance (P10.0.4): the ephemeral-server shutdown
     # drives RPCs to its own process. If the connection is reset / closed while
@@ -244,7 +305,6 @@ class Temporalio::Test::DevServer {
     # worker finalize uses) and still free the handle; any other error surfaces.
     method shutdown () {
         return if $is_shutdown;
-        $is_shutdown = 1;
         my $future = Temporalio::Core::Callback->issue_async(
             $runtime, server_shutdown => sub ($user_data, $trampoline) {
                 Temporalio::Core::FFI::ephemeral_server_shutdown(
@@ -268,24 +328,38 @@ class Temporalio::Test::DevServer {
             } or $err = $@;
         }
         $restore_reaper->();
-        if ($future->is_ready) {
-            # done or Bridge-failed: the shutdown callback fired, core's
-            # borrow is over (P10.0.4 frees on tolerable transport errors).
-            Temporalio::Core::FFI::ephemeral_server_free($handle);
-        }
-        else {
+        if (!$future->is_ready) {
             # Timeout arm, future still pending: core still borrows the
-            # handle (finding L3 / spec R3) — never free it here.
+            # handle (finding L3 / spec R3) — never free it here; the
+            # settle continuation owns the handle now. TERMINAL, not
+            # retryable: a second shutdown on the same handle would race
+            # that deferred free (use-after-free), so the flag is set
+            # despite the failure.
             _free_handle_when_settled($future, $handle);
+            $handle      = undef;
+            $is_shutdown = 1;
+            die $err;
         }
-        $handle = undef;
         if (defined $err) {
             # Loaded lazily on the error path only: the classifier lives in
             # Worker.pm (heavy FFI stack) and a clean shutdown never reaches here.
             require Temporalio::Worker;
-            die $err
-                unless Temporalio::Worker::_shutdown_error_is_tolerable($err);
+            if (!Temporalio::Worker::_shutdown_error_is_tolerable($err)) {
+                # Finding L25 (spec R46): the callback fired (the future is
+                # ready) so core's borrow is over, but the shutdown itself
+                # failed with a real error. Leave the object retryable:
+                # flag unset, handle kept alive for the next attempt.
+                die $err;
+            }
+            # P10.0.4: a teardown-shaped transport error is swallowed (the
+            # server is going away regardless); fall through to the free.
         }
+        # Done, or Bridge-failed with a tolerable transport shape: the
+        # shutdown callback fired and core's borrow is over. The flag is
+        # set ONLY on this success path (spec R46).
+        Temporalio::Core::FFI::ephemeral_server_free($handle);
+        $handle      = undef;
+        $is_shutdown = 1;
         return;
     }
 
@@ -339,7 +413,9 @@ polluting TAP.
 C<start> blocks until the server is serving (raising
 L<Temporalio::Exception::Bridge> on bridge failure, or
 L<Temporalio::Exception::Runtime> after C<start_timeout> seconds, default
-60) and returns the server object. Remaining options with their defaults:
+60) and returns the server object. A server that comes up after the start
+timeout is not leaked: a reaper continuation shuts the late-started CLI
+down and frees its handle (spec R33). Remaining options with their defaults:
 C<runtime> (the process-default L<Temporalio::Runtime>, which must outlive
 the server), C<namespace> ('default'), C<ip> ('127.0.0.1'), C<port>
 (random free port), C<database_filename> (in-memory), C<ui> (off),
@@ -359,11 +435,15 @@ The C<host:port> string the server is listening on.
 
 Stops the server via C<temporal_core_ephemeral_server_shutdown> (awaited
 through the callback bridge) and frees the C handle once the shutdown
-callback has fired. Idempotent: repeat calls return immediately. If the
-shutdown times out while the bridge call is still in flight, the timeout
-error is raised but the handle free is deferred until the bridge callback
-settles (core still borrows the handle); when the callback never fires,
-the handle is deliberately leaked with a logged warning.
+callback has fired. Idempotent after success: repeat calls return
+immediately. A shutdown that fails with a real (non-tolerable) error
+leaves the object retryable — the flag stays unset and a second call
+re-attempts the work (spec R46). If the shutdown times out while the
+bridge call is still in flight, the timeout error is raised but the handle
+free is deferred until the bridge callback settles (core still borrows the
+handle); this arm is terminal, not retryable, because the deferred
+continuation owns the handle. When the callback never fires, the handle is
+deliberately leaked with a logged warning.
 
 =head2 is_shutdown
 

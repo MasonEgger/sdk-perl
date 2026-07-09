@@ -38,12 +38,20 @@ class Temporalio::Test::Worker {
             $run_future->without_cancel,
             $loop->timeout_future(after => $timeout),
         ));
-        if ($run_future->is_ready && $run_future->is_failed && !$future->is_ready)
+        # Future 0.52 loser state (finding T5 / spec R47, pinned by
+        # t/unit/future_semantics.t): when the timeout or the run-loop arm
+        # decides the race, wait_any CANCELS $future — a cancelled future
+        # is READY but neither done nor failed, so a branch keyed on
+        # `!is_ready` is dead and ->get would croak the raw "was
+        # cancelled". Branch on the actual loser state instead so the
+        # intended diagnostics are reachable.
+        if ($run_future->is_ready && $run_future->is_failed
+            && !$future->is_done && !$future->is_failed)
         {
             die 'worker run loop failed: ' . (($run_future->failure)[0] // '');
         }
         die "future did not resolve within ${timeout}s\n"
-            unless $future->is_ready;
+            if !$future->is_ready || $future->is_cancelled;
         return $future->get;
     }
 
