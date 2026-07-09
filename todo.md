@@ -326,10 +326,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P9: Parity — Interceptor and High-Value Gaps
 
 ### Step R71: Wire and Invoke the Workflow-Outbound Interceptor Chain
-- [ ] R71.1 RED: replay test asserting outbound execute_activity/start_child_workflow interceptor mutations reach the emitted command; fails on unwired base
-- [ ] R71.2 GREEN: give WorkflowOutbound the eight methods, build the root outbound, fold interceptors, call inbound->init(outbound), route ops through the chain (Interceptor.pm, Runner.pm:1690)
-- [ ] R71.3 REFACTOR: extract outbound-chain construction into a helper; comment citing parity finding 1 / _interceptor.py:416-481
-- [ ] R71.4 Verify: mutation-reaches-command assertions green; prove -lj4 t green under the memory guard
+- [x] R71.1 RED: replay test asserting outbound execute_activity/start_child_workflow interceptor mutations reach the emitted command; fails on unwired base (t/replay/interceptor_workflow_outbound.t, 3 of 4 subtests failed pre-wire; the no-interceptor control passed)
+- [x] R71.2 GREEN: give WorkflowOutbound the eight methods, build the root outbound, fold interceptors, call inbound->init(outbound), route ops through the chain (Interceptor.pm gained start_nexus_operation/info + StartNexusOperation/Info inputs; new _RootWorkflowOutbound.pm; _RootWorkflowInbound captures init's outbound via on_init, Python _workflow_instance.py:392-398/2909-2910 semantics, interceptors wrap the outbound in their inbound init, so the fold is init-driven, last-listed wrapper outermost; Runner routes schedule_activity, schedule_local_activity, start_child_workflow, both signal arms, continue_as_new via a new Runner method Workflow.pm delegates to, start_nexus_operation, and info through the chain with _root-coderef inputs in the client kwargs shape)
+- [x] R71.3 REFACTOR: extract outbound-chain construction into a helper; comment citing parity finding 1 / _interceptor.py:416-481 (Runner::_build_interceptor_chains builds both chains, cites the finding and both Python anchors; OTel seam notes in TracingInterceptor.pm updated, chain wired, the tracing outbound wrapper itself is a later pass)
+- [x] R71.4 Verify: mutation-reaches-command assertions green; prove -lj4 t green under the memory guard (t: 168 files/764 tests green incl. live integration; xt: 416 green after adding the _RootWorkflowOutbound %TRUSTME entry and Runner continue_as_new POD)
 
 ### Step R72: Add the Activity-Outbound Interceptor and Wire ActivityInbound.init
 - [ ] R72.1 RED: unit test asserting an activity interceptor's outbound heartbeat override fires when the body calls heartbeat

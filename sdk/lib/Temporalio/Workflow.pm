@@ -321,9 +321,11 @@ sub upsert_memo ($updates) {
 # continue_as_new($workflow_or_string, %opts) — request that the current run
 # end and a new run start with the given arguments. Like sdk-python's
 # workflow.continue_as_new (which raises _ContinueAsNewError), this NEVER
-# returns: it dies with a Temporalio::Workflow::ContinueAsNew control signal
-# that unwinds the :Run coroutine. The runner catches it in its outcome
-# decision table and emits a ContinueAsNewWorkflowExecution command.
+# returns: the runner routes the request through the workflow-outbound
+# interceptor chain (spec R71), whose root dies with a
+# Temporalio::Workflow::ContinueAsNew control signal that unwinds the :Run
+# coroutine. The runner catches it in its outcome decision table and emits a
+# ContinueAsNewWorkflowExecution command.
 #
 # $workflow_or_string is the new workflow type (a name string, or a definition
 # class/object resolved the same way as execute_activity's first argument).
@@ -331,15 +333,13 @@ sub upsert_memo ($updates) {
 # 10.2: args (arrayref), task_queue, retry_policy, memo, search_attributes,
 # headers, run_timeout / task_timeout (seconds), versioning_intent.
 sub continue_as_new ($workflow_or_string = undef, %opts) {
-    # Validate we are inside a workflow body (raises NoRunner otherwise) so a
-    # stray call outside a run is a clear error rather than an uncaught die.
-    _runner();
-
     my $type = defined $workflow_or_string
         ? _workflow_type_name($workflow_or_string)
         : undef;
 
-    die Temporalio::Workflow::ContinueAsNew->new(
+    # _runner() validates we are inside a workflow body (raises NoRunner
+    # otherwise) so a stray call outside a run is a clear error.
+    _runner()->continue_as_new(
         (defined $type ? (workflow => $type) : ()),
         %opts,
     );

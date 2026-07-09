@@ -19,6 +19,7 @@ use Temporalio::Exception::Argument ();
         ExecuteWorkflow HandleSignal HandleQuery HandleUpdate
         StartActivity StartLocalActivity StartChildWorkflow
         SignalChildWorkflow SignalExternalWorkflow ContinueAsNew
+        StartNexusOperation Info
     )) {
         @{ "Temporalio::Worker::Interceptor::Input::${name}::ISA" } =
             ('Temporalio::Interceptor::Input');
@@ -53,7 +54,14 @@ class Temporalio::Worker::WorkflowInbound {
 }
 
 # --- Workflow outbound base (spec section 27.1) ----------------------------
-# These run on the workflow scheduler thread and MUST be deterministic.
+# These run on the workflow scheduler thread and MUST be deterministic. The
+# method set MUST-matches sdk-python's WorkflowOutboundInterceptor
+# (worker/_interceptor.py:416-481, spec R71 parity finding 1); the Perl names
+# keep the SDK's execute_* surface verbs where Python says start_* (the calls
+# route from execute_activity/start_activity et al. either way). info carries
+# an Input like every other method (Python's info() takes none) so the chain
+# root can use the shared `_root` coderef convention: a documented spec §0
+# surface deviation.
 class Temporalio::Worker::WorkflowOutbound {
     field $next :param = undef;
     method next { $next }
@@ -64,6 +72,8 @@ class Temporalio::Worker::WorkflowOutbound {
     method signal_child_workflow   { $next->signal_child_workflow($_[0]) }
     method signal_external_workflow{ $next->signal_external_workflow($_[0]) }
     method continue_as_new         { $next->continue_as_new($_[0]) }
+    method start_nexus_operation   { $next->start_nexus_operation($_[0]) }
+    method info                    { $next->info($_[0]) }
 }
 
 # --- Interceptor base (spec section 27.1) ----------------------------------
@@ -153,7 +163,13 @@ C<handle_update>. Runs under C<$Runner::CURRENT> and must be deterministic.
 
 =item * L<Temporalio::Worker::WorkflowOutbound>: C<execute_activity>,
 C<execute_local_activity>, C<start_child_workflow>, C<signal_child_workflow>,
-C<signal_external_workflow>, C<continue_as_new>.
+C<signal_external_workflow>, C<continue_as_new>, C<start_nexus_operation>,
+C<info> (spec R71; the method set matches sdk-python's
+C<WorkflowOutboundInterceptor>). An interceptor installs an outbound wrapper
+from its workflow-inbound C<init($outbound)>: wrap the received outbound and
+delegate C<< $self->next->init($wrapped) >>. The workflow Runner builds a root
+outbound, calls C<init> on the inbound chain, and routes the eight operations
+through whatever outbound reaches the chain root.
 
 =item * Input classes under C<Temporalio::Worker::Interceptor::Input::*>.
 

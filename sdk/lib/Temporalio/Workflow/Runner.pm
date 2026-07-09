@@ -35,6 +35,7 @@ use Temporalio::Common::Options ();
 use Temporalio::Common::SearchAttributeUpdate ();
 use Temporalio::Worker::Interceptor ();          # build_workflow_inbound + Input::*
 use Temporalio::Worker::_RootWorkflowInbound ();
+use Temporalio::Worker::_RootWorkflowOutbound ();
 
 # The dynamically-scoped pointer to the currently-active runner. Every
 # Temporalio::Workflow:: context function looks it up here (spec section 10.2).
@@ -122,6 +123,7 @@ class Temporalio::Workflow::Runner {
 
     field $instance;                 # the workflow Definition instance
     field $workflow_inbound;         # the built workflow-inbound interceptor chain
+    field $workflow_outbound;        # the workflow-outbound chain init() produced (spec R71)
     field $workflow_type;            # resolved run type name
     field @commands;                 # outbound WorkflowCommand buffer
     field $main_run_future;          # the Future returned by :Run
@@ -425,7 +427,23 @@ class Temporalio::Workflow::Runner {
         return $logger;
     }
 
+    # info routes through the workflow-outbound interceptor chain (spec R71;
+    # MUST-match sdk-python worker/_interceptor.py:435-437). The chain exists
+    # from _apply_initialize on; a call before then (e.g. the logger firing
+    # while a signal is buffered ahead of InitializeWorkflow) reads the view
+    # directly; Python cannot be called that early (its _Runtime is only set
+    # once the instance, and with it the chain, exists). The Input carries
+    # only the private `_root` coderef: Python's outbound info() takes no
+    # input, a documented spec §0 surface deviation (see WorkflowOutbound).
     method info {
+        return $self->_root_info unless defined $workflow_outbound;
+        return $workflow_outbound->info(
+            Temporalio::Worker::Interceptor::Input::Info->new(
+                _root => sub { $self->_root_info }));
+    }
+
+    # The real info view the chain root reads (spec section 10.4 / R36).
+    method _root_info {
         return {
             # The init-derived static fields (workflow_id, attempt), seeded in
             # _apply_initialize (spec R36 / finding A5; Python-parity names).
@@ -547,10 +565,36 @@ class Temporalio::Workflow::Runner {
         $self->_assert_writable('execute_activity/start_activity');
         # Option strictness first (spec R35 finding A2, spec R55 finding A14):
         # unknown keys, a missing activity_type, and a missing required
-        # timeout raise typed, before the seq is allocated.
+        # timeout raise typed, before the seq is allocated (and before any
+        # interceptor runs).
         _validate_activity_options('execute_activity/start_activity',
             \%ACTIVITY_OPTION_KEYS, \%opts);
-        # Defined-ness is guaranteed by the validator above (spec R55).
+        # Route through the workflow-outbound interceptor chain (spec R71,
+        # parity finding 1; MUST-match sdk-python worker/_interceptor.py:
+        # 453-459 start_activity). Input shape follows the client convention
+        # (Client.pm start_workflow): the Python-parity primary field
+        # (activity), writable args/headers, and the remaining scheduling
+        # options bundled as kwargs for the chain root to rebuild from.
+        my $input =
+            Temporalio::Worker::Interceptor::Input::StartActivity->new(
+                activity => delete $opts{activity_type},
+                args     => delete($opts{args}) // [],
+                headers  => { %{ delete($opts{headers}) // {} } },
+                kwargs   => { %opts },
+                _root    => sub { $self->_root_schedule_activity($_[0]) },
+            );
+        return $workflow_outbound->execute_activity($input);
+    }
+
+    # The chain root: emit ScheduleActivity from the (possibly
+    # interceptor-mutated) input (spec R71).
+    method _root_schedule_activity ($input) {
+        my %opts = (
+            activity_type => $input->get('activity'),
+            args          => $input->args,
+            headers       => $input->headers,
+            %{ $input->get('kwargs') },
+        );
         my $activity_type = $opts{activity_type};
 
         my $seq = ++$activity_seq_counter;  # activity seq space, from 1.
@@ -701,6 +745,29 @@ class Temporalio::Workflow::Runner {
               . "activity to the worker's 'activities' list (#9).\n";
         }
 
+        # Route through the workflow-outbound interceptor chain (spec R71;
+        # MUST-match sdk-python worker/_interceptor.py:469-475
+        # start_local_activity); same input shape as schedule_activity.
+        my $input =
+            Temporalio::Worker::Interceptor::Input::StartLocalActivity->new(
+                activity => delete $opts{activity_type},
+                args     => delete($opts{args}) // [],
+                headers  => { %{ delete($opts{headers}) // {} } },
+                kwargs   => { %opts },
+                _root => sub { $self->_root_schedule_local_activity($_[0]) },
+            );
+        return $workflow_outbound->execute_local_activity($input);
+    }
+
+    # The chain root: emit ScheduleLocalActivity from the (possibly
+    # interceptor-mutated) input (spec R71).
+    method _root_schedule_local_activity ($input) {
+        my %opts = (
+            activity_type => $input->get('activity'),
+            args          => $input->args,
+            headers       => $input->headers,
+            %{ $input->get('kwargs') },
+        );
         # Defined-ness is guaranteed by _validate_activity_options (spec R55).
         my $activity_type = $opts{activity_type};
 
@@ -953,9 +1020,35 @@ class Temporalio::Workflow::Runner {
     #   search_attributes, headers.
     method start_child_workflow (%opts) {
         $self->_assert_writable('start_child_workflow/execute_child_workflow');
-        my $workflow_type = $opts{workflow_type}
+        $opts{workflow_type}
             // die "Temporalio::Workflow::Runner: start_child_workflow needs a "
                  . "workflow_type";
+
+        # Route through the workflow-outbound interceptor chain (spec R71;
+        # MUST-match sdk-python worker/_interceptor.py:461-467
+        # start_child_workflow); the Python-parity primary field is
+        # `workflow`, args/headers are writable, the rest rides in kwargs.
+        my $input =
+            Temporalio::Worker::Interceptor::Input::StartChildWorkflow->new(
+                workflow => delete $opts{workflow_type},
+                args     => delete($opts{args}) // [],
+                headers  => { %{ delete($opts{headers}) // {} } },
+                kwargs   => { %opts },
+                _root    => sub { $self->_root_start_child_workflow($_[0]) },
+            );
+        return $workflow_outbound->start_child_workflow($input);
+    }
+
+    # The chain root: emit StartChildWorkflowExecution from the (possibly
+    # interceptor-mutated) input (spec R71).
+    method _root_start_child_workflow ($input) {
+        my %opts = (
+            workflow_type => $input->get('workflow'),
+            args          => $input->args,
+            headers       => $input->headers,
+            %{ $input->get('kwargs') },
+        );
+        my $workflow_type = $opts{workflow_type};
 
         my $seq = ++$child_workflow_seq_counter;  # child seq space, from 1.
 
@@ -1100,20 +1193,38 @@ class Temporalio::Workflow::Runner {
         # caller leaves no gap in the seq space (sdk-python "signal child
         # handle").
         $self->_assert_writable('signal child workflow handle');
+
+        # Route through the workflow-outbound interceptor chain (spec R71;
+        # field names MUST-match sdk-python worker/_interceptor.py:222-229
+        # SignalChildWorkflowInput).
+        my $input =
+            Temporalio::Worker::Interceptor::Input::SignalChildWorkflow->new(
+                signal            => $name,
+                child_workflow_id => $handle->id,
+                args              => delete($opts{args}) // [],
+                headers           => { %{ delete($opts{headers}) // {} } },
+                _root => sub { $self->_root_signal_child_workflow($_[0]) },
+            );
+        return $workflow_outbound->signal_child_workflow($input);
+    }
+
+    # The chain root: emit the child-targeted SignalExternalWorkflowExecution
+    # from the (possibly interceptor-mutated) input (spec R71).
+    method _root_signal_child_workflow ($input) {
         my $seq = ++$external_signal_seq_counter;
 
         my @args = map { $payload_converter->to_payload($_) }
-            (($opts{args} // [])->@*);
+            (($input->args // [])->@*);
 
         my %fields = (
             seq               => $seq,
-            child_workflow_id => $handle->id,
-            signal_name       => $name,
+            child_workflow_id => $input->get('child_workflow_id'),
+            signal_name       => $input->get('signal'),
             (@args ? (args => [@args]) : ()),
         );
         # Pass-through Payloads, never re-encoded (#10 GAP B); shared contract in
         # Temporalio::Interceptor::Headers.
-        if (my $h = $opts{headers}) {
+        if (my $h = $input->headers) {
             if (%$h) {
                 $fields{headers} = Temporalio::Interceptor::Headers::to_payload_map(
                     $payload_converter, $h);
@@ -1189,24 +1300,45 @@ class Temporalio::Workflow::Runner {
         # Step R24 (finding R8): before the seq allocation (sdk-python "signal
         # external handle").
         $self->_assert_writable('signal external workflow handle');
+
+        # Route through the workflow-outbound interceptor chain (spec R71;
+        # field names MUST-match sdk-python worker/_interceptor.py:232-241
+        # SignalExternalWorkflowInput).
+        my $input =
+            Temporalio::Worker::Interceptor::Input::SignalExternalWorkflow->new(
+                signal          => $name,
+                namespace       => $namespace,
+                workflow_id     => $workflow_id,
+                workflow_run_id => $run_id,
+                args            => delete($opts{args}) // [],
+                headers         => { %{ delete($opts{headers}) // {} } },
+                _root => sub { $self->_root_signal_external_workflow($_[0]) },
+            );
+        return $workflow_outbound->signal_external_workflow($input);
+    }
+
+    # The chain root: emit the workflow_execution-arm
+    # SignalExternalWorkflowExecution from the (possibly interceptor-mutated)
+    # input (spec R71).
+    method _root_signal_external_workflow ($input) {
         my $seq = ++$external_signal_seq_counter;
 
         my @args = map { $payload_converter->to_payload($_) }
-            (($opts{args} // [])->@*);
+            (($input->args // [])->@*);
 
         my %fields = (
             seq                => $seq,
             workflow_execution => {
-                namespace   => $namespace,
-                workflow_id => $workflow_id,
-                run_id      => ($run_id // ''),
+                namespace   => $input->get('namespace'),
+                workflow_id => $input->get('workflow_id'),
+                run_id      => ($input->get('workflow_run_id') // ''),
             },
-            signal_name        => $name,
+            signal_name        => $input->get('signal'),
             (@args ? (args => [@args]) : ()),
         );
         # Pass-through Payloads, never re-encoded (#10 GAP B); shared contract in
         # Temporalio::Interceptor::Headers.
-        if (my $h = $opts{headers}) {
+        if (my $h = $input->headers) {
             if (%$h) {
                 $fields{headers} = Temporalio::Interceptor::Headers::to_payload_map(
                     $payload_converter, $h);
@@ -1293,12 +1425,46 @@ class Temporalio::Workflow::Runner {
     #   map, NOT Temporal-header Payloads).
     method start_nexus_operation (%opts) {
         $self->_assert_writable('start_operation/execute_operation');
-        my $endpoint  = $opts{endpoint}  // die
+        $opts{endpoint}  // die
             "Temporalio::Workflow::Runner: start_nexus_operation needs an endpoint";
-        my $service   = $opts{service}   // die
+        $opts{service}   // die
             "Temporalio::Workflow::Runner: start_nexus_operation needs a service";
-        my $operation = $opts{operation} // die
+        $opts{operation} // die
             "Temporalio::Workflow::Runner: start_nexus_operation needs an operation";
+
+        # Route through the workflow-outbound interceptor chain (spec R71;
+        # field names MUST-match sdk-python worker/_interceptor.py:298-312
+        # StartNexusOperationInput: the single payload option is `input`,
+        # headers are the PLAIN string nexus_header map). The single `input`
+        # value is read-only on the Input (only args/headers are writable,
+        # spec section 27.1); the remaining options ride in kwargs.
+        my $input =
+            Temporalio::Worker::Interceptor::Input::StartNexusOperation->new(
+                endpoint  => delete $opts{endpoint},
+                service   => delete $opts{service},
+                operation => delete $opts{operation},
+                input     => delete $opts{arg},
+                headers   => { %{ delete($opts{headers}) // {} } },
+                kwargs    => { %opts },
+                _root => sub { $self->_root_start_nexus_operation($_[0]) },
+            );
+        return $workflow_outbound->start_nexus_operation($input);
+    }
+
+    # The chain root: emit ScheduleNexusOperation from the (possibly
+    # interceptor-mutated) input (spec R71).
+    method _root_start_nexus_operation ($input_obj) {
+        my %opts = (
+            endpoint  => $input_obj->get('endpoint'),
+            service   => $input_obj->get('service'),
+            operation => $input_obj->get('operation'),
+            arg       => $input_obj->get('input'),
+            headers   => $input_obj->headers,
+            %{ $input_obj->get('kwargs') },
+        );
+        my $endpoint  = $opts{endpoint};
+        my $service   = $opts{service};
+        my $operation = $opts{operation};
 
         my $seq = ++$nexus_operation_seq_counter;  # nexus seq space, from 1.
 
@@ -1427,6 +1593,50 @@ class Temporalio::Workflow::Runner {
         }
 
         return $start_future;
+    }
+
+    # continue_as_new(%opts): route the continue-as-new request through the
+    # workflow-outbound interceptor chain (spec R71; MUST-match sdk-python
+    # worker/_interceptor.py:431-433 continue_as_new, whose chain root raises
+    # _ContinueAsNewError). NEVER returns: the chain root dies with the
+    # Temporalio::Workflow::ContinueAsNew control signal, which unwinds the
+    # :Run coroutine and is caught by the outcome decision table. %opts are
+    # the Temporalio::Workflow::continue_as_new kwargs (workflow, args,
+    # task_queue, retry_policy, memo, search_attributes, headers,
+    # run_timeout / task_timeout, versioning_intent); the input's Python-parity
+    # primary field is `workflow` (worker/_interceptor.py:160-177
+    # ContinueAsNewInput), args/headers are writable, the rest rides in kwargs.
+    method continue_as_new (%opts) {
+        my $input =
+            Temporalio::Worker::Interceptor::Input::ContinueAsNew->new(
+                workflow => delete $opts{workflow},
+                args     => delete($opts{args}) // [],
+                headers  => { %{ delete($opts{headers}) // {} } },
+                kwargs   => { %opts },
+                _root    => sub { $self->_root_continue_as_new($_[0]) },
+            );
+        $workflow_outbound->continue_as_new($input);
+        # The root die always unwinds; reaching here means an interceptor
+        # swallowed the control signal, which would complete the run normally.
+        die 'Temporalio::Workflow::Runner: continue_as_new returned; a '
+          . 'workflow-outbound interceptor must not swallow the '
+          . 'ContinueAsNew control signal';
+    }
+
+    # The chain root: die with the ContinueAsNew control signal built from the
+    # (possibly interceptor-mutated) input (spec R71); only caller-supplied
+    # options are carried, so the command builder's only-set-fields contract
+    # holds (empty args/headers are dropped here).
+    method _root_continue_as_new ($input) {
+        my $workflow = $input->get('workflow');
+        my $args     = $input->args // [];
+        my $headers  = $input->headers // {};
+        die Temporalio::Workflow::ContinueAsNew->new(
+            (defined $workflow ? (workflow => $workflow) : ()),
+            (@$args             ? (args => $args)        : ()),
+            (%$headers          ? (headers => $headers)  : ()),
+            %{ $input->get('kwargs') },
+        );
     }
 
     # A deterministic default child workflow id (spec section 18.1): a UUIDish
@@ -1976,17 +2186,12 @@ class Temporalio::Workflow::Runner {
         $instance = $workflow_class->new;
         my $run_ref = $workflow_class->_workflow_defs->{run};
 
-        # Build the workflow-inbound interceptor chain now the instance exists,
-        # folding the combined list (client-supplied then worker-supplied,
-        # outermost first) over a root impl that calls the real handler (#10).
-        # The chain is cached for the run, so signals/queries/updates on later
-        # activations route through it too. execute_workflow is the run-body
-        # entry: the root reads the kicked-off body from the input's `_root`
-        # coderef (the client-outbound _RootOutbound convention).
-        $workflow_inbound =
-            Temporalio::Worker::Interceptor::build_workflow_inbound(
-                $interceptors,
-                Temporalio::Worker::_RootWorkflowInbound->new);
+        # Build the workflow-inbound AND workflow-outbound interceptor chains
+        # now the instance exists (spec R71; #10 for the inbound half). Both
+        # are cached for the run, so signals/queries/updates and every
+        # outbound operation on later activations route through them too.
+        ($workflow_inbound, $workflow_outbound) =
+            $self->_build_interceptor_chains;
         # SIGNALS-BEFORE-MAIN (spec R26, finding R12): drain the init
         # activation's buffered signals (then updates) BEFORE kicking off the
         # :Run body, so handler side effects are visible to the main routine's
@@ -2023,6 +2228,42 @@ class Temporalio::Workflow::Runner {
             );
         $main_run_future = $workflow_inbound->execute_workflow($execute_input);
         return;
+    }
+
+    # Build the workflow interceptor chains (spec R71, parity finding 1;
+    # MUST-match sdk-python _workflow_instance.py:392-398 and
+    # worker/_interceptor.py:416-481): fold the combined interceptor list over
+    # a root inbound (first-listed outermost; build_workflow_inbound iterates
+    # in reverse), then call inbound->init(root outbound). Each interceptor
+    # inbound may WRAP the outbound it receives before delegating init down
+    # the chain, so the outbound that reaches the ROOT inbound is the finished
+    # outbound chain (last-listed wrapper outermost, Python's exact init
+    # semantics); the root's on_init hands it back here, the Perl form of
+    # _WorkflowInboundImpl.init storing self._outbound. The eight outbound
+    # operations (execute_activity, execute_local_activity,
+    # start_child_workflow, signal_child_workflow, signal_external_workflow,
+    # continue_as_new, start_nexus_operation, info) route through it. The
+    # execute_workflow root reads the kicked-off body from the input's `_root`
+    # coderef (the client-outbound _RootOutbound convention), as does every
+    # outbound root method.
+    method _build_interceptor_chains {
+        my $outbound;
+        my $inbound =
+            Temporalio::Worker::Interceptor::build_workflow_inbound(
+                $interceptors,
+                Temporalio::Worker::_RootWorkflowInbound->new(
+                    on_init => sub { $outbound = $_[0] }));
+        $inbound->init(Temporalio::Worker::_RootWorkflowOutbound->new);
+        # An inbound that overrides init but never delegates strands the run
+        # with no outbound chain; fail loudly at build time (Python surfaces
+        # the same bug later, as an AttributeError on first outbound use).
+        unless (defined $outbound) {
+            Temporalio::Exception::Argument->throw(
+                message => 'workflow-inbound interceptor init() did not '
+                         . 'reach the chain root: init must delegate '
+                         . '$self->next->init($outbound)');
+        }
+        return ($inbound, $outbound);
     }
 
     # ResolveActivity { seq, result } — resolve the pending activity Future for
@@ -4178,7 +4419,17 @@ Returns the workflow info hashref for the run: C<workflow_id>, C<run_id>,
 C<workflow_type>, C<namespace>, C<task_queue>, C<attempt>, C<patches>,
 C<search_attributes>, and C<memo> (spec R36; field names match Python's
 C<workflow.info()>). A fresh copy per call, so callers cannot mutate the
-runner's view through it.
+runner's view through it. Routes through the workflow-outbound interceptor
+chain (spec R71) once the run is initialized.
+
+=head2 continue_as_new
+
+Routes a continue-as-new request through the workflow-outbound interceptor
+chain (spec R71); the chain root dies with the
+L<Temporalio::Workflow::ContinueAsNew> control signal, so this method never
+returns. C<%opts> mirror L<Temporalio::Workflow/continue_as_new> (C<workflow>,
+C<args>, C<task_queue>, C<retry_policy>, C<memo>, C<search_attributes>,
+C<headers>, C<run_timeout> / C<task_timeout>, C<versioning_intent>).
 
 =head2 is_replaying
 

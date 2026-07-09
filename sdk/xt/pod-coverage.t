@@ -58,6 +58,11 @@ my %TRUSTME = (
     # Documented collectively in Temporalio::Worker::Interceptor's POD.
     'Temporalio::Worker::_RootActivityInbound' => [ qr/^[a-z]/ ],
     'Temporalio::Worker::_RootWorkflowInbound' => [ qr/^[a-z]/ ],
+    # The workflow outbound chain root (spec R71): same internal mechanism,
+    # methods mirror the WorkflowOutbound surface and emit the real commands
+    # via the input's _root coderef. Documented collectively in
+    # Temporalio::Worker::Interceptor's POD.
+    'Temporalio::Worker::_RootWorkflowOutbound' => [ qr/^[a-z]/ ],
 );
 
 my @modules = all_modules('lib');

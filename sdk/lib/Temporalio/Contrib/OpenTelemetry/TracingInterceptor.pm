@@ -153,13 +153,13 @@ sub _workflow_span_name ($self, $kind, $info) {
 # Workflow-outbound completed span names whose context is injected into the
 # outbound headers (_interceptor.py:767-831). $kind is start_activity/
 # start_child_workflow/signal_child_workflow/signal_external_workflow.
-# R71 SEAM: the workflow-OUTBOUND interceptor chain is not wired yet
-# (Worker/Interceptor.pm defines WorkflowOutbound but the Runner builds only
-# the inbound chain), so these names have no caller in this module. When R71
-# lands, hang a _WorkflowOutbound wrapper off init() below that creates a
-# completed span per call (this table) and injects the updated context into
-# the outbound input headers, mirroring Python's
-# _TracingWorkflowOutboundInterceptor.
+# OUTBOUND-SPAN SEAM: the workflow-OUTBOUND interceptor chain is wired (spec
+# R71: the Runner builds it and routes the eight outbound operations through
+# it), but this module does not yet install a tracing wrapper on it, so these
+# names still have no caller here. To finish: hang a _WorkflowOutbound wrapper
+# off init() below that creates a completed span per call (this table) and
+# injects the updated context into the outbound input headers, mirroring
+# Python's _TracingWorkflowOutboundInterceptor.
 my %OUT_SPAN_VERB = (
     start_activity          => 'StartActivity',
     start_child_workflow    => 'StartChildWorkflow',
@@ -513,12 +513,15 @@ our @ISA = ('Temporalio::Worker::WorkflowInbound');
 sub new ($class, %a) { bless { next => $a{next}, root => $a{root} }, $class }
 sub next ($self) { $self->{next} }
 
-# R71 SEAM: when the workflow-OUTBOUND interceptor chain lands, wrap $outbound
-# here (init receives it) with a tracing outbound that creates a completed
-# span per start_activity / start_child_workflow / signal_child_workflow /
-# signal_external_workflow (the %OUT_SPAN_VERB table above) and injects the
-# updated context into the outbound input headers, mirroring Python's
-# _TracingWorkflowOutboundInterceptor:751-831.
+# OUTBOUND-SPAN SEAM: init now RECEIVES the real workflow outbound (spec R71
+# wired the chain: the Runner calls inbound->init(outbound) and routes the
+# outbound operations through whatever reaches the chain root). To add
+# outbound spans, wrap $args[0] here with a tracing outbound that creates a
+# completed span per execute_activity / start_child_workflow /
+# signal_child_workflow / signal_external_workflow (the %OUT_SPAN_VERB table
+# above) and injects the updated context into the outbound input headers,
+# mirroring Python's _TracingWorkflowOutboundInterceptor:751-831; then
+# delegate the WRAPPED outbound down-chain.
 sub init ($self, @args) { $self->{next} ? $self->{next}->init(@args) : () }
 
 sub execute_workflow ($self, $input) {
@@ -735,12 +738,15 @@ C<always_create_workflow_spans> is set (no orphans for CLI/schedule starts).
 
 =item * B<Not yet wired>: workflow-B<outbound> spans
 (C<StartActivity:{type}>, C<StartChildWorkflow:{wf}>,
-C<SignalChildWorkflow:{signal}>, C<SignalExternalWorkflow:{signal}>) require
-the workflow-outbound interceptor chain, which the Runner does not build yet;
-trace context is therefore not yet injected into activity / child-workflow /
-external-signal headers originating B<inside> a workflow. The span-name table
-ships here and the wiring lands with the outbound-chain work (remediation
-spec R71).
+C<SignalChildWorkflow:{signal}>, C<SignalExternalWorkflow:{signal}>). The
+workflow-outbound interceptor chain itself exists (remediation spec R71: the
+Runner builds it and C<init($outbound)> reaches this module's workflow
+inbound), but this interceptor does not yet install a tracing outbound
+wrapper there, so trace context is not yet injected into activity /
+child-workflow / external-signal headers originating B<inside> a workflow.
+The span-name table ships here; the wrapper (spans plus header injection,
+mirroring Python's C<_TracingWorkflowOutboundInterceptor>) is the remaining
+piece.
 
 =back
 

@@ -20,6 +20,15 @@ use Temporalio::Worker::Interceptor ();
 # F::AA. Methods are signature-less for the same reason.
 class Temporalio::Worker::_RootWorkflowInbound
     :isa(Temporalio::Worker::WorkflowInbound) {
+    # init capture (spec R71): the Runner calls init(root outbound) on the
+    # inbound chain; each interceptor inbound may WRAP the outbound before
+    # delegating down, so whatever arrives HERE is the finished outbound chain.
+    # on_init hands it back to the Runner, the Perl form of sdk-python's
+    # _WorkflowInboundImpl.init storing self._outbound
+    # (_workflow_instance.py:2909-2910, read back at :398).
+    field $on_init :param = undef;
+    method init { $on_init ? $on_init->($_[0]) : () }
+
     method execute_workflow { $_[0]->get('_root')->($_[0]) }
     method handle_signal    { $_[0]->get('_root')->($_[0]) }
     method handle_query     { $_[0]->get('_root')->($_[0]) }
