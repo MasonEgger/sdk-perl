@@ -62,12 +62,20 @@ sub continue_as_new_workflow_execution ($fields) {
 # Temporalio::Workflow::execute_activity / start_activity (spec section 10.2).
 # $fields is the already-assembled ScheduleActivity field hashref (seq,
 # activity_id, activity_type, task_queue, arguments, the four timeout Durations,
-# retry_policy, cancellation_type, headers, ...). The runner builds the field
-# set (it owns seq allocation, timeout conversion, and the default task queue);
-# this builder just wraps it in the command oneof so the construction site
-# stays consistent with the other command builders.
-sub schedule_activity ($fields) {
-    return _command_class()->new({ schedule_activity => $fields });
+# retry_policy, cancellation_type, priority, headers, ...). The runner builds
+# the field set (it owns seq allocation, timeout conversion, and the default
+# task queue); this builder just wraps it in the command oneof so the
+# construction site stays consistent with the other command builders. An
+# optional $summary_payload (a temporal.api.common.v1.Payload) is placed on the
+# command's user_metadata.summary, the same convention as the local-activity
+# and nexus builders below (spec R69 / finding A17; MUST-match sdk-python
+# _workflow_instance.py:3155-3158, command.user_metadata.summary).
+sub schedule_activity ($fields, $summary_payload = undef) {
+    return _command_class()->new({
+        schedule_activity => $fields,
+        (defined $summary_payload
+            ? (user_metadata => { summary => $summary_payload }) : ()),
+    });
 }
 
 # start_timer { seq, start_to_fire_timeout } — emitted when the workflow body
@@ -394,12 +402,15 @@ field hashref (C<workflow_type>, C<task_queue>, C<arguments>, C<retry_policy>,
 C<memo>, C<headers>, C<search_attributes>, the two timeout Durations,
 C<versioning_intent>); only the fields the caller set are present.
 
-=item C<schedule_activity($fields)>
+=item C<schedule_activity($fields, $summary_payload)>
 
 C<ScheduleActivity { ... }> — emitted when the workflow body calls
 C<Temporalio::Workflow::execute_activity> / C<start_activity>. C<$fields> is
 the assembled C<ScheduleActivity> field hashref (the runner owns seq
-allocation, timeout conversion, and the default task queue).
+allocation, timeout conversion, priority conversion, and the default task
+queue). The optional C<$summary_payload> (a C<temporal.api.common.v1.Payload>)
+is placed on the C<WorkflowCommand> C<user_metadata.summary>, matching the
+local-activity and nexus builders (spec R69 / finding A17).
 
 =item C<start_timer($fields)>
 

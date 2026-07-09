@@ -40,7 +40,8 @@ Temporalio::Common::Priority - workflow/activity task priority
 
 =head1 DESCRIPTION
 
-Task priority passed to C<start_workflow> (spec section 7.4). A lower
+Task priority passed to C<start_workflow> (spec section 7.4) and to
+C<execute_activity>/C<start_activity> (spec R69 / finding A17). A lower
 C<priority_key> means higher priority; an undef key leaves the proto field
 unset so the server uses the task-queue default. C<to_proto> builds the
 C<temporal.api.common.v1.Priority> message.

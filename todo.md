@@ -315,9 +315,9 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R68.4 Verify: string die and foreign object survive as causes (identity preserved), POD states contract; prove -lj4 t green (163 files, 750 tests, live integration) and prove -lj4 xt green (414)
 
 ### Step R69: Close the Four Verified Cross-SDK Divergences
-- [ ] R69.1 RED: four tests: parity_backfills, parity_activity_priority_summary, parity_list_page_size, parity_execute_update_wait_for_stage (backfills quarter landed with commit 1: parity_backfills.t, honest RED on the singular kwarg; the other three tests remain)
+- [ ] R69.1 RED: four tests: parity_backfills, parity_activity_priority_summary, parity_list_page_size, parity_execute_update_wait_for_stage (backfills quarter landed with commit 1: parity_backfills.t, honest RED on the singular kwarg; priority/summary quarter landed with commit 2: parity_activity_priority_summary.t, honest RED on the unknown-key Argument; parity_list_page_size and parity_execute_update_wait_for_stage remain)
 - [x] R69.2a GREEN (commit 1): add schedule backfills kwarg wired to proto (divergence per step-44 finding A17 is the kwarg FORM: Python `backfill` singular, _client.py:2675, vs shipped Ruby-style `backfills`, client.rb:684; create_schedule now accepts both wired to initial_patch.backfill_request, both-given raises Argument)
-- [ ] R69.2b GREEN (commit 2): add activity priority/summary options carried to the command
+- [x] R69.2b GREEN (commit 2): add activity priority/summary options carried to the command (schedule_activity now takes priority, a Temporalio::Common::Priority, wired to ScheduleActivity.priority, and summary, wired to the WorkflowCommand user_metadata.summary Payload; Python parity _workflow_instance.py:3155-3183; local activities keep summary and stay priority-less, the proto has no LA priority field)
 - [ ] R69.2c GREEN (commit 3): send page-size defaults on list calls
 - [ ] R69.2d GREEN (commit 4): stop execute_update overriding the caller's wait_for_stage
 - [ ] R69.3 REFACTOR: per-diff comment citing A17 and the checked Python behavior

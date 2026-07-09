@@ -133,7 +133,8 @@ sub _activity_type_name ($activity) {
 # from the matching ResolveActivity job. `await` it to get the result (or have
 # the activity failure raised). %opts are the spec section 10.2 kwargs (args,
 # the four timeouts, retry_policy, task_queue, activity_id, cancellation_type,
-# headers, ...).
+# priority, summary, headers, ...); priority and summary reach the emitted
+# command per spec R69 / finding A17 (Python parity).
 sub execute_activity ($activity, %opts) {
     return _runner()->schedule_activity(
         activity_type => _activity_type_name($activity),
@@ -438,6 +439,7 @@ Marks a patch id as deprecated, recording a deprecation marker so the branch can
 =head2 execute_activity
 
 Async. Schedules an activity and awaits its result, returning an awaitable resolving to the activity's return value.
+Options include a C<priority> (a L<Temporalio::Common::Priority>, carried to the ScheduleActivity command's C<priority> field) and a C<summary> string (carried to the command's C<user_metadata.summary> Payload), matching Python (spec R69 / finding A17).
 
 =head2 execute_child_workflow
 
@@ -526,6 +528,7 @@ Async. Durably sleeps for the given duration via a workflow timer; returns an aw
 =head2 start_activity
 
 Schedules an activity and returns its awaitable handle without awaiting it.
+Takes the same options as L</execute_activity>, including C<priority> and C<summary>.
 The handle's C<cancel> honours the activity's C<cancellation_type>:
 C<try_cancel> (the default) and C<abandon> resolve the handle Cancelled
 immediately (C<abandon> without asking the server to cancel), while

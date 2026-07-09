@@ -508,11 +508,12 @@ class Temporalio::Workflow::Runner {
         activity_type args task_queue activity_id
         schedule_to_close_timeout schedule_to_start_timeout
         start_to_close_timeout heartbeat_timeout
-        retry_policy cancellation_type headers
+        retry_policy cancellation_type priority summary headers
     );
-    # Local activities: no task_queue (core runs the LA in-process) and no
-    # heartbeat_timeout (LAs do not heartbeat at the lang level), but
-    # local_retry_threshold and summary in addition.
+    # Local activities: no task_queue (core runs the LA in-process), no
+    # heartbeat_timeout (LAs do not heartbeat at the lang level), and no
+    # priority (the ScheduleLocalActivity proto has no priority field), but
+    # local_retry_threshold in addition.
     my %LOCAL_ACTIVITY_OPTION_KEYS = map { $_ => 1 } qw(
         activity_type args activity_id
         schedule_to_close_timeout schedule_to_start_timeout
@@ -540,7 +541,8 @@ class Temporalio::Workflow::Runner {
     #   activity_type (required), args (arrayref), task_queue, activity_id,
     #   schedule_to_close_timeout, schedule_to_start_timeout,
     #   start_to_close_timeout, heartbeat_timeout (all seconds), retry_policy
-    #   (Temporalio::Common::RetryPolicy), cancellation_type (string), headers.
+    #   (Temporalio::Common::RetryPolicy), cancellation_type (string),
+    #   priority (Temporalio::Common::Priority), summary (string), headers.
     method schedule_activity (%opts) {
         $self->_assert_writable('execute_activity/start_activity');
         # Option strictness first (spec R35 finding A2, spec R55 finding A14):
@@ -558,6 +560,14 @@ class Temporalio::Workflow::Runner {
         # surfaces at the call site, not later).
         my @args = map { $payload_converter->to_payload($_) }
             (($opts{args} // [])->@*);
+
+        # summary -> the WorkflowCommand user_metadata.summary Payload,
+        # converted up front for the same call-site-error reason (spec R69 /
+        # finding A17; MUST-match sdk-python _workflow_instance.py:3155-3158,
+        # which sets command.user_metadata.summary only when a summary was
+        # given). The LA and nexus arms already follow this convention.
+        my $summary = defined $opts{summary}
+            ? $payload_converter->to_payload($opts{summary}) : undef;
 
         my %fields = (
             seq           => $seq,
@@ -579,6 +589,16 @@ class Temporalio::Workflow::Runner {
             ($disable_eager_activity_execution
                 ? (do_not_eagerly_execute => 1) : ()),
         );
+
+        # priority (a Temporalio::Common::Priority) -> the ScheduleActivity
+        # priority proto, only when the caller passed one: an absent option
+        # must leave the field unset so the server inherits from the calling
+        # workflow (spec R69 / finding A17; MUST-match sdk-python
+        # _workflow_instance.py:3180-3183, command.schedule_activity.priority;
+        # the same ->to_proto contract as start_workflow's priority kwarg).
+        if (defined(my $priority = $opts{priority})) {
+            $fields{priority} = $priority->to_proto;
+        }
 
         # The four timeouts: seconds -> google.protobuf.Duration, only when set.
         for my $t (qw(schedule_to_close_timeout schedule_to_start_timeout
@@ -607,7 +627,7 @@ class Temporalio::Workflow::Runner {
         }
 
         push @commands,
-            Temporalio::Workflow::Commands::schedule_activity(\%fields);
+            Temporalio::Workflow::Commands::schedule_activity(\%fields, $summary);
 
         # ABANDON (ActivityCancellationType=2): on cancel, the workflow stops
         # waiting WITHOUT asking core to cancel the activity — so the Future's
@@ -4214,11 +4234,12 @@ Returns the run id of the workflow execution.
 
 Emits a ScheduleActivity command and returns the cancellable awaitable that resolves when the activity is resolved.
 Options are validated first (spec R35): an unknown option key, or a call missing both C<start_to_close_timeout> and C<schedule_to_close_timeout>, raises L<Temporalio::Exception::Argument> before any command state changes.
+A C<priority> option (a L<Temporalio::Common::Priority>) is carried to the command's C<priority> proto field and a C<summary> string to the command's C<user_metadata.summary> Payload, matching Python (spec R69 / finding A17).
 
 =head2 schedule_local_activity
 
 Emits a ScheduleLocalActivity command (sharing the activity seq space and pending-activity map) and returns the single stable cancellable awaitable that resolves on the local activity's terminal outcome (spec section 21).
-Options are validated first under the same strictness rule as L</schedule_activity> (spec R35), against the local-activity key set (no C<task_queue> or C<heartbeat_timeout>; C<local_retry_threshold> and C<summary> in addition). The backoff-to-server-timer retry loop is owned here: a C<backoff> resolution starts a timer and re-schedules under a new seq when it fires, leaving the returned future untouched.
+Options are validated first under the same strictness rule as L</schedule_activity> (spec R35), against the local-activity key set (no C<task_queue>, C<heartbeat_timeout>, or C<priority>; C<local_retry_threshold> in addition). The backoff-to-server-timer retry loop is owned here: a C<backoff> resolution starts a timer and re-schedules under a new seq when it fires, leaving the returned future untouched.
 
 =head2 start_child_workflow
 
