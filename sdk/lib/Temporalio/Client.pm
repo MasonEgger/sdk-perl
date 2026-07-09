@@ -322,13 +322,23 @@ class Temporalio::Client {
     # ScheduleAlreadyRunning, and returns a handle.
     #   %opts: trigger_immediately => 0, backfills => [], memo => undef,
     #          search_attributes => undef
+    # Finding A17 (spec R69): Python's kwarg is `backfill` (singular,
+    # sdk-python client/_client.py:2675); this SDK shipped Ruby's plural
+    # `backfills` (sdk-ruby client.rb:684). Accept both forms wired to the
+    # same initial_patch.backfill_request (_impl.py:1184-1194); reject the
+    # ambiguous call carrying both.
     async method create_schedule ($id, $schedule, %opts) {
         Temporalio::Common::Options::assert_known_keys(
             'create_schedule', \%opts,
-            { trigger_immediately => 1, backfills => 1, memo => 1,
-              search_attributes => 1 });
+            { trigger_immediately => 1, backfill => 1, backfills => 1,
+              memo => 1, search_attributes => 1 });
+        Temporalio::Exception::Argument->throw(
+            message => 'create_schedule takes backfill or backfills, '
+                     . 'not both')
+            if exists $opts{backfill} && exists $opts{backfills};
         my $trigger   = delete $opts{trigger_immediately} // 0;
-        my $backfills = delete $opts{backfills} // [];
+        my $backfills = delete $opts{backfills} // delete $opts{backfill}
+                     // [];
         my $memo      = delete $opts{memo};
         my $sa        = delete $opts{search_attributes};
         Temporalio::Exception::Argument->throw(
@@ -1213,7 +1223,8 @@ Async. Returns a L<Future> resolving to the count of executions matching the giv
 
 =head2 create_schedule
 
-Async. Creates a schedule and returns a L<Future> resolving to a L<Temporalio::Client::ScheduleHandle>. Validates the limited/remaining-actions invariant before any RPC, builds an C<initial_patch> only when C<trigger_immediately> or C<backfills> is given, and re-maps a server C<ALREADY_EXISTS> to L<Temporalio::Exception::ScheduleAlreadyRunning>.
+Async. Creates a schedule and returns a L<Future> resolving to a L<Temporalio::Client::ScheduleHandle>. Validates the limited/remaining-actions invariant before any RPC, builds an C<initial_patch> only when C<trigger_immediately> or a backfill list is given, and re-maps a server C<ALREADY_EXISTS> to L<Temporalio::Exception::ScheduleAlreadyRunning>.
+The backfill list is accepted under either kwarg form: C<backfills> (the shipped plural, matching the Ruby SDK) or C<backfill> (matching the Python SDK, finding A17 / spec R69); passing both raises the typed argument error.
 
 =head2 get_schedule_handle
 
