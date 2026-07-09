@@ -48,9 +48,12 @@ my $server = Temporalio::Test::DevServer->start(
 );
 
 # Teardown in END so a die mid-test still releases the dev-server CLI child
-# (updates.t:176-179 precedent).
+# (finding T9 / spec R49; enforced by xt/devserver_end_teardown.t). local $?
+# so teardown-time process reaping cannot clobber the exit status the die
+# (or Test2) already set for this file.
 my $client;
 END {
+    local $?;
     if (defined $server) {
         eval { $client->connection->close if defined $client; 1 };
         eval { $server->shutdown unless $server->is_shutdown; 1 };

@@ -51,7 +51,9 @@ my sub teardown {
     eval { $server->shutdown };
     eval { $runtime->shutdown };
 }
-END { teardown() }
+# local $? so teardown-time process reaping cannot clobber the exit status
+# the die (or Test2) already set for this file.
+END { local $?; teardown() }
 
 sub await_future ($future, $timeout = 60) {
     $loop->await(

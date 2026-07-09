@@ -241,10 +241,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R34+R61.4 Verify: no bind failure/cross-connect, updates.t flake gone, cpanfile phase matches uses; prove -lj4 t and xt green
 
 ### Step R49: Register Dev-Server Teardown in END Blocks
-- [ ] R49.1 RED: xt/devserver_end_teardown.t statically asserts END-block teardown in every DevServer-using integration file (fails now)
-- [ ] R49.2 GREEN: move/add END-block teardown to each flagged t/integration/*.t per updates.t:176-179
-- [ ] R49.3 REFACTOR: comment the xt probe with T9 and the DevServer:244-251 hazard
-- [ ] R49.4 Verify: xt probe passes; die no longer orphans CLI; prove -lj4 t and xt green
+- [x] R49.1 RED: xt/devserver_end_teardown.t statically asserts END-block teardown in every DevServer-using integration file (fails now)
+- [x] R49.2 GREEN: move/add END-block teardown to each flagged t/integration/*.t per updates.t:176-179
+- [x] R49.3 REFACTOR: comment the xt probe with T9 and the DevServer:244-251 hazard
+- [x] R49.4 Verify: xt probe passes; die no longer orphans CLI; prove -lj4 t and xt green
 
 ### Step R43: Make WorkflowReplay's Nondeterminism Claim True or Scoped
 - [ ] R43.1 RED: implemented -> t/replay/nondeterminism.t on mutated history; scoped -> xt grep probe for the overclaim

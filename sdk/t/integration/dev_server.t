@@ -34,6 +34,25 @@ my $server = Temporalio::Test::DevServer->start(
     log_level     => 'warn',
 );
 
+# Teardown in END so a die mid-file still releases the dev-server CLI
+# children (finding T9 / spec R49): DevServer::DESTROY cannot run the event
+# loop, so only an END-registered shutdown covers the die path. $second is
+# file-scope so the two-servers subtest's server is covered too (->shutdown
+# is idempotent after success, so re-shutdown here is a no-op). Enforced by
+# xt/devserver_end_teardown.t.
+my $second;
+my $torn_down = 0;
+my sub teardown {
+    return if $torn_down;
+    $torn_down = 1;
+    eval { $server->shutdown };
+    eval { $second->shutdown if defined $second };
+    eval { $runtime->shutdown };
+}
+# local $? so teardown-time process reaping cannot clobber the exit status
+# the die (or Test2) already set for this file.
+END { local $?; teardown() }
+
 T2->subtest('start returns an object with a host:port target' => sub {
     T2->isa_ok($server, 'Temporalio::Test::DevServer');
     T2->like($server->target, qr/^\S+:\d+$/, 'target looks like host:port');
@@ -41,7 +60,7 @@ T2->subtest('start returns an object with a host:port target' => sub {
 });
 
 T2->subtest('two servers in one process get distinct ports' => sub {
-    my $second = Temporalio::Test::DevServer->start(
+    $second = Temporalio::Test::DevServer->start(
         runtime       => $runtime,
         existing_path => $cli,
         log_level     => 'warn',
@@ -66,6 +85,6 @@ T2->subtest('shutdown is idempotent' => sub {
     T2->ok($second, 'second shutdown lives (idempotent)') or T2->diag($@);
 });
 
-$runtime->shutdown;
+teardown();
 
 T2->done_testing;

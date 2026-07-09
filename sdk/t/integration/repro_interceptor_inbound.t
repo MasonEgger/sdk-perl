@@ -79,6 +79,21 @@ my $server = Temporalio::Test::DevServer->start(
     log_level     => 'warn',
 );
 
+# Teardown in END so a die mid-file still releases the dev-server CLI child
+# (finding T9 / spec R49): DevServer::DESTROY cannot run the event loop, so
+# only an END-registered shutdown covers the die path. Enforced by
+# xt/devserver_end_teardown.t.
+my $torn_down = 0;
+my sub teardown {
+    return if $torn_down;
+    $torn_down = 1;
+    eval { $server->shutdown };
+    eval { $runtime->shutdown };
+}
+# local $? so teardown-time process reaping cannot clobber the exit status
+# the die (or Test2) already set for this file.
+END { local $?; teardown() }
+
 my $client = Temporalio::Test::Client::connect_with_retry($loop, sub {
     Temporalio::Client->connect(
         $server->target,
@@ -119,8 +134,7 @@ my $err = $@;
 
 eval { $tw->shutdown(30); 1 };
 eval { $client->connection->close; 1 };
-eval { $server->shutdown; 1 };
-$runtime->shutdown;
+teardown();
 
 die $err if !$ok && $err;
 
