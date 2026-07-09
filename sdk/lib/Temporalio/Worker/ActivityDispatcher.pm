@@ -23,8 +23,9 @@ use Temporalio::Exception::Activity::CompleteAsync ();
 use Temporalio::Exception::Application ();
 use Temporalio::Exception::Cancelled ();
 use Temporalio::Worker::ActivityCompletion ();
-use Temporalio::Worker::Interceptor ();          # build_activity_inbound + Input::*
+use Temporalio::Worker::Interceptor ();          # build_chains + Input::*
 use Temporalio::Worker::_RootActivityInbound ();
+use Temporalio::Worker::_RootActivityOutbound ();
 
 class Temporalio::Worker::ActivityDispatcher {
     # Temporalio::Worker::ActivityRegistry: activity type name -> { code, ... }.
@@ -148,10 +149,19 @@ class Temporalio::Worker::ActivityDispatcher {
             # first) wraps it, so every inbound execute_activity is invoked in
             # order before reaching the body (#10). The root reads the body from
             # the input's private `_root` coderef (the client-outbound _RootOutbound
-            # convention).
-            my $inbound = Temporalio::Worker::Interceptor::build_activity_inbound(
-                $interceptors,
-                Temporalio::Worker::_RootActivityInbound->new);
+            # convention). build_chains also calls inbound->init(root outbound)
+            # so each interceptor inbound may install an activity-outbound
+            # wrapper (spec R72, parity finding 2; sdk-python
+            # _activity.py:709-713 and _interceptor.py:135-156): the finished
+            # outbound chain goes to the Context below, which routes the
+            # body's heartbeat()/info() through it.
+            my ($inbound, $outbound) =
+                Temporalio::Worker::Interceptor::build_chains(
+                    $interceptors,
+                    \&Temporalio::Worker::Interceptor::build_activity_inbound,
+                    'Temporalio::Worker::_RootActivityInbound',
+                    'Temporalio::Worker::_RootActivityOutbound',
+                    'activity');
             # Thread the activity Start task's header_fields (proto field 6) into
             # the activity-inbound input the same pass-through way the workflow
             # Runner threads InitializeWorkflow headers (#10 C-ICEPT-ACTIVITY-
@@ -186,6 +196,14 @@ class Temporalio::Worker::ActivityDispatcher {
                 # Build the per-invocation context (spec section 9.3). info is
                 # the frozen hashref the Context exposes; heartbeat flows through
                 # the injected recorder.
+                # outbound is the finished activity-outbound chain from
+                # build_chains above (spec R72): the context routes the body's
+                # heartbeat()/info() through it. The fork-pool path builds its
+                # OWN context in the child with no chain (interceptor objects
+                # do not cross the fork), so pooled sync-activity heartbeats
+                # bypass the outbound chain — a documented spec §0 deviation
+                # from Python, whose shared-state manager heartbeats
+                # parent-side through the chain (_activity.py:857-865).
                 my $ctx = Temporalio::Activity::Context->new(
                     info               => $info,
                     cancellation       => $cancellation,
@@ -193,6 +211,7 @@ class Temporalio::Worker::ActivityDispatcher {
                     client             => $client,
                     heartbeat_recorder => $heartbeat_recorder
                         // sub ($bytes) { return undef },
+                    outbound           => $outbound,
                 );
                 $running{$task_token}{context} = $ctx;
 

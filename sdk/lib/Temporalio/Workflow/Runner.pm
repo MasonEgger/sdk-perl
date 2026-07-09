@@ -2247,23 +2247,16 @@ class Temporalio::Workflow::Runner {
     # coderef (the client-outbound _RootOutbound convention), as does every
     # outbound root method.
     method _build_interceptor_chains {
-        my $outbound;
-        my $inbound =
-            Temporalio::Worker::Interceptor::build_workflow_inbound(
-                $interceptors,
-                Temporalio::Worker::_RootWorkflowInbound->new(
-                    on_init => sub { $outbound = $_[0] }));
-        $inbound->init(Temporalio::Worker::_RootWorkflowOutbound->new);
-        # An inbound that overrides init but never delegates strands the run
-        # with no outbound chain; fail loudly at build time (Python surfaces
-        # the same bug later, as an AttributeError on first outbound use).
-        unless (defined $outbound) {
-            Temporalio::Exception::Argument->throw(
-                message => 'workflow-inbound interceptor init() did not '
-                         . 'reach the chain root: init must delegate '
-                         . '$self->next->init($outbound)');
-        }
-        return ($inbound, $outbound);
+        # The init-capture mechanics (and the loud die when an inbound init
+        # fails to delegate to the chain root) live in the shared
+        # build_chains helper, which the ActivityDispatcher's R72 chain
+        # build uses too.
+        return Temporalio::Worker::Interceptor::build_chains(
+            $interceptors,
+            \&Temporalio::Worker::Interceptor::build_workflow_inbound,
+            'Temporalio::Worker::_RootWorkflowInbound',
+            'Temporalio::Worker::_RootWorkflowOutbound',
+            'workflow');
     }
 
     # ResolveActivity { seq, result } — resolve the pending activity Future for

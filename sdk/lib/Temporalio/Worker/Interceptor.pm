@@ -15,7 +15,7 @@ use Temporalio::Exception::Argument ();
 {
     no strict 'refs';
     for my $name (qw(
-        ExecuteActivity
+        ExecuteActivity Heartbeat
         ExecuteWorkflow HandleSignal HandleQuery HandleUpdate
         StartActivity StartLocalActivity StartChildWorkflow
         SignalChildWorkflow SignalExternalWorkflow ContinueAsNew
@@ -37,6 +37,28 @@ class Temporalio::Worker::ActivityInbound {
 
     method init             { $next ? $next->init($_[0]) : () }
     method execute_activity { $next->execute_activity($_[0]) }
+}
+
+# --- Activity outbound base (spec R72) -------------------------------------
+# Wraps the calls an activity BODY makes back out through its context. The
+# method set MUST-matches sdk-python's ActivityOutboundInterceptor
+# (worker/_interceptor.py:135-156, spec R72 parity finding 2): info and
+# heartbeat, each delegating to next by default. Both carry an Input like
+# every other chain method (Python's info() takes none and heartbeat takes
+# *details): info's Input holds only the private `_root`, and heartbeat's
+# details ride the Input's writable `args` field so an interceptor can rewrite
+# them — a documented spec §0 surface deviation, same as WorkflowOutbound's
+# info below. An interceptor installs a wrapper from its activity-inbound
+# init($outbound): wrap the received outbound and delegate
+# $self->next->init($wrapped); the ActivityDispatcher builds a root outbound,
+# calls init on the inbound chain, and the Activity::Context routes the body's
+# heartbeat()/info() through whatever outbound reaches the chain root.
+class Temporalio::Worker::ActivityOutbound {
+    field $next :param = undef;
+    method next { $next }
+
+    method info      { $next->info($_[0]) }
+    method heartbeat { $next->heartbeat($_[0]) }
 }
 
 # --- Workflow inbound base (spec section 27.1) -----------------------------
@@ -122,6 +144,40 @@ sub Temporalio::Worker::Interceptor::build_workflow_inbound ($interceptors, $roo
     return $chain;
 }
 
+# Build a full inbound + outbound chain PAIR (spec R71/R72, parity findings 1
+# and 2; MUST-match sdk-python's init-driven install, worker/_interceptor.py
+# :113-128 and :416-481 via _workflow_instance.py:392-398 / _activity.py
+# :709-713): construct the root inbound with an on_init capture, fold the
+# interceptor list over it with $fold (first-listed outermost), then call
+# init(root outbound) on the finished inbound chain. Each interceptor inbound
+# may WRAP the outbound it receives before delegating init down-chain, so
+# whatever arrives at the ROOT inbound is the finished outbound chain
+# (last-listed wrapper outermost, Python's exact init semantics); the capture
+# hands it back. Shared by the workflow Runner (R71) and the
+# ActivityDispatcher (R72). $inbound_root_class and $outbound_root_class are
+# names of ALREADY-LOADED classes (the callers load their _Root* modules; this
+# module cannot use them without a circular-load hazard against the base
+# classes above).
+sub Temporalio::Worker::Interceptor::build_chains (
+    $interceptors, $fold, $inbound_root_class, $outbound_root_class, $kind)
+{
+    my $outbound;
+    my $inbound = $fold->(
+        $interceptors,
+        $inbound_root_class->new(on_init => sub { $outbound = $_[0] }));
+    $inbound->init($outbound_root_class->new);
+    # An inbound that overrides init but never delegates strands the run with
+    # no outbound chain; fail loudly at build time (Python surfaces the same
+    # bug later, as an AttributeError on first outbound use).
+    unless (defined $outbound) {
+        Temporalio::Exception::Argument->throw(
+            message => "${kind}-inbound interceptor init() did not "
+                     . 'reach the chain root: init must delegate '
+                     . '$self->next->init($outbound)');
+    }
+    return ($inbound, $outbound);
+}
+
 sub _assert_worker_interceptor ($i) {
     unless (Scalar::Util::blessed($i)
         && $i->isa('Temporalio::Worker::Interceptor'))
@@ -157,6 +213,17 @@ C<intercept_workflow($next)> returning a L<Temporalio::Worker::WorkflowInbound>
 =item * L<Temporalio::Worker::ActivityInbound>: C<init($outbound)>,
 C<execute_activity($input)>.
 
+=item * L<Temporalio::Worker::ActivityOutbound>: C<info>, C<heartbeat> (spec
+R72; the method set matches sdk-python's C<ActivityOutboundInterceptor>,
+C<worker/_interceptor.py:135-156>). An interceptor installs an outbound
+wrapper from its activity-inbound C<init($outbound)>: wrap the received
+outbound and delegate C<< $self->next->init($wrapped) >>. The
+ActivityDispatcher builds a root outbound, calls C<init> on the inbound
+chain, and the L<Temporalio::Activity::Context> routes the body's
+C<heartbeat()>/C<info()> through whatever outbound reaches the chain root.
+Heartbeat details ride the Input's writable C<args> field (Python's
+C<*details>).
+
 =item * L<Temporalio::Worker::WorkflowInbound>: C<init($outbound)>,
 C<execute_workflow>, C<handle_signal>, C<handle_query>, C<validate_update>,
 C<handle_update>. Runs under C<$Runner::CURRENT> and must be deterministic.
@@ -182,5 +249,16 @@ through whatever outbound reaches the chain root.
 C<< Temporalio::Worker::Interceptor::build_activity_inbound(\@interceptors, $root) >>
 and the workflow variant fold the list so the first-listed interceptor is
 outermost, wrapping C<$root>. Non-conforming interceptors or returns die.
+
+=head2 build_chains
+
+C<< Temporalio::Worker::Interceptor::build_chains(\@interceptors, \&fold,
+$inbound_root_class, $outbound_root_class, $kind) >> builds a full inbound +
+outbound chain pair (spec R71/R72): it constructs the root inbound with an
+C<on_init> capture, folds the list over it with C<\&fold>, and calls
+C<init(root outbound)> on the finished inbound chain so each interceptor
+inbound may wrap the outbound on the way down (sdk-python's init semantics).
+Returns C<($inbound, $outbound)>; dies if an inbound C<init> override fails
+to delegate down to the chain root.
 
 =cut

@@ -8,6 +8,7 @@ no warnings 'experimental::class';
 
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Heartbeat ();
+use Temporalio::Worker::Interceptor ();   # Input classes for the outbound chain
 
 class Temporalio::Activity::Context {
     # The currently-running activity's context, set by the dispatcher with
@@ -45,7 +46,34 @@ class Temporalio::Activity::Context {
     # lets the sync-activity fork pool (P2.5) substitute a pipe relay.
     field $heartbeat_recorder :param;
 
-    method info             { $info }
+    # The finished activity-outbound interceptor chain (spec R72, parity
+    # finding 2), supplied by the ActivityDispatcher after it calls
+    # inbound->init(root outbound). When set, info() and heartbeat() route
+    # through it before the real work runs — the Perl form of sdk-python's
+    # _ActivityInboundImpl.init installing outbound.info/outbound.heartbeat
+    # on the context (worker/_activity.py:813-818, _interceptor.py:135-156).
+    # undef (the fork-pool child's context and direct unit constructions)
+    # means the direct behavior: pooled sync-activity heartbeats therefore
+    # BYPASS the outbound chain, a documented spec §0 deviation — Python
+    # routes them parent-side via register_heartbeater(ctx.heartbeat)
+    # (_activity.py:857-865), but our pool relay carries already-serialized
+    # ActivityHeartbeat BYTES, not Perl-level details, so there is nothing
+    # chain-shaped to intercept parent-side.
+    field $outbound :param = undef;
+
+    # info() (spec section 9.3): the frozen info hashref, routed through the
+    # outbound chain when one is installed (Python parity: every
+    # activity.info() call goes through ActivityOutboundInterceptor.info).
+    # The Input carries only the private `_root` returning the hashref
+    # (Python's info() takes no input): the R71/R72 Input-everywhere
+    # deviation.
+    method info {
+        return $info unless defined $outbound;
+        return $outbound->info(
+            Temporalio::Worker::Interceptor::Input::Info->new(
+                _root => sub { $info },
+            ));
+    }
     method cancellation     { $cancellation }
     method client           { $client }
     method data_converter   { $data_converter }
@@ -63,7 +91,22 @@ class Temporalio::Activity::Context {
     # is a synchronous call (the reference SDKs' heartbeat is sync too), so v0.1
     # applies only the synchronous payload converter here — a codec chain on
     # heartbeat details is deferred until a sync-friendly codec path exists.
+    #
+    # With an outbound chain installed (spec R72) the call routes through it
+    # first — details ride the Input's writable `args` field (Python's
+    # *details) so a wrapper can observe or rewrite them — and the chain ROOT
+    # performs the recording below via the input's `_root` coderef. A wrapper
+    # that does not delegate replaces the recording entirely.
     method heartbeat (@details) {
+        return $self->_record_heartbeat(@details) unless defined $outbound;
+        return $outbound->heartbeat(
+            Temporalio::Worker::Interceptor::Input::Heartbeat->new(
+                args  => [@details],
+                _root => sub { $self->_record_heartbeat(@{ $_[0]->args }) },
+            ));
+    }
+
+    method _record_heartbeat (@details) {
         my $converter = $data_converter->payload_converter;
         my @payloads  = map { $converter->to_payload($_) } @details;
 
@@ -135,6 +178,13 @@ the synchronous bridge call C<worker_record_activity_heartbeat>). A non-empty
 recorder return raises L<Temporalio::Exception::Heartbeat>. Heartbeat
 throttling is handled by core, not this layer.
 
+When the dispatcher installed an activity-outbound interceptor chain (spec
+R72), both C<heartbeat> and C<info> route through it first, matching
+sdk-python's C<ActivityOutboundInterceptor>; the chain root performs the real
+recording (or returns the real info). The fork-pool child's context has no
+chain, so pooled sync-activity heartbeats bypass interceptors (a documented
+spec section 0 deviation).
+
 =head2 cancellation
 
 The L<Temporalio::Cancellation> that fires when this activity is cancelled.
@@ -179,6 +229,11 @@ Constructs a Temporalio::Activity::Context. Named parameters:
 =item C<heartbeat_recorder>
 
 (required)
+
+=item C<outbound>
+
+(optional, default C<undef>) The finished activity-outbound interceptor
+chain; when set, C<info> and C<heartbeat> route through it.
 
 =back
 

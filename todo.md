@@ -332,10 +332,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R71.4 Verify: mutation-reaches-command assertions green; prove -lj4 t green under the memory guard (t: 168 files/764 tests green incl. live integration; xt: 416 green after adding the _RootWorkflowOutbound %TRUSTME entry and Runner continue_as_new POD)
 
 ### Step R72: Add the Activity-Outbound Interceptor and Wire ActivityInbound.init
-- [ ] R72.1 RED: unit test asserting an activity interceptor's outbound heartbeat override fires when the body calls heartbeat
-- [ ] R72.2 GREEN: add ActivityOutbound (info, heartbeat), build root outbound and call inbound->init(outbound) (ActivityDispatcher.pm:152), route Context heartbeat/info through it
-- [ ] R72.3 REFACTOR: share the fold-over-root helper with R71; comment citing parity finding 2 / _interceptor.py:135-156
-- [ ] R72.4 Verify: override-fires assertion green; prove -lj4 t green under the memory guard
+- [x] R72.1 RED: unit test asserting an activity interceptor's outbound heartbeat override fires when the body calls heartbeat (t/unit/interceptor_activity_outbound.t: delegating override observes details and still reaches the recorder, swallowing override replaces the recording, info override observes the call with real info returned through the root, base still heartbeats through; failed pre-wire at compile, ActivityOutbound did not exist)
+- [x] R72.2 GREEN: add ActivityOutbound (info, heartbeat), build root outbound and call inbound->init(outbound) (ActivityDispatcher.pm:152), route Context heartbeat/info through it (Interceptor.pm gained ActivityOutbound + a Heartbeat input, details ride the writable args field, Python's *details; new _RootActivityOutbound.pm; _RootActivityInbound captures init's outbound via on_init, mirroring R71; the dispatcher hands the finished chain to Activity::Context, whose heartbeat/info route through it when set — the fork-pool child context has no chain, a documented spec §0 deviation vs Python's parent-side register_heartbeater)
+- [x] R72.3 REFACTOR: share the fold-over-root helper with R71; comment citing parity finding 2 / _interceptor.py:135-156 (new shared Temporalio::Worker::Interceptor::build_chains does the init-capture fold for both sides; Runner::_build_interceptor_chains now delegates to it; comments cite finding 2, _interceptor.py:135-156, and _activity.py:709-713/813-818)
+- [x] R72.4 Verify: override-fires assertion green; prove -lj4 t green under the memory guard (t: 169 files/768 tests green incl. live integration; xt: 418 green after the _RootActivityOutbound %TRUSTME entry and build_chains POD)
 
 ### Step R73: Add the Nexus Operation Inbound Interceptor Role
 - [ ] R73.1 RED: unit test asserting a nexus-start interceptor override runs before the handler body (and cancel override wraps the handler)
