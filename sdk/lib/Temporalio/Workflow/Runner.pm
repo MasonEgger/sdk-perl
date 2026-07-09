@@ -1654,21 +1654,32 @@ class Temporalio::Workflow::Runner {
 
     # --- timers (spec section 10.2 start_timer/sleep + 10.3 FireTimer) -------
 
-    # start_timer($seconds) -> a Temporalio::Workflow::Future resolved when the
-    # matching FireTimer job arrives. Allocates the next TIMER seq (a seq space
-    # separate from activities — sdk-python _next_seq("timer") / sdk-ruby
-    # @timer_counter), builds the StartTimer command, buffers it, and registers
-    # the pending Future. Cancelling the returned Future emits a CancelTimer
-    # command (same seq) and resolves the Future as Temporalio::Exception::
-    # Cancelled (MUST-match sdk-ruby _apply_cancel_command / CanceledError).
-    method start_timer ($seconds) {
+    # start_timer($seconds, %opts) -> a Temporalio::Workflow::Future resolved
+    # when the matching FireTimer job arrives. Allocates the next TIMER seq (a
+    # seq space separate from activities — sdk-python _next_seq("timer") /
+    # sdk-ruby @timer_counter), builds the StartTimer command, buffers it, and
+    # registers the pending Future. Cancelling the returned Future emits a
+    # CancelTimer command (same seq) and resolves the Future as Temporalio::
+    # Exception::Cancelled (MUST-match sdk-ruby _apply_cancel_command /
+    # CanceledError). %opts: summary, a single-line fixed summary placed on the
+    # command's user_metadata.summary Payload.
+    method start_timer ($seconds, %opts) {
         $self->_assert_writable('start_timer/sleep');
         my $seq = ++$timer_seq_counter;   # timer seq space, from 1.
+
+        # summary -> the WorkflowCommand user_metadata.summary Payload,
+        # converted up front so a converter error surfaces at the call site
+        # (spec R78 / in-workflow finding 2; MUST-match sdk-python
+        # workflow/_context.py:878,894, which carries sleep's summary and
+        # wait_condition's timeout_summary to the timer command). The activity,
+        # LA, and nexus arms already follow this convention.
+        my $summary = defined $opts{summary}
+            ? $payload_converter->to_payload($opts{summary}) : undef;
 
         push @commands, Temporalio::Workflow::Commands::start_timer({
             seq                   => $seq,
             start_to_fire_timeout => _duration($seconds),
-        });
+        }, $summary);
 
         # A timer future whose ->cancel FAILS the future with a
         # Temporalio::Exception::Cancelled (rather than putting it into Future's
@@ -1807,6 +1818,9 @@ class Temporalio::Workflow::Runner {
     # failed with a Temporalio::Exception::Timeout (MUST-match sdk-python
     # asyncio.wait_for(fut, timeout) raising TimeoutError). When the predicate
     # wins first the timer is cancelled (emitting CancelTimer).
+    # timeout_summary optionally labels the backing timeout timer: it rides to
+    # the StartTimer command's user_metadata.summary (spec R78 / in-workflow
+    # finding 2; MUST-match sdk-python workflow/_context.py:894).
     method wait_condition ($predicate, %opts) {
         # The wait_condition awaitable is a _ConditionFuture whose ->cancel FAILS
         # the future with a throwable Temporalio::Exception::Cancelled (#5, #8) —
@@ -1829,7 +1843,10 @@ class Temporalio::Workflow::Runner {
         );
 
         if (defined $opts{timeout}) {
-            $timer = $self->start_timer($opts{timeout});
+            # timeout_summary -> the backing timer's user_metadata.summary
+            # (start_timer converts it and skips an undef).
+            $timer = $self->start_timer($opts{timeout},
+                summary => $opts{timeout_summary});
             # If the timer fires (resolves done) before the predicate is
             # satisfied, the wait times out: fail the wait future with Timeout.
             # An already-resolved wait (predicate won) leaves this a no-op.
@@ -4492,6 +4509,7 @@ Emits a StartChildWorkflowExecution command and returns the start awaitable that
 =head2 start_timer
 
 Emits a StartTimer command and returns the cancellable awaitable that resolves when the timer fires.
+An optional C<summary> option is converted and placed on the command's C<user_metadata.summary> (spec R78).
 
 =head2 upsert_search_attributes
 
@@ -4504,6 +4522,7 @@ Emits a ModifyWorkflowProperties command for the given memo updates (spec sectio
 =head2 wait_condition
 
 Registers a predicate to be re-checked as activations are applied, returning an awaitable that resolves when it holds.
+An optional C<timeout> races it against a timer; C<timeout_summary> labels that timer's C<user_metadata.summary> (spec R78).
 
 =head2 workflow_type
 

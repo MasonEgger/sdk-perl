@@ -18,6 +18,18 @@ sub _command_class {
         'coresdk.workflow_commands.WorkflowCommand');
 }
 
+# The shared user_metadata.summary attach: returns the (user_metadata => ...)
+# field pair when a summary Payload was given, or the empty list so an absent
+# summary leaves the field unset (never an empty message). One builder for the
+# activity (spec R69 / finding A17), local-activity (spec section 21.2), nexus
+# (spec section 26.1), and timer (spec R78 / in-workflow finding 2; MUST-match
+# sdk-python workflow/_context.py:878,894) arms, so the four command sites
+# cannot drift.
+sub _user_metadata ($summary_payload) {
+    return defined $summary_payload
+        ? (user_metadata => { summary => $summary_payload }) : ();
+}
+
 # complete_workflow_execution { result } — the workflow's :Run returned a
 # value. $result_payload is a temporal.api.common.v1.Payload (or undef for a
 # bare/void return; the proto leaves the field unset then).
@@ -73,17 +85,24 @@ sub continue_as_new_workflow_execution ($fields) {
 sub schedule_activity ($fields, $summary_payload = undef) {
     return _command_class()->new({
         schedule_activity => $fields,
-        (defined $summary_payload
-            ? (user_metadata => { summary => $summary_payload }) : ()),
+        _user_metadata($summary_payload),
     });
 }
 
 # start_timer { seq, start_to_fire_timeout } — emitted when the workflow body
 # calls Temporalio::Workflow::start_timer / sleep (spec section 10.2). $fields
 # is the assembled StartTimer field hashref (the runner owns timer-seq
-# allocation and the Duration conversion).
-sub start_timer ($fields) {
-    return _command_class()->new({ start_timer => $fields });
+# allocation and the Duration conversion). An optional $summary_payload (a
+# temporal.api.common.v1.Payload) is placed on the command's
+# user_metadata.summary, the same convention as the local-activity builder
+# below (spec R78 / in-workflow finding 2; MUST-match sdk-python
+# workflow/_context.py:878,894, which threads summary/timeout_summary from
+# sleep and wait_condition onto the timer command's metadata).
+sub start_timer ($fields, $summary_payload = undef) {
+    return _command_class()->new({
+        start_timer => $fields,
+        _user_metadata($summary_payload),
+    });
 }
 
 # cancel_timer { seq } — emitted when a started timer's Workflow::Future is
@@ -120,8 +139,7 @@ sub request_cancel_activity ($seq) {
 sub schedule_local_activity ($fields, $summary_payload = undef) {
     return _command_class()->new({
         schedule_local_activity => $fields,
-        (defined $summary_payload
-            ? (user_metadata => { summary => $summary_payload }) : ()),
+        _user_metadata($summary_payload),
     });
 }
 
@@ -323,8 +341,7 @@ sub set_patch_marker ($patch_id, $deprecated = 0) {
 sub schedule_nexus_operation ($fields, $summary_payload = undef) {
     return _command_class()->new({
         schedule_nexus_operation => $fields,
-        (defined $summary_payload
-            ? (user_metadata => { summary => $summary_payload }) : ()),
+        _user_metadata($summary_payload),
     });
 }
 
@@ -412,12 +429,16 @@ queue). The optional C<$summary_payload> (a C<temporal.api.common.v1.Payload>)
 is placed on the C<WorkflowCommand> C<user_metadata.summary>, matching the
 local-activity and nexus builders (spec R69 / finding A17).
 
-=item C<start_timer($fields)>
+=item C<start_timer($fields, $summary_payload)>
 
 C<StartTimer { seq, start_to_fire_timeout }> — emitted when the workflow body
-calls C<Temporalio::Workflow::start_timer> / C<sleep>. C<$fields> is the
-assembled C<StartTimer> field hashref (the runner owns the timer-seq allocation
-and the C<google.protobuf.Duration> conversion).
+calls C<Temporalio::Workflow::start_timer> / C<sleep> (or C<wait_condition>
+starts its timeout timer). C<$fields> is the assembled C<StartTimer> field
+hashref (the runner owns the timer-seq allocation and the
+C<google.protobuf.Duration> conversion). The optional C<$summary_payload> (a
+C<temporal.api.common.v1.Payload>) is placed on the C<WorkflowCommand>
+C<user_metadata.summary>, matching the activity, local-activity, and nexus
+builders (spec R78 / in-workflow finding 2).
 
 =item C<cancel_timer($seq)>
 

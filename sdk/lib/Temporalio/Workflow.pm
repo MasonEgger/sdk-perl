@@ -266,22 +266,26 @@ sub create_nexus_client (%opts) {
 
 # --- timers (spec section 10.2) ---------------------------------------------
 
-# start_timer($seconds) -> a Workflow::Future that resolves when the timer
-# fires. Emits a StartTimer command and returns without awaiting, so the caller
-# may start several timers (or run other work) before awaiting. Cancelling the
-# returned Future emits a CancelTimer command and raises
-# Temporalio::Exception::Cancelled at the await site.
-sub start_timer ($seconds) {
-    return _runner()->start_timer($seconds);
+# start_timer($seconds, %opts) -> a Workflow::Future that resolves when the
+# timer fires. Emits a StartTimer command and returns without awaiting, so the
+# caller may start several timers (or run other work) before awaiting.
+# Cancelling the returned Future emits a CancelTimer command and raises
+# Temporalio::Exception::Cancelled at the await site. %opts: summary, a
+# single-line fixed summary for the timer that may appear in UI/CLI, carried
+# on the command's user_metadata (spec R78 / in-workflow finding 2; MUST-match
+# sdk-python workflow/_context.py:878).
+sub start_timer ($seconds, %opts) {
+    return _runner()->start_timer($seconds, %opts);
 }
 
-# sleep($seconds) -> a Future that resolves after the timer fires. The
+# sleep($seconds, %opts) -> a Future that resolves after the timer fires. The
 # documented alias over start_timer: sleep(duration) starts a timer and awaits
 # it. Returning the Future (rather than awaiting here) keeps the await in the
 # caller's async frame so the dynamically-scoped runner context is preserved
-# across the suspension (spec section 16.1).
-sub sleep ($seconds) {
-    return _runner()->start_timer($seconds);
+# across the suspension (spec section 16.1). %opts: summary, as start_timer
+# (MUST-match sdk-python workflow.sleep(duration, summary=...)).
+sub sleep ($seconds, %opts) {
+    return _runner()->start_timer($seconds, %opts);
 }
 
 # --- wait_condition (spec section 10.2) -------------------------------------
@@ -295,8 +299,10 @@ sub sleep ($seconds) {
 # re-run every pump (it must never command). %opts: timeout (seconds) races the
 # wait against a timer; on timeout the awaited Future raises a
 # Temporalio::Exception::Timeout (MUST-match sdk-python wait_condition over
-# asyncio.wait_for). This is the core building block for "wait until a signal
-# sets a flag" patterns (spec section 10.2 / T-wf-5).
+# asyncio.wait_for). timeout_summary labels the backing timeout timer's
+# StartTimer user_metadata (spec R78 / in-workflow finding 2; MUST-match
+# sdk-python workflow/_context.py:894). This is the core building block for
+# "wait until a signal sets a flag" patterns (spec section 10.2 / T-wf-5).
 sub wait_condition ($predicate, %opts) {
     return _runner()->wait_condition($predicate, %opts);
 }
@@ -545,6 +551,7 @@ Raises L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
 =head2 sleep
 
 Async. Durably sleeps for the given duration via a workflow timer; returns an awaitable that resolves when the timer fires.
+An optional C<summary> (a single-line fixed summary that may appear in UI/CLI) is carried on the timer command's user metadata (spec R78).
 
 =head2 start_activity
 
@@ -561,6 +568,7 @@ applies to C<start_local_activity> handles.
 =head2 start_timer
 
 Starts a workflow timer for the given duration and returns its awaitable without awaiting it.
+Takes the same optional C<summary> as L</sleep>.
 
 =head2 time
 
@@ -604,5 +612,6 @@ L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
 =head2 wait_condition
 
 Async. Suspends until the given predicate becomes true (re-checked on each activation), with an optional timeout.
+An optional C<timeout_summary> labels the backing timeout timer's command user metadata (spec R78).
 
 =cut

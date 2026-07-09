@@ -368,10 +368,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R77.4 Verify: stability/uniqueness/seed assertions green; prove -lj4 t and xt green under the memory guard (t: 174 files/786 tests green incl. live integration; xt: 422 green)
 
 ### Step R78: Carry a Summary on Timers, sleep, and wait_condition Timeouts
-- [ ] R78.1 RED: replay test asserting StartTimer carries the user-metadata summary when passed (sleep/start_timer/wait_condition) and none when omitted
-- [ ] R78.2 GREEN: sleep/start_timer accept summary, wait_condition accepts timeout_summary, Runner emits StartTimer user-metadata (Workflow.pm:241,250; Runner.pm:1220,1366,1388)
-- [ ] R78.3 REFACTOR: reuse the local-activity user-metadata summary builder; comment citing in-workflow finding 2 / _context.py:878,894
-- [ ] R78.4 Verify: summary-present/absent assertions green; prove -lj4 t green under the memory guard
+- [x] R78.1 RED: replay test asserting StartTimer carries the user-metadata summary when passed (sleep/start_timer/wait_condition) and none when omitted (t/replay/timer_summary.t + WfDef::TimerSummary fixture; pre-fix failure confirmed as "Too many arguments for subroutine 'Temporalio::Workflow::sleep'" and a summary-less StartTimer on the wait_condition arm)
+- [x] R78.2 GREEN: sleep/start_timer accept summary, wait_condition accepts timeout_summary, Runner emits StartTimer user-metadata (Workflow.pm sleep/start_timer take %opts; Runner start_timer converts summary up front and passes it to the command builder; wait_condition threads timeout_summary to its backing timer)
+- [x] R78.3 REFACTOR: reuse the local-activity user-metadata summary builder; comment citing in-workflow finding 2 / _context.py:878,894 (extracted the shared Commands::_user_metadata helper now used by the activity, LA, nexus, and timer builders; POD updated in Workflow.pm/Runner.pm/Commands.pm)
+- [x] R78.4 Verify: summary-present/absent assertions green; prove -lj4 t green under the memory guard (t: 175 files/790 tests green incl. live integration; xt: 422 green)
 
 ### Step R79: Expose Per-Activation Workflow Info Accessors
 - [ ] R79.1 RED: replay test driving an activation with history_length, history_size_bytes, build_id, continue_as_new_suggested and asserting each accessor returns the delivered (and updated) value
