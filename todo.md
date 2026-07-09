@@ -253,10 +253,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R43.4 Verify: mutated-history error or grep finds no overclaim; prove -lj4 t and xt green
 
 ### Step R45: Revive the Dead Nexus Integration Test
-- [ ] R45.1 RED: perl -c on t/integration/nexus.t fails on with_worker and the API misuse
-- [ ] R45.2 GREEN: fix with_worker (:74-77), connect positionals (:90), iterator consumption (:103-108); keep skip_all offline
-- [ ] R45.3 REFACTOR: align with nearest working integration file; comment with T7
-- [ ] R45.4 Verify: perl -c passes offline, prove -l passes with server, skip_all offline; prove -lj4 t and xt green
+- [x] R45.1 RED: perl -c on t/integration/nexus.t fails on with_worker and the API misuse (adapted: perl -c passes — the misuses are runtime-only — so the RED is the gated run dying at :74 with "Odd name/value argument for subroutine 'Temporalio::Client::connect'"; with_worker confirmed nonexistent tree-wide)
+- [x] R45.2 GREEN: fix with_worker (:74-77), connect positionals (:90), iterator consumption (:103-108); keep skip_all offline
+- [x] R45.3 REFACTOR: align with nearest working integration file; comment with T7
+- [x] R45.4 Verify: perl -c passes offline, prove -l passes with server, skip_all offline; prove -lj4 t and xt green
 
 ### Step R22+R41+R42: Implement the OpenTelemetry TracingInterceptor and Point Its Tests at the Wired Behavior
 - [ ] R22+R41+R42.1 RED: rewrite t/unit/tracing.t on the fake-tracer scaffold to assert span creation per surface, header round-trip, R41 mutation note, R42 OTel-installed fixture
