@@ -248,6 +248,26 @@ class Temporalio::Workflow::Runner {
     field $activation_nanos   = 0;
     field $is_replaying       = 0;
 
+    # The dynamic per-activation info struct (spec R79; parity audit,
+    # in-workflow finding 3): the four values the CURRENT activation delivered
+    # (history_length, history_size in bytes, continue_as_new_suggested, and
+    # the build id from deployment_version_for_current_task), captured together
+    # at the process_activation boundary and surfaced through the
+    # get_current_* / is_continue_as_new_suggested accessors below. MUST-match
+    # sdk-python, which captures the same fields at its activate() boundary
+    # (_workflow_instance.py:427-429) and reads them via
+    # workflow/_context.py:140-185; build_id is '' when the activation carries
+    # no deployment version (_workflow_instance.py:1195-1198). Deliberately
+    # NOT part of the info() hashref: info() snapshots would go stale across
+    # activations, while these read the live per-activation values (the same
+    # reason Python puts them on Info as METHODS, not dataclass fields).
+    field %activation_info = (
+        history_length            => 0,
+        history_size              => 0,
+        continue_as_new_suggested => 0,
+        build_id                  => '',
+    );
+
     # Deterministic RNG (a Math::Random::ISAAC::XS instance seeded from the
     # InitializeWorkflow job's randomness_seed — spec section 10.4; re-created
     # on an UpdateRandomSeed job). See _make_rng below.
@@ -419,6 +439,18 @@ class Temporalio::Workflow::Runner {
     }
 
     method random { return $rng }
+
+    # The dynamic per-activation info accessors (spec R79; parity audit,
+    # in-workflow finding 3): each reads the %activation_info struct captured
+    # at the process_activation boundary, MUST-matching the Python readers
+    # (workflow/_context.py:140,165,175,185 over _workflow_instance.py:1195,
+    # 1213-1217,1258-1259).
+    method get_current_history_length   { return $activation_info{history_length} }
+    method get_current_history_size     { return $activation_info{history_size} }
+    method get_current_build_id         { return $activation_info{build_id} }
+    method is_continue_as_new_suggested {
+        return $activation_info{continue_as_new_suggested} ? 1 : 0;
+    }
 
     # The replay-aware workflow logger (spec section 10.4). Built once per run,
     # bound to this runner so its is_replaying gate tracks the live activation.
@@ -1938,6 +1970,20 @@ class Temporalio::Workflow::Runner {
             $activation_seconds = $ts->seconds // 0;
             $activation_nanos   = $ts->nanos   // 0;
         }
+
+        # Capture the dynamic per-activation info struct (spec R79; parity
+        # audit, in-workflow finding 3; sdk-python captures the same fields at
+        # its activate() boundary, _workflow_instance.py:427-429).
+        my $deployment_version = $activation->deployment_version_for_current_task;
+        %activation_info = (
+            history_length            => $activation->history_length     // 0,
+            history_size              => $activation->history_size_bytes // 0,
+            continue_as_new_suggested =>
+                ($activation->continue_as_new_suggested ? 1 : 0),
+            build_id                  =>
+                (defined $deployment_version
+                    ? ($deployment_version->build_id // '') : ''),
+        );
 
         # The command buffer holds only THIS activation's commands: the worker
         # returns one completion per activation, so any commands emitted by a
@@ -4440,6 +4486,29 @@ L<Temporalio::Workflow::ContinueAsNew> control signal, so this method never
 returns. C<%opts> mirror L<Temporalio::Workflow/continue_as_new> (C<workflow>,
 C<args>, C<task_queue>, C<retry_policy>, C<memo>, C<search_attributes>,
 C<headers>, C<run_timeout> / C<task_timeout>, C<versioning_intent>).
+
+=head2 get_current_build_id
+
+Returns the build id of the worker that processed the current workflow task,
+from the activation's C<deployment_version_for_current_task>; the empty string
+when that worker had none (spec R79). Updated each activation at the
+L</process_activation> boundary.
+
+=head2 get_current_history_length
+
+Returns the number of events in history as of the current activation (spec
+R79). Updated each activation at the L</process_activation> boundary.
+
+=head2 get_current_history_size
+
+Returns the history size in bytes as of the current activation (spec R79).
+Updated each activation at the L</process_activation> boundary.
+
+=head2 is_continue_as_new_suggested
+
+Returns true when the current activation carried the server's
+continue-as-new suggestion (spec R79). Updated each activation at the
+L</process_activation> boundary.
 
 =head2 is_replaying
 

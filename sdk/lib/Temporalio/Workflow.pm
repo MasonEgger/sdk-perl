@@ -103,6 +103,23 @@ sub logger { return _runner()->logger }
 # Python-parity field names).
 sub info { return _runner()->info }
 
+# The dynamic per-activation info accessors (spec R79; parity audit,
+# in-workflow finding 3): the values the current activation delivered, updated
+# each workflow task. Python surfaces these as METHODS on workflow.info()'s
+# Info object (workflow/_context.py:140-185) precisely because they must read
+# live per-activation state; the Perl info() is a plain hashref, so the
+# equivalent live readers are these package functions, a documented spec
+# section 0 surface deviation.
+sub get_current_history_length { return _runner()->get_current_history_length }
+
+sub get_current_history_size { return _runner()->get_current_history_size }
+
+sub get_current_build_id { return _runner()->get_current_build_id }
+
+sub is_continue_as_new_suggested {
+    return _runner()->is_continue_as_new_suggested;
+}
+
 # memo / search_attributes -> the current in-workflow views as fresh copies,
 # including upserted changes (spec R54 / finding A6; the archived v1 spec
 # promised both readers at lines 1869-1870 and they fell out of the v0.1 scope
@@ -501,12 +518,43 @@ C<start_operation>/C<execute_operation> emit a C<ScheduleNexusOperation> command
 through the stream. Raises L<Temporalio::Exception::Workflow::NoRunner> outside a
 workflow body.
 
+=head2 get_current_build_id
+
+Returns the build id of the worker that processed the current workflow task,
+or the empty string when that worker had none (spec R79; matches Python's
+C<Info.get_current_build_id()>). Updated each activation; deterministic and
+safe to branch on.
+
+=head2 get_current_history_length
+
+Returns the current number of events in history, as of the activation being
+processed (spec R79; matches Python's C<Info.get_current_history_length()>).
+Updated each activation; with C<get_current_history_size> and
+C<is_continue_as_new_suggested>, the input for gating C<continue_as_new> on
+history growth.
+
+=head2 get_current_history_size
+
+Returns the current history size in bytes, as of the activation being
+processed (spec R79; matches Python's C<Info.get_current_history_size()>).
+Updated each activation.
+
 =head2 info
 
 Returns the workflow info hashref for the running workflow: C<workflow_id>,
 C<run_id>, C<workflow_type>, C<namespace>, C<task_queue>, C<attempt>,
 C<patches>, C<search_attributes>, and C<memo> (spec R36; field names match
-Python's C<workflow.info()>). A fresh copy per call.
+Python's C<workflow.info()>). A fresh copy per call. The dynamic
+per-activation values are deliberately NOT in this hashref; read them through
+C<get_current_history_length>, C<get_current_history_size>,
+C<get_current_build_id>, and C<is_continue_as_new_suggested>, which stay
+current across activations.
+
+=head2 is_continue_as_new_suggested
+
+Returns true when the server suggested continue-as-new on the current workflow
+task (spec R79; matches Python's C<Info.is_continue_as_new_suggested()>).
+Updated each activation.
 
 =head2 is_replaying
 
