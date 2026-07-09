@@ -30,8 +30,9 @@ class Temporalio::Workflow::NexusOperationHandle {
     field $service :param;
     field $operation :param;
 
-    # The start Future (->done with $self once the start job arrives; ->fail on
-    # the start `failed` arm).
+    # The start Future (->done_weak with $self once the start job arrives --
+    # weak back-reference, spec R29 / finding L5; ->fail on the start `failed`
+    # arm).
     field $start_future :param;
 
     # The result Future (->done with the converted result on
@@ -57,11 +58,14 @@ class Temporalio::Workflow::NexusOperationHandle {
 
     # Called by the Runner when ResolveNexusOperationStart arrives. $token is the
     # async operation token, or undef for a started_sync (synchronous) op. Record
-    # the token, then ->done the start Future with this handle so an awaiting
-    # start_operation resolves to the handle.
+    # the token, then resolve the start Future with this handle so an awaiting
+    # start_operation resolves to the handle. done_weak, not ->done (spec R29,
+    # finding L5): the future's result is a weak back-reference, because this
+    # handle owns the future (start_future field + the Runner closures) and a
+    # strong result formed an uncollectable handle <-> start-future cycle.
     method _resolve_started ($token) {
         $operation_token = $token;
-        $start_future->done($self) unless $start_future->is_ready;
+        $start_future->done_weak($self) unless $start_future->is_ready;
         return;
     }
 
@@ -146,8 +150,11 @@ The Nexus operation name this handle was scheduled for.
 
 =head2 start_future
 
-The start Future (Runner-owned): C<< ->done >> with this handle once the
-operation has started.
+The start Future (Runner-owned): resolved with this handle once the operation
+has started. The resolved future holds the handle only B<weakly>
+(L<Temporalio::Workflow::Future/done_weak>, spec R29 / finding L5), so it
+never keeps the handle alive on its own; it yields the handle for as long as
+the awaiting caller or the Runner holds a strong reference.
 
 =head2 result_future
 

@@ -7,6 +7,7 @@ use warnings;
 
 use parent -norequire, 'Future';
 use Future ();
+use Scalar::Util ();
 
 # A subclass of the CPAN Future module. The workflow runner resolves these
 # imperatively (->done / ->fail from activation jobs) rather than via the
@@ -19,6 +20,34 @@ use Future ();
 # parent's emitted command before the parent's own teardown). is_workflow_future
 # lets interceptors distinguish these from ordinary Futures.
 sub is_workflow_future { 1 }
+
+# done_weak($owner) -> $self (spec R29, finding L5). Resolve exactly as ->done,
+# then weaken the stored copy of $owner, for the one shape ->done cannot
+# survive: a future resolved with the object that OWNS it. Both handle classes
+# (ChildWorkflowHandle, NexusOperationHandle) resolve their start future with
+# the handle itself; the future's strong result plus the handle's strong
+# start_future field (and the Runner closures capturing the future) formed an
+# uncollectable cycle pinning handle + futures per child/nexus start. With the
+# weak back-reference, the future yields the handle for as long as any strong
+# ref (the awaiting caller, the Runner's pending map) keeps it alive, and
+# ->get returns undef only once every strong ref is gone. This is the single,
+# centralized owner-for-result exchange point: any NEW site that resolves a
+# future with its owner must go through done_weak, never ->done.
+sub done_weak {
+    my ($self, $owner) = @_;
+    $self->done($owner);
+    # CPAN Future (pure Perl, the backend pinned by this SDK) stores done
+    # values in the 'result' slot; weaken the back-reference in place. Guarded
+    # so a non-hash backend (e.g. a future Future::XS swap) or a ->done that
+    # stored nothing (already-cancelled future) degrades to the old strong
+    # behaviour instead of crashing.
+    if ((Scalar::Util::reftype($self) // '') eq 'HASH'
+        && ref $self->{result}
+        && ref $self->{result}[0]) {
+        Scalar::Util::weaken($self->{result}[0]);
+    }
+    return $self;
+}
 
 1;
 
@@ -70,6 +99,23 @@ This class inherits the full L<Future> API. It adds:
 
 Always returns true. Interceptors and the runner use this to distinguish a
 workflow future from an ordinary L<Future> (e.g. one created by client code).
+
+=head2 done_weak
+
+    $f->done_weak($owner);
+
+Resolves the future with C<$owner> exactly as C<< ->done >>, then weakens the
+stored copy (spec R29, finding L5). For the one shape a strong result cannot
+survive: a future resolved with the object that B<owns> it, such as a handle
+resolving its own start future
+(L<Temporalio::Workflow::ChildWorkflowHandle>,
+L<Temporalio::Workflow::NexusOperationHandle>). With a strong result the
+handle and its start future pinned each other in an uncollectable cycle; with
+the weak back-reference the future yields the owner for as long as any strong
+reference (the awaiting caller, the runner's pending maps) keeps it alive, and
+C<< ->get >> returns C<undef> once every strong reference is gone. Any new
+site that resolves a future with its owner must use C<done_weak>, never
+C<< ->done >>.
 
 =head1 CANCELLATION ORDERING
 

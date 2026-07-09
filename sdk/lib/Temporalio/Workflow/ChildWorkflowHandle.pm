@@ -27,8 +27,9 @@ class Temporalio::Workflow::ChildWorkflowHandle {
     # identifier). Used by ->cancel/->signal to build the right command.
     field $child_workflow_seq :param;
 
-    # The start Future (->done with $self once the start job's `succeeded` arm
-    # arrives; ->fail on `failed`/`cancelled`).
+    # The start Future (->done_weak with $self once the start job's `succeeded`
+    # arm arrives -- weak back-reference, spec R29 / finding L5; ->fail on
+    # `failed`/`cancelled`).
     field $start_future :param;
 
     # The result Future (->done with the converted result on
@@ -51,11 +52,15 @@ class Temporalio::Workflow::ChildWorkflowHandle {
     method first_execution_run_id { return $first_execution_run_id }
 
     # Called by the Runner when ResolveChildWorkflowExecutionStart{succeeded}
-    # arrives: record the run id, then ->done the start Future with this handle
-    # so an awaiting `start_child_workflow` resolves to the handle.
+    # arrives: record the run id, then resolve the start Future with this
+    # handle so an awaiting `start_child_workflow` resolves to the handle.
+    # done_weak, not ->done (spec R29, finding L5): the future's result is a
+    # weak back-reference, because this handle owns the future (start_future
+    # field + the Runner closures) and a strong result formed an uncollectable
+    # handle <-> start-future cycle.
     method _resolve_started ($run_id) {
         $first_execution_run_id = $run_id;
-        $start_future->done($self) unless $start_future->is_ready;
+        $start_future->done_weak($self) unless $start_future->is_ready;
         return;
     }
 
@@ -150,8 +155,11 @@ child seq space); used to build the cancel command.
 
 =head2 start_future
 
-The start Future (Runner-owned): C<< ->done >> with this handle once the child
-has started.
+The start Future (Runner-owned): resolved with this handle once the child has
+started. The resolved future holds the handle only B<weakly>
+(L<Temporalio::Workflow::Future/done_weak>, spec R29 / finding L5), so it
+never keeps the handle alive on its own; it yields the handle for as long as
+the awaiting caller or the Runner holds a strong reference.
 
 =head2 result_future
 

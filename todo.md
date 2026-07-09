@@ -179,10 +179,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R27+R38.4 Verify: guard-trips-for-preloaded and stock-outside-context assertions pass; prove -lj4 t and xt green
 
 ### Step R29: Break the Start-Future Ownership Cycle in Handles
-- [ ] R29.1 RED: unit handle_start_cycle.t asserts DESTROY runs (weak-ref liveness) for ChildWorkflowHandle and NexusOperationHandle after refs drop
-- [ ] R29.2 GREEN: resolve start futures with a non-owning token (or weaken the back-reference) at Runner.pm:895-897 and the two handle classes
-- [ ] R29.3 REFACTOR: centralize any token-for-handle exchange; cite L5 and flag the same shape elsewhere
-- [ ] R29.4 Verify: both DESTROY-after-drop assertions pass and callers still get the handle; prove -lj4 t green
+- [x] R29.1 RED: unit handle_start_cycle.t asserts DESTROY runs (weak-ref liveness) for ChildWorkflowHandle and NexusOperationHandle after refs drop
+- [x] R29.2 GREEN: resolve start futures with a non-owning token (or weaken the back-reference) at Runner.pm:895-897 and the two handle classes
+- [x] R29.3 REFACTOR: centralize any token-for-handle exchange; cite L5 and flag the same shape elsewhere
+- [x] R29.4 Verify: both DESTROY-after-drop assertions pass and callers still get the handle; prove -lj4 t green
 
 ### Step R31: Honor Pending Futures from Custom Slot Suppliers
 - [ ] R31.1 RED: unit slot_supplier_pending.t asserts no permit while the reserve future is pending and the permit matches the resolved value
