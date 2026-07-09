@@ -28,6 +28,20 @@ sub assert_known_keys ($what, $opts, $known) {
     return;
 }
 
+# assert_required_keys($what, $opts, $required): require each key named in the
+# $required arrayref to be present AND defined in $opts (spec R55, finding
+# A14): a missing required argument raises the same typed
+# Temporalio::Exception::Argument as the unknown-key and required-timeout
+# rules, catchable and testable by class, instead of a plain string die.
+sub assert_required_keys ($what, $opts, $required) {
+    for my $key (@$required) {
+        next if defined $opts->{$key};
+        Temporalio::Exception::Argument->throw(
+            message => "$what: missing required option '$key'");
+    }
+    return;
+}
+
 # assert_activity_timeouts($what, $opts): require at least one of
 # start_to_close_timeout / schedule_to_close_timeout (spec R35; Python parity:
 # _workflow_instance.py _outbound_schedule_activity raises "Activity must have
@@ -70,6 +84,14 @@ C<< Temporalio::Common::Options::assert_known_keys($what, \%opts, \%known) >>
 throws a L<Temporalio::Exception::Argument> naming the offending key and the
 known-key set when C<%opts> contains a key absent from the C<%known> set
 (a C<< { key => 1 } >> hashref). Returns nothing on success.
+
+=head2 assert_required_keys
+
+C<< Temporalio::Common::Options::assert_required_keys($what, \%opts, \@required) >>
+throws a L<Temporalio::Exception::Argument> naming the first required key (in
+C<@required> order) that is missing or undefined in C<%opts> (spec R55,
+finding A14: missing-argument errors are typed, never plain string dies).
+Returns nothing on success.
 
 =head2 assert_activity_timeouts
 

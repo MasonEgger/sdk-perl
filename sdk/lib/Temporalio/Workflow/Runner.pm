@@ -511,6 +511,12 @@ class Temporalio::Workflow::Runner {
 
     sub _validate_activity_options ($what, $known, $opts) {
         Temporalio::Common::Options::assert_known_keys($what, $opts, $known);
+        # activity_type is required (spec R55, finding A14): a missing
+        # workflow-context argument raises the same typed
+        # Temporalio::Exception::Argument as the strictness rules above and
+        # below, catchable by class, never a plain string die.
+        Temporalio::Common::Options::assert_required_keys(
+            $what, $opts, ['activity_type']);
         Temporalio::Common::Options::assert_activity_timeouts($what, $opts);
         return;
     }
@@ -526,13 +532,13 @@ class Temporalio::Workflow::Runner {
     #   (Temporalio::Common::RetryPolicy), cancellation_type (string), headers.
     method schedule_activity (%opts) {
         $self->_assert_writable('execute_activity/start_activity');
-        # Option strictness first (spec R35, finding A2): unknown keys and a
-        # missing required timeout raise typed, before the seq is allocated.
+        # Option strictness first (spec R35 finding A2, spec R55 finding A14):
+        # unknown keys, a missing activity_type, and a missing required
+        # timeout raise typed, before the seq is allocated.
         _validate_activity_options('execute_activity/start_activity',
             \%ACTIVITY_OPTION_KEYS, \%opts);
-        my $activity_type = $opts{activity_type}
-            // die "Temporalio::Workflow::Runner: schedule_activity needs an "
-                 . "activity_type";
+        # Defined-ness is guaranteed by the validator above (spec R55).
+        my $activity_type = $opts{activity_type};
 
         my $seq = ++$activity_seq_counter;  # activity seq space, from 1.
 
@@ -664,9 +670,8 @@ class Temporalio::Workflow::Runner {
               . "activity to the worker's 'activities' list (#9).\n";
         }
 
-        my $activity_type = $opts{activity_type}
-            // die "Temporalio::Workflow::Runner: schedule_local_activity needs "
-                 . "an activity_type";
+        # Defined-ness is guaranteed by _validate_activity_options (spec R55).
+        my $activity_type = $opts{activity_type};
 
         # Convert arguments up front so a converter error surfaces at the call
         # site (parity with schedule_activity), and convert headers / summary.

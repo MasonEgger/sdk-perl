@@ -215,10 +215,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R44.4 Verify: typo-raises sweep passes and known keys still pass; prove -lj4 t green
 
 ### Step R55: Raise Typed Errors for Missing Workflow-Context Arguments
-- [ ] R55.1 RED: replay workflow_arg_errors.t asserts Temporalio::Exception::Argument by class at Runner.pm:451-453 and :579-581
-- [ ] R55.2 GREEN: replace the plain string dies with the typed throw, reusing the R35 validator where the region overlaps
-- [ ] R55.3 REFACTOR: route both sites through the shared argument-validation helper; cite A14
-- [ ] R55.4 Verify: both sites raise catchable typed errors asserted by class; prove -lj4 t green
+- [x] R55.1 RED: replay workflow_arg_errors.t asserts Temporalio::Exception::Argument by class at Runner.pm:451-453 and :579-581
+- [x] R55.2 GREEN: replace the plain string dies with the typed throw, reusing the R35 validator where the region overlaps
+- [x] R55.3 REFACTOR: route both sites through the shared argument-validation helper; cite A14
+- [x] R55.4 Verify: both sites raise catchable typed errors asserted by class; prove -lj4 t green
 
 ### Step R37: Wire or Reject start_workflow Extended Options
 - [ ] R37.1 RED: unit start_workflow_extended_options.t captures the request and asserts static_summary/static_details in user-metadata and versioning_override wired (or typed-reject)

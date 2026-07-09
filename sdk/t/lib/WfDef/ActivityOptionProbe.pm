@@ -1,7 +1,8 @@
 # ABOUTME: Fixture workflow probing call-site activity option validation (spec
-# ABOUTME: R35 / finding A2): each mode calls execute_/start_(local_)activity
-# ABOUTME: with bad or valid options and returns the caught exception class (or
-# ABOUTME: 'scheduled'/'no-error') so the replay test can assert by class.
+# ABOUTME: R35 / finding A2) and typed missing-argument errors (spec R55 /
+# ABOUTME: finding A14): each mode calls execute_/start_(local_)activity with
+# ABOUTME: bad or valid options and returns the caught exception class (or
+# ABOUTME: 'scheduled'/'no-error') so the replay tests can assert by class.
 use v5.38;
 use warnings;
 use feature 'class';
@@ -67,6 +68,27 @@ class WfDef::ActivityOptionProbe :isa(Temporalio::Workflow::Definition) {
                     args                   => ['x'],
                     start_to_close_timeout => 60,
                     heartbeat_timeout      => 10,
+                );
+            });
+        }
+        if ($mode eq 'act_missing_type') {
+            # No activity type at all (undef through the functional surface,
+            # the Runner.pm:451-453 audit site). The required timeout is
+            # present so ONLY the missing argument can raise (spec R55 /
+            # finding A14).
+            return $classify->(sub {
+                Temporalio::Workflow::execute_activity(
+                    undef,
+                    start_to_close_timeout => 60,
+                );
+            });
+        }
+        if ($mode eq 'la_missing_type') {
+            # The local-activity analog (the Runner.pm:579-581 audit site).
+            return $classify->(sub {
+                Temporalio::Workflow::execute_local_activity(
+                    undef,
+                    start_to_close_timeout => 60,
                 );
             });
         }
