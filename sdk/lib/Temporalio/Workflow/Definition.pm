@@ -39,7 +39,10 @@ class Temporalio::Workflow::Definition {
     #     updates    => { name => $methodref },
     #     validators => { update_name => $methodref },
     #     init       => $methodref,
-    #     dynamic    => { signal => $mref, query => $mref, update => $mref } }
+    #     dynamic    => { signal => $mref, query => $mref, update => $mref },
+    #     unfinished_policies =>              # spec R87, sparse (explicit only)
+    #       { signals => { name => $policy }, updates => { name => $policy },
+    #         dynamic => { signal => $policy, update => $policy } } }
     our %_DEFS;
 
     # :Run — exactly one per class (spec section 10.1). A second :Run raises
@@ -162,6 +165,9 @@ class Temporalio::Workflow::Definition {
                 );
             }
             $_DEFS{$pkg}{dynamic}{$dyn_kind} = $ref;
+            if (my $policy = $opts{unfinished_policy}) {
+                $_DEFS{$pkg}{unfinished_policies}{dynamic}{$dyn_kind} = $policy;
+            }
             return;
         }
 
@@ -171,6 +177,13 @@ class Temporalio::Workflow::Definition {
             );
         }
         $_DEFS{$pkg}{$bucket}{$name} = $ref;
+        # Spec R87 (parity audit, in-workflow finding 5): the per-handler
+        # unfinished policy, keyed like the handler buckets. Only explicit
+        # declarations are recorded; the runner defaults an absent entry to
+        # WARN_AND_ABANDON (Python _handlers.py:36, the dataclass default).
+        if (my $policy = $opts{unfinished_policy}) {
+            $_DEFS{$pkg}{unfinished_policies}{$bucket}{$name} = $policy;
+        }
         return;
     }
 
@@ -187,6 +200,10 @@ class Temporalio::Workflow::Definition {
             validators => $d->{validators} // {},
             init       => $d->{init},
             dynamic    => $d->{dynamic}    // {},
+            # Explicit per-handler unfinished policies (spec R87), keyed
+            # {signals|updates}{$name} and {dynamic}{signal|update}. Sparse:
+            # absent means the WARN_AND_ABANDON default.
+            unfinished_policies => $d->{unfinished_policies} // {},
         };
     }
 
@@ -302,6 +319,13 @@ Handler name defaults to the method name; C<:Signal('foo')> or
 C<:Signal(name=foo)> overrides; C<:Signal(dynamic=1)> registers a catch-all
 dynamic handler (which must not carry a name). A duplicate name within a kind
 raises L<Temporalio::Exception::Argument>.
+
+C<:Signal> and C<:Update> (not C<:Query>) additionally accept
+C<'unfinished_policy=WARN_AND_ABANDON'> (the default: the runner warns when
+the workflow completes while the handler is still in-flight, then abandons
+it) or C<'unfinished_policy=ABANDON'> (abandon silently — the opt-out that
+suppresses the completion warning). Spec R87; mirrors Python's
+C<HandlerUnfinishedPolicy>.
 
 =item C<:UpdateValidator('updateName')>
 

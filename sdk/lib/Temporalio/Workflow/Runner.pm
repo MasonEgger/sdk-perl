@@ -382,23 +382,33 @@ class Temporalio::Workflow::Runner {
     # per-instance dicts (self._signals = dict(defn.signals)) that
     # workflow_set_*_handler then mutates (_workflow_instance.py:1377-1447).
     # Seeded lazily by _handlers from $workflow_class->_workflow_defs; every
-    # entry is a descriptor { code => $ref, is_method => $bool }: an attribute
+    # entry is a descriptor { code => $ref, is_method => $bool,
+    # unfinished_policy => $str }: an attribute
     # handler is a METHOD on the instance ($instance->$code(@args)); a runtime
     # handler is a plain coderef closing over the body's lexicals
     # ($code->(@args)), matching Python's is_method=False runtime definitions.
+    # unfinished_policy (spec R87; parity audit, in-workflow finding 5) is
+    # WARN_AND_ABANDON or ABANDON — Python's HandlerUnfinishedPolicy
+    # (_handlers.py:36), carried on every definition dataclass there and on
+    # every descriptor here. It only matters for signals and updates (the
+    # kinds tracked in %in_progress_handlers); queries/validators carry the
+    # default harmlessly.
     # Shape mirrors _workflow_defs: {signals}{$name}, {queries}{$name},
     # {updates}{$name}, {validators}{$name}, and {dynamic}{signal|query|update}
     # for the per-kind catch-alls (Python keys its dicts on None for dynamic).
     field $handler_tables;
 
-    # In-progress signal-handler Futures (spec section 10.3 ASYNC HANDLER
-    # TRACKING; MUST-match sdk-python self._in_progress_signals): a hash keyed by
-    # a monotonic handler id -> the handler's Future. An async :Signal handler
-    # may await timers/activities; its Future is tracked here and pumped like any
-    # other workflow Future. The workflow is NOT considered complete while any
-    # handler Future is still pending — _all_handlers_finished gates
-    # CompleteWorkflowExecution. The id is removed when the handler Future
-    # becomes ready.
+    # In-progress signal/update handler records (spec section 10.3 ASYNC
+    # HANDLER TRACKING; MUST-match sdk-python self._in_progress_signals /
+    # _in_progress_updates, whose HandlerExecution records carry the name and
+    # unfinished policy): a hash keyed by a monotonic handler id ->
+    # { future, kind => 'signal'|'update', name, unfinished_policy }. An async
+    # handler may await timers/activities; its Future is tracked here and
+    # pumped like any other workflow Future. The workflow is NOT considered
+    # complete while any handler Future is still pending —
+    # _all_handlers_finished gates CompleteWorkflowExecution — and the
+    # kind/name/policy feed the unfinished-handler completion warning (spec
+    # R87). The id is removed when the handler Future becomes ready.
     field %in_progress_handlers;
     field $handler_seq = 0;   # monotonic handler id source.
 
@@ -2136,7 +2146,10 @@ class Temporalio::Workflow::Runner {
         }
         my @pending_futures = (
             values %pending_timers,
-            values %in_progress_handlers, values %pending_external_signals,
+            # %in_progress_handlers entries are { future, kind, name,
+            # unfinished_policy } records (spec R87); sweep their futures.
+            (map { $_->{future} } values %in_progress_handlers),
+            values %pending_external_signals,
             values %pending_external_cancels,
             map { $_->{future} } @conditions,
         );
@@ -3112,10 +3125,20 @@ class Temporalio::Workflow::Runner {
 
         # An already-ready handler (a synchronous handler that returned or threw)
         # needs no tracking. A pending (async) handler is tracked and removed
-        # from the in-progress set when it becomes ready.
+        # from the in-progress set when it becomes ready. The record carries
+        # the descriptor's unfinished policy (spec R87) so the completion
+        # warning can honor a per-handler ABANDON opt-out — Python tracks the
+        # same via HandlerExecution(job.signal_name, defn.unfinished_policy)
+        # (_workflow_instance.py:2446-2447).
         if (!$future->is_ready) {
             my $id = ++$handler_seq;
-            $in_progress_handlers{$id} = $future;
+            $in_progress_handlers{$id} = {
+                future            => $future,
+                kind              => 'signal',
+                name              => $name,
+                unfinished_policy => $handler->{unfinished_policy}
+                                       // 'WARN_AND_ABANDON',
+            };
             $future->on_ready(sub { delete $in_progress_handlers{$id} });
         }
         return;
@@ -3164,16 +3187,26 @@ class Temporalio::Workflow::Runner {
     method _handlers {
         return $handler_tables //= do {
             my $defs = $workflow_class->_workflow_defs;
-            my $wrap = sub ($bucket) {
-                return { map { $_ => { code => $bucket->{$_}, is_method => 1 } }
-                    keys %$bucket };
+            # Per-handler unfinished policies (spec R87; parity audit,
+            # in-workflow finding 5): the registry records only EXPLICIT
+            # declarations, so absent entries default to WARN_AND_ABANDON
+            # here — Python's dataclass default (_handlers.py:36). The policy
+            # rides on the descriptor itself, so every dispatch site reads it
+            # from the same place it reads the code.
+            my $pols = $defs->{unfinished_policies};
+            my $wrap = sub ($bucket, $bucket_pols = {}) {
+                return { map { $_ => {
+                    code              => $bucket->{$_},
+                    is_method         => 1,
+                    unfinished_policy => $bucket_pols->{$_} // 'WARN_AND_ABANDON',
+                } } keys %$bucket };
             };
             {
-                signals    => $wrap->($defs->{signals}),
+                signals    => $wrap->($defs->{signals}, $pols->{signals} // {}),
                 queries    => $wrap->($defs->{queries}),
-                updates    => $wrap->($defs->{updates}),
+                updates    => $wrap->($defs->{updates}, $pols->{updates} // {}),
                 validators => $wrap->($defs->{validators}),
-                dynamic    => $wrap->($defs->{dynamic}),
+                dynamic    => $wrap->($defs->{dynamic}, $pols->{dynamic} // {}),
             };
         };
     }
@@ -3241,7 +3274,12 @@ class Temporalio::Workflow::Runner {
             else               { delete $h->{dynamic}{signal} }
             return;
         }
-        my $desc = { code => $handler, is_method => 0 };
+        # A runtime-set handler always gets the WARN_AND_ABANDON default
+        # (spec R87): Python's set_signal_handler takes no policy argument —
+        # its runtime _SignalDefinition(name, fn, is_method=False) gets the
+        # dataclass default (_workflow_instance.py:1406-1408).
+        my $desc = { code => $handler, is_method => 0,
+                     unfinished_policy => 'WARN_AND_ABANDON' };
         my @drain;
         if (defined $name) {
             $h->{signals}{$name} = $desc;
@@ -3267,7 +3305,8 @@ class Temporalio::Workflow::Runner {
         $self->_assert_writable('set query handler');
         my $h = $self->_handlers;
         if (defined $handler) {
-            my $desc = { code => $handler, is_method => 0 };
+            my $desc = { code => $handler, is_method => 0,
+                         unfinished_policy => 'WARN_AND_ABANDON' };
             if (defined $name) { $h->{queries}{$name} = $desc }
             else               { $h->{dynamic}{query} = $desc }
         }
@@ -3293,12 +3332,16 @@ class Temporalio::Workflow::Runner {
         $self->_assert_writable('set update handler');
         my $h = $self->_handlers;
         if (defined $handler) {
-            my $desc = { code => $handler, is_method => 0 };
+            # WARN_AND_ABANDON default for runtime installs (spec R87), as
+            # with signals: Python's set_update_handler takes no policy.
+            my $desc = { code => $handler, is_method => 0,
+                         unfinished_policy => 'WARN_AND_ABANDON' };
             if (defined $name) {
                 $h->{updates}{$name} = $desc;
                 if (defined $validator) {
                     $h->{validators}{$name} =
-                        { code => $validator, is_method => 0 };
+                        { code => $validator, is_method => 0,
+                          unfinished_policy => 'WARN_AND_ABANDON' };
                 }
                 else {
                     delete $h->{validators}{$name};
@@ -3431,7 +3474,17 @@ class Temporalio::Workflow::Runner {
         }
         else {
             my $id = ++$handler_seq;
-            $in_progress_handlers{$id} = $future;
+            # The record carries the descriptor's unfinished policy (spec
+            # R87) for the completion warning — Python's
+            # HandlerExecution(job.name, defn.unfinished_policy, job.id)
+            # (_workflow_instance.py:631-632).
+            $in_progress_handlers{$id} = {
+                future            => $future,
+                kind              => 'update',
+                name              => $name,
+                unfinished_policy => $handler->{unfinished_policy}
+                                       // 'WARN_AND_ABANDON',
+            };
             $future->on_ready(sub {
                 delete $in_progress_handlers{$id};
                 $settle->();
@@ -3881,11 +3934,24 @@ class Temporalio::Workflow::Runner {
             # sdk-python (_warn_if_unfinished_handlers) and sdk-ruby. This is NOT
             # a hard block: authors who want to wait use
             # wait_condition(\&Temporalio::Workflow::all_handlers_finished).
-            unless ($self->_all_handlers_finished) {
+            # Per-handler opt-out (spec R87; parity audit, in-workflow finding
+            # 5): only handlers whose unfinished_policy is WARN_AND_ABANDON
+            # (Python's default, _handlers.py:36) are warned about; a handler
+            # declared with unfinished_policy=ABANDON is abandoned silently —
+            # Python's _warn_if_unfinished_handlers filters identically.
+            my @warnable = sort { $a->{kind} cmp $b->{kind}
+                                    || $a->{name} cmp $b->{name} }
+                grep { $_->{unfinished_policy} eq 'WARN_AND_ABANDON' }
+                values %in_progress_handlers;
+            if (@warnable) {
+                my $list = join ', ',
+                    map { "$_->{kind} '$_->{name}'" } @warnable;
                 warn "Temporalio::Workflow::Runner: workflow completed with "
-                   . "unfinished in-flight handler(s); their work is abandoned. "
-                   . "Use wait_condition on all_handlers_finished to wait for "
-                   . "them before returning from :Run.\n";
+                   . "unfinished in-flight handler(s): $list; their work is "
+                   . "abandoned. Use wait_condition on all_handlers_finished "
+                   . "to wait for them before returning from :Run, or declare "
+                   . "the handler with unfinished_policy=ABANDON to disable "
+                   . "this warning.\n";
             }
             # Success: the run method returned a value.
             my $result = ($main_run_future->result)[0];

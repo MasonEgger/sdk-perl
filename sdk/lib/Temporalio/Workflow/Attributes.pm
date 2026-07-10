@@ -13,10 +13,19 @@ use warnings;
 #   :Signal('foo')          -> ['foo']           (explicit name)
 #   :Signal(name=foo)       -> ['name=foo']      (kwargs name)
 #   :Signal(dynamic=1)      -> ['dynamic=1']     (dynamic handler — no name)
+#   :Signal('unfinished_policy=ABANDON')         (spec R87 — see below)
 #
 # Returns ($name, %opts). For a dynamic handler the name is undef (mirrors
 # sdk-python's `name is None` dynamic contract and sdk-ruby's "Cannot provide
 # name if dynamic is true"). Otherwise $name defaults to $method_name.
+#
+# unfinished_policy (spec R87; parity audit, in-workflow finding 5) is valid
+# on :Signal and :Update only — Python's query() takes no such parameter
+# because a query handler is synchronous and can never be left unfinished.
+# The value MUST be one of Python's HandlerUnfinishedPolicy names
+# (_handlers.py:36): WARN_AND_ABANDON (the default — warn at completion in
+# addition to abandoning) or ABANDON (abandon silently, the opt-out).
+my %_UNFINISHED_POLICIES = map { $_ => 1 } qw(WARN_AND_ABANDON ABANDON);
 sub parse_handler ($data, $method_name, $kind) {
     return ($method_name) if !defined $data;
 
@@ -35,6 +44,18 @@ sub parse_handler ($data, $method_name, $kind) {
             }
             elsif ($k eq 'dynamic') {
                 $opts{dynamic} = $v ? 1 : 0;
+            }
+            elsif ($k eq 'unfinished_policy' && $kind ne 'Query') {
+                # Spec R87: per-handler unfinished policy on :Signal/:Update.
+                # :Query falls through to the unknown-option rejection below.
+                if (!$_UNFINISHED_POLICIES{$v}) {
+                    require Temporalio::Exception::Argument;
+                    Temporalio::Exception::Argument->throw(
+                        message => "Invalid :$kind unfinished_policy '$v': "
+                                 . "must be WARN_AND_ABANDON or ABANDON",
+                    );
+                }
+                $opts{unfinished_policy} = $v;
             }
             else {
                 require Temporalio::Exception::Argument;
@@ -138,7 +159,9 @@ Temporalio::Workflow::Attributes - parse workflow attribute payloads
 Helper used by L<Temporalio::Workflow::Definition>'s attribute handlers to
 turn the C<Attribute::Handlers> C<$data> payload into a handler name plus
 options (spec section 10.1). Supports the bare, positional-name, and keyword
-(C<name=...>, C<dynamic=...>) forms for C<:Signal>/C<:Query>/C<:Update>, and
+(C<name=...>, C<dynamic=...>, and for C<:Signal>/C<:Update> only
+C<unfinished_policy=WARN_AND_ABANDON|ABANDON>, spec R87) forms for
+C<:Signal>/C<:Query>/C<:Update>, and
 the workflow-type resolution for C<:Run> (basename for a method named C<run>,
 the method name otherwise, or an explicit override).
 

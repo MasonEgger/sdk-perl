@@ -424,10 +424,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R86.4 Verify: runtime handler runs, buffered signal drains, getters work; prove -lj4 t green under memory guard (t: 184 files/818 tests PASS incl. live integration; xt: 424 PASS)
 
 ### Step R87: Honor Per-Handler HandlerUnfinishedPolicy
-- [ ] R87.1 RED: replay test: in-flight ABANDON update handler completes with no warning; default policy still warns; signal honors the option
-- [ ] R87.2 GREEN: parse unfinished_policy in Workflow/Attributes.pm; consult it at Workflow.pm:418-421, to _handlers.py:36 parity
-- [ ] R87.3 REFACTOR: thread policy through the handler descriptor; comment cites finding 5 + default-warn/opt-out
-- [ ] R87.4 Verify: ABANDON no warning, default warns, signal honors policy; prove -lj4 t green under memory guard
+- [x] R87.1 RED: replay test: in-flight ABANDON update handler completes with no warning; default policy still warns; signal honors the option (t/replay/handler_unfinished_policy.t, 5 subtests over new WfDef::AbandonHandlers/ReturningSignaler fixtures + the existing ReturningUpdater default control; honest RED as "Unknown :Update option 'unfinished_policy'")
+- [x] R87.2 GREEN: parse unfinished_policy in Workflow/Attributes.pm; consult it at the warn-and-complete site, to _handlers.py:36 parity (the audit's Workflow.pm:418-421 warn site now lives in Runner.pm's _build_completion; :Signal/:Update accept 'unfinished_policy=WARN_AND_ABANDON|ABANDON' — :Query rejects it like Python's query(); bad values rejected with the valid choices; Definition.pm records explicit policies in a sparse unfinished_policies registry bucket)
+- [x] R87.3 REFACTOR: thread policy through the handler descriptor; comment cites finding 5 + default-warn/opt-out (satisfied by construction: the R86 unified-table descriptors carry unfinished_policy — default WARN_AND_ABANDON at seed time — %in_progress_handlers entries became {future,kind,name,unfinished_policy} records mirroring Python's HandlerExecution, and the completion warning filters WARN_AND_ABANDON only and names the unfinished handlers; runtime set_*_handler installs get the default since Python's setters take no policy)
+- [x] R87.4 Verify: ABANDON no warning, default warns, signal honors policy; prove -lj4 t green under memory guard (t: 185 files/823 tests PASS incl. live integration; xt: 424 PASS)
 
 ### Step R88: Expose Last-Completion-Result and Last-Failure
 - [ ] R88.1 RED: replay test: seeded last-completion-result decodes via has_/get_last_completion_result; seeded last_failure types via get_last_failure; absent fields report false/undef
