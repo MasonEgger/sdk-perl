@@ -25,7 +25,9 @@ class Temporalio::Activity::Context {
     # activity_id, activity_type, attempt, current_attempt_scheduled_time,
     # heartbeat_timeout, heartbeat_details, schedule_to_close_timeout,
     # scheduled_time, start_to_close_timeout, started_time, task_queue,
-    # task_token, workflow_id, workflow_run_id, workflow_type, namespace.
+    # task_token, workflow_id, workflow_run_id, workflow_type, namespace,
+    # priority, retry_policy (spec R85; the latter two stay proto
+    # sub-messages, undef when the start job omits them).
     field $info :param;
 
     # A Temporalio::Cancellation that fires when the activity is cancelled
@@ -257,8 +259,12 @@ context with the package function L<Temporalio::Activity/context>.
 The frozen ActivityInfo hashref (C<activity_id>, C<activity_type>,
 C<attempt>, C<task_token>, C<task_queue>, C<workflow_id>,
 C<workflow_run_id>, C<workflow_type>, C<namespace>, the schedule/start
-times, and C<heartbeat_details>), mirroring the reference SDKs'
-C<Activity::Info>.
+times, C<heartbeat_details>, C<priority>, and C<retry_policy>), mirroring
+the reference SDKs' C<Activity::Info>. C<priority> and C<retry_policy>
+(spec R85) are the C<temporal.api.common.v1.Priority> /
+C<temporal.api.common.v1.RetryPolicy> proto sub-messages from the start
+job, or C<undef> when the server sent neither; their field names match
+sdk-python's C<Priority> and C<RetryPolicy> value types.
 
 =head2 heartbeat(@details)
 

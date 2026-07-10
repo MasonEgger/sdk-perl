@@ -412,10 +412,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R84.4 Verify: shutdown observed distinctly from cancel; prove -lj4 t green under memory guard (t: 182 files/812 tests PASS incl. live integration; xt: 424 PASS)
 
 ### Step R85: Complete Activity Info with priority and retry_policy
-- [ ] R85.1 RED: unit test: start job with retry_policy + priority surfaces both on activity Info; neither present yields empty without error
-- [ ] R85.2 GREEN: populate priority and retry_policy in Worker/ActivityDispatcher.pm:320-341, Python activity.py:130-136 naming
-- [ ] R85.3 REFACTOR: reuse existing priority/retry mappers; comment cites finding 5
-- [ ] R85.4 Verify: both fields surface when set and stay absent when omitted; prove -lj4 t green under memory guard
+- [x] R85.1 RED: unit test: start job with retry_policy + priority surfaces both on activity Info; neither present yields empty without error (t/unit/activity_info_priority_retry.t, 3 subtests, honest RED on both missing fields)
+- [x] R85.2 GREEN: populate priority and retry_policy in Worker/ActivityDispatcher.pm:320-341, Python activity.py:130-136 naming (_build_info passes both through as their proto sub-messages, undef when the start job omits them; proto field names already match Python's Priority/RetryPolicy)
+- [x] R85.3 REFACTOR: reuse existing priority/retry mappers; comment cites finding 5 (mappers NOT reusable: Common::Priority/Common::RetryPolicy are to_proto-only `feature class` objects, and Storable cannot freeze class objects across the sync-activity fork pool (proven by probe); the finding-5 comment in _build_info documents both facts; Context.pm info docs updated)
+- [x] R85.4 Verify: both fields surface when set and stay absent when omitted; prove -lj4 t green under memory guard (t: 183 files/815 tests PASS incl. live integration; xt: 424 PASS)
 
 ### Step R86: Support Runtime Signal, Query, and Update Handler Registration
 - [ ] R86.1 RED: replay test: runtime-set signal handler runs; a buffered pre-registration signal drains on registration; getters return installed handlers

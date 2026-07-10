@@ -437,6 +437,21 @@ class Temporalio::Worker::ActivityDispatcher {
             schedule_to_close_timeout      => $start->schedule_to_close_timeout,
             start_to_close_timeout         => $start->start_to_close_timeout,
             heartbeat_timeout              => $start->heartbeat_timeout,
+            # priority + retry_policy (spec R85, parity activity/conversion
+            # finding 5; Python activity.py:130-136 via worker/_activity.py
+            # Priority._from_proto / RetryPolicy.from_proto). They stay as
+            # their proto sub-messages like the timestamps/durations above --
+            # the proto field names already match Python's (priority_key,
+            # fairness_key, fairness_weight; initial_interval,
+            # backoff_coefficient, maximum_interval, maximum_attempts,
+            # non_retryable_error_types), and the Common::Priority /
+            # Common::RetryPolicy value classes are `feature class` objects
+            # that Storable cannot freeze (Invocation.pm ships this hashref
+            # across the sync-activity fork pool). undef when the job omits
+            # them (Python: retry_policy None without HasField; priority
+            # defaults to the all-None Priority).
+            priority     => $start->priority,
+            retry_policy => $start->retry_policy,
         };
     }
 }
