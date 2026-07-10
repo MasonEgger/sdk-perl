@@ -1359,4 +1359,36 @@ OperatorService RPC surface, e.g. search-attribute management (spec R91;
 Python C<_client.py:316-318> parity). Same raw-call semantics as
 L</workflow_service>.
 
+=head1 OMITTED LEGACY BUILD-ID APIS
+
+Three legacy build-id worker-versioning methods on Python's client are
+deliberately not ported (spec R97; parity audit client finding 5; the spec
+section 0 documented-surface-deviation allowance):
+
+=over 4
+
+=item * C<update_worker_build_id_compatibility> (Python C<client/_client.py:2770>)
+
+=item * C<get_worker_build_id_compatibility> (Python C<client/_client.py:2801>)
+
+=item * C<get_worker_task_reachability> (Python C<client/_client.py:2832>)
+
+=back
+
+All three carry C<.. deprecated::> markers in Python and are superseded by
+deployment-based worker versioning, which this SDK implements: configure the
+worker with L<Temporalio::Worker::DeploymentOptions> around a
+L<Temporalio::Worker::DeploymentVersion> (spec section 29.1), and pin or
+auto-upgrade an individual execution with a
+L<Temporalio::Common::VersioningOverride> passed as the
+C<versioning_override> option to L</start_workflow> or
+L</signal_with_start_workflow> (spec R37).
+
+Callers who still need the legacy RPCs against a server that supports them
+can reach them through the raw escape hatch: the L</workflow_service> handle
+generates its methods from the vendored proto service descriptor, which
+lists all three, so C<< $client->workflow_service
+->update_worker_build_id_compatibility($request) >> and its two siblings
+work there with the raw single-shot call semantics.
+
 =cut

@@ -484,7 +484,7 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R96.4 Verify: accessor yields documented fields, POD documents wiring; prove -lj4 t and xt green under memory guard (t: 196 files/856 tests PASS incl. live integration; xt: 451 PASS)
 
 ### Step R97: Document the Legacy Build-ID Worker-Versioning APIs as a Deliberate Deviation
-- [ ] R97.1 RED: xt POD check asserts Client.pm POD names the three omitted build-id APIs + deployment replacement (fails while absent); unit test asserts deployment-versioning path is green
-- [ ] R97.2 GREEN (doc-only): add the deliberate-deviation POD section to Client.pm naming the three RPCs and pointing to deployment versioning; do NOT implement them
-- [ ] R97.3 REFACTOR: cross-link the note to the deployment-versioning POD; comment cites finding 5 + spec §0 surface deviation
-- [ ] R97.4 Verify: POD names the three APIs + replacement, deployment-versioning test green, xt POD coverage green; prove -lj4 t green under memory guard
+- [x] R97.1 RED: xt POD check asserts Client.pm POD names the three omitted build-id APIs + deployment replacement (fails while absent); unit test asserts deployment-versioning path is green (xt/legacy_build_id_deviation.t honest RED: no POD section; t/unit/deployment_versioning_supported.t green: client omits all three, raw workflow_service reaches them, DeploymentVersion/Options + VersioningOverride exercised)
+- [x] R97.2 GREEN (doc-only): add the deliberate-deviation POD section to Client.pm naming the three RPCs and pointing to deployment versioning; do NOT implement them (=head1 OMITTED LEGACY BUILD-ID APIS: three RPCs with _client.py:2770/2801/2832 anchors, deployment replacement, raw escape-hatch note; no RPC implemented)
+- [x] R97.3 REFACTOR: cross-link the note to the deployment-versioning POD; comment cites finding 5 + spec §0 surface deviation (L<> links to DeploymentOptions/DeploymentVersion/VersioningOverride + reciprocal pointer from DeploymentOptions POD; note cites finding 5 and the spec section 0 allowance)
+- [x] R97.4 Verify: POD names the three APIs + replacement, deployment-versioning test green, xt POD coverage green; prove -lj4 t green under memory guard (t: 197 files/859 tests PASS incl. live integration; xt: 462 PASS)

@@ -88,6 +88,11 @@ a C<default_versioning_behavior> string (C<unspecified>, C<pinned>, or
 C<auto_upgrade>) mapped to the proto C<VersioningBehavior> enum. A
 non-C<unspecified> behavior requires C<use_worker_versioning> to be on.
 
+This is the supported replacement for the deprecated legacy build-id
+compatibility APIs, which the client deliberately does not port (spec R97,
+parity audit client finding 5); see "OMITTED LEGACY BUILD-ID APIS" in
+L<Temporalio::Client>.
+
 =head1 METHODS
 
 =head2 version
