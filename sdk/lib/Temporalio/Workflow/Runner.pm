@@ -375,6 +375,22 @@ class Temporalio::Workflow::Runner {
     # (_workflow_instance.py activate() set 1), so the drain sorts by stamp.
     field $buffered_signal_arrival = 0;
 
+    # Unified handler tables (spec R86; parity audit, in-workflow finding 4):
+    # ONE lookup path serves both the compile-time :Signal/:Query/:Update
+    # attribute registry and the runtime set_*_handler surface, mirroring
+    # sdk-python, whose instance copies the definition-time tables into
+    # per-instance dicts (self._signals = dict(defn.signals)) that
+    # workflow_set_*_handler then mutates (_workflow_instance.py:1377-1447).
+    # Seeded lazily by _handlers from $workflow_class->_workflow_defs; every
+    # entry is a descriptor { code => $ref, is_method => $bool }: an attribute
+    # handler is a METHOD on the instance ($instance->$code(@args)); a runtime
+    # handler is a plain coderef closing over the body's lexicals
+    # ($code->(@args)), matching Python's is_method=False runtime definitions.
+    # Shape mirrors _workflow_defs: {signals}{$name}, {queries}{$name},
+    # {updates}{$name}, {validators}{$name}, and {dynamic}{signal|query|update}
+    # for the per-kind catch-alls (Python keys its dicts on None for dynamic).
+    field $handler_tables;
+
     # In-progress signal-handler Futures (spec section 10.3 ASYNC HANDLER
     # TRACKING; MUST-match sdk-python self._in_progress_signals): a hash keyed by
     # a monotonic handler id -> the handler's Future. An async :Signal handler
@@ -3044,25 +3060,28 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
-    # Resolve a signal handler by name (spec section 10.3): the named :Signal
-    # handler if one matches, else the dynamic catch-all if registered. Returns
-    # ($methodref, $is_dynamic) or (undef) when neither exists. MUST-match
-    # sdk-python's `self._signals.get(name) or self._signals.get(None)`.
+    # Resolve a signal handler by name (spec section 10.3): the named handler
+    # if one matches, else the dynamic catch-all if registered — read from the
+    # unified tables (spec R86), so attribute handlers and runtime-set handlers
+    # resolve through the SAME path. Returns ($descriptor, $is_dynamic) or
+    # (undef) when neither exists. MUST-match sdk-python's
+    # `self._signals.get(name) or self._signals.get(None)`.
     method _resolve_signal_handler ($name) {
-        my $defs = $workflow_class->_workflow_defs;
-        if (my $named = $defs->{signals}{$name}) {
+        my $h = $self->_handlers;
+        if (my $named = $h->{signals}{$name}) {
             return ($named, 0);
         }
-        if (my $dynamic = $defs->{dynamic}{signal}) {
+        if (my $dynamic = $h->{dynamic}{signal}) {
             return ($dynamic, 1);
         }
         return (undef);
     }
 
     # Invoke a resolved signal handler (spec section 10.3 ASYNC HANDLER
-    # TRACKING). Named handlers are called with the decoded args; a dynamic
-    # handler is called with ($name, @args) (mirrors sdk-python's dynamic signal
-    # (name, args)). The handler may be sync OR async, so run it through
+    # TRACKING). $handler is a unified-table descriptor (spec R86). Named
+    # handlers are called with the decoded args; a dynamic handler is called
+    # with ($name, @args) (mirrors sdk-python's dynamic signal (name, args)).
+    # The handler may be sync OR async, so run it through
     # Future->call(sub { Future->wrap(...) }) — Future->wrap passes a returned
     # Future through and normalises a plain return into a done Future, while
     # Future->call routes a synchronous die into a failed Future. The resulting
@@ -3082,9 +3101,10 @@ class Temporalio::Workflow::Runner {
                     signal => $name,
                     args   => [@args],
                     _root  => sub ($in) {
-                        return $is_dynamic
-                            ? $instance->$handler($name, @{ $in->args })
-                            : $instance->$handler(@{ $in->args });
+                        return $self->_invoke_handler($handler,
+                            $is_dynamic
+                                ? ($name, @{ $in->args })
+                                : @{ $in->args });
                     },
                 );
             return Future->wrap($workflow_inbound->handle_signal($input));
@@ -3135,6 +3155,171 @@ class Temporalio::Workflow::Runner {
     # introspection helper — sorted for a stable view.
     method _buffered_signal_names { return [ sort keys %buffered_signals ] }
 
+    # The unified handler tables (spec R86; parity audit, in-workflow finding
+    # 4), seeded on first access from the compile-time attribute registry so
+    # every later lookup — attribute-declared or runtime-set — goes through
+    # ONE path. Mirrors sdk-python's per-instance copy of the definition
+    # tables (self._signals = dict(defn.signals) et al.), which its runtime
+    # setters then mutate.
+    method _handlers {
+        return $handler_tables //= do {
+            my $defs = $workflow_class->_workflow_defs;
+            my $wrap = sub ($bucket) {
+                return { map { $_ => { code => $bucket->{$_}, is_method => 1 } }
+                    keys %$bucket };
+            };
+            {
+                signals    => $wrap->($defs->{signals}),
+                queries    => $wrap->($defs->{queries}),
+                updates    => $wrap->($defs->{updates}),
+                validators => $wrap->($defs->{validators}),
+                dynamic    => $wrap->($defs->{dynamic}),
+            };
+        };
+    }
+
+    # Invoke a unified-table handler descriptor (spec R86): an attribute
+    # handler is a METHOD on the live instance; a runtime handler is a plain
+    # coderef (Python's is_method=False) called without the instance — it
+    # closes over the workflow body's lexicals instead. The single call seam
+    # every dispatch path (signal, query, update, validator) routes through.
+    method _invoke_handler ($desc, @args) {
+        my $code = $desc->{code};
+        return $desc->{is_method} ? $instance->$code(@args) : $code->(@args);
+    }
+
+    # The user-facing view of a table entry: a runtime handler returns the
+    # EXACT coderef that was installed; an attribute handler returns a closure
+    # bound to the live instance — the analog of sdk-python's
+    # defn.bind_fn(self._object) in its workflow_get_*_handler methods.
+    method _handler_code ($desc) {
+        return undef unless defined $desc;
+        my $code = $desc->{code};
+        return $code unless $desc->{is_method};
+        return sub { return $instance->$code(@_) };
+    }
+
+    # workflow_get_signal_handler($name) — the installed handler for EXACTLY
+    # $name (undef $name reads the dynamic slot). No named->dynamic fallback:
+    # Python's docstring — "this will not return the dynamic handler even if
+    # there is one" (_workflow_ops.py:833-845).
+    method workflow_get_signal_handler ($name) {
+        my $h = $self->_handlers;
+        return $self->_handler_code(
+            defined $name ? $h->{signals}{$name} : $h->{dynamic}{signal});
+    }
+
+    method workflow_get_query_handler ($name) {
+        my $h = $self->_handlers;
+        return $self->_handler_code(
+            defined $name ? $h->{queries}{$name} : $h->{dynamic}{query});
+    }
+
+    method workflow_get_update_handler ($name) {
+        my $h = $self->_handlers;
+        return $self->_handler_code(
+            defined $name ? $h->{updates}{$name} : $h->{dynamic}{update});
+    }
+
+    # workflow_set_signal_handler($name, $handler) — install/replace ($handler
+    # defined) or remove ($handler undef) the signal handler for $name; undef
+    # $name targets the dynamic catch-all (spec R86; MUST-match sdk-python
+    # workflow_set_signal_handler, _workflow_instance.py:1401-1426). A runtime
+    # install OVERRIDES an attribute handler of the same name, and immediately
+    # drains matching buffered signals — the buffered-drain contract: "all
+    # unhandled past signals for the given name are immediately sent to the
+    # handler". A named install drains that name's queue (already in arrival
+    # order); a dynamic install drains EVERY buffered signal, sorted by
+    # arrival stamp so cross-name order is preserved (the _drain_buffered_signals
+    # rationale). Read-only contexts (query handlers, update validators) may
+    # not mutate the tables (Python _assert_not_read_only parity).
+    method workflow_set_signal_handler ($name, $handler) {
+        $self->_assert_writable('set signal handler');
+        my $h = $self->_handlers;
+        if (!defined $handler) {
+            if (defined $name) { delete $h->{signals}{$name} }
+            else               { delete $h->{dynamic}{signal} }
+            return;
+        }
+        my $desc = { code => $handler, is_method => 0 };
+        my @drain;
+        if (defined $name) {
+            $h->{signals}{$name} = $desc;
+            @drain = (delete $buffered_signals{$name} // [])->@*;
+        }
+        else {
+            $h->{dynamic}{signal} = $desc;
+            @drain = sort { $a->[0] <=> $b->[0] }
+                map { $_->@* } values %buffered_signals;
+            %buffered_signals = ();
+        }
+        $self->_dispatch_signal($desc, (defined $name ? 0 : 1), $_->[1])
+            for @drain;
+        return;
+    }
+
+    # workflow_set_query_handler($name, $handler) — install/replace/remove a
+    # query handler; undef $name targets the dynamic catch-all (spec R86;
+    # MUST-match sdk-python workflow_set_query_handler,
+    # _workflow_instance.py:1377-1399). Queries are never buffered, so there
+    # is nothing to drain.
+    method workflow_set_query_handler ($name, $handler) {
+        $self->_assert_writable('set query handler');
+        my $h = $self->_handlers;
+        if (defined $handler) {
+            my $desc = { code => $handler, is_method => 0 };
+            if (defined $name) { $h->{queries}{$name} = $desc }
+            else               { $h->{dynamic}{query} = $desc }
+        }
+        else {
+            if (defined $name) { delete $h->{queries}{$name} }
+            else               { delete $h->{dynamic}{query} }
+        }
+        return;
+    }
+
+    # workflow_set_update_handler($name, $handler, $validator) — install/
+    # replace/remove an update handler; undef $name targets the dynamic
+    # catch-all (spec R86; MUST-match sdk-python workflow_set_update_handler,
+    # _workflow_instance.py:1428-1447). The new definition REPLACES the old
+    # wholesale (Python builds a fresh _UpdateDefinition), so an omitted
+    # validator removes any previous one for that name and removing the
+    # handler drops its validator too. Only a NAMED update carries a validator
+    # here: _apply_do_update never validates a dynamic handler (its documented
+    # step 3), so a validator passed with a dynamic install is ignored.
+    # Updates buffer only for a missing instance, never for a missing handler,
+    # so there is nothing to drain.
+    method workflow_set_update_handler ($name, $handler, $validator = undef) {
+        $self->_assert_writable('set update handler');
+        my $h = $self->_handlers;
+        if (defined $handler) {
+            my $desc = { code => $handler, is_method => 0 };
+            if (defined $name) {
+                $h->{updates}{$name} = $desc;
+                if (defined $validator) {
+                    $h->{validators}{$name} =
+                        { code => $validator, is_method => 0 };
+                }
+                else {
+                    delete $h->{validators}{$name};
+                }
+            }
+            else {
+                $h->{dynamic}{update} = $desc;
+            }
+        }
+        else {
+            if (defined $name) {
+                delete $h->{updates}{$name};
+                delete $h->{validators}{$name};
+            }
+            else {
+                delete $h->{dynamic}{update};
+            }
+        }
+        return;
+    }
+
     # DoUpdate { id, protocol_instance_id, name, input, run_validator } — run an
     # update handler (spec section 19.2; MUST-match sdk-python _apply_do_update).
     # An update is a TWO-PHASE job: a synchronous read-only validation phase then
@@ -3143,7 +3328,8 @@ class Temporalio::Workflow::Runner {
     #   1. No instance yet (the handler is a METHOD): buffer for the post-init
     #      drain (mirrors a pre-instance signal, but updates never buffer for a
     #      missing handler — only for a missing instance).
-    #   2. Lookup defs->{updates}{name} then defs->{dynamic}{update}. No handler
+    #   2. Lookup the unified tables (spec R86): the named handler, then the
+    #      dynamic catch-all — attribute-declared or runtime-set. No handler
     #      on a live instance -> immediate UpdateResponse.rejected (no buffering).
     #   3. Validation (sync, read-only): only when run_validator AND a validator
     #      is registered. Run it under the read-only guard. A throw -> a single
@@ -3168,8 +3354,9 @@ class Temporalio::Workflow::Runner {
         if (!defined $handler) {
             # Unknown name, no dynamic handler -> immediate rejection (NOT
             # buffered indefinitely, unlike signals — spec section 19.2 step 2).
-            my $known = join ' ',
-                sort keys $workflow_class->_workflow_defs->{updates}->%*;
+            # Known names come from the unified tables (spec R86), so
+            # runtime-registered updates are listed too.
+            my $known = join ' ', sort keys $self->_handlers->{updates}->%*;
             my $err = Temporalio::Exception->new(
                 message => "Update handler for '$name' expected but not found, "
                          . "and there is no dynamic handler. known updates: "
@@ -3190,7 +3377,7 @@ class Temporalio::Workflow::Runner {
         # job asks (run_validator is false on replay). A dynamic handler is never
         # validated (there is no dynamic validator).
         if ($job->run_validator && !$is_dynamic) {
-            my $validator = $workflow_class->_workflow_defs->{validators}{$name};
+            my $validator = $self->_handlers->{validators}{$name};
             if (defined $validator) {
                 my $result = $self->_run_update_validator($validator, \@args);
                 # A read-only-context violation is a workflow TASK failure: the
@@ -3224,9 +3411,10 @@ class Temporalio::Workflow::Runner {
                     update => $name,
                     args   => [@args],
                     _root  => sub ($in) {
-                        return $is_dynamic
-                            ? $instance->$handler($name, @{ $in->args })
-                            : $instance->$handler(@{ $in->args });
+                        return $self->_invoke_handler($handler,
+                            $is_dynamic
+                                ? ($name, @{ $in->args })
+                                : @{ $in->args });
                     },
                 );
             return Future->wrap($workflow_inbound->handle_update($input));
@@ -3252,16 +3440,18 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
-    # Resolve an update handler by name (spec section 19.2): the named :Update
-    # handler if one matches, else the dynamic catch-all if registered. Returns
-    # ($methodref, $is_dynamic) or (undef). MUST-match sdk-python
+    # Resolve an update handler by name (spec section 19.2): the named handler
+    # if one matches, else the dynamic catch-all if registered — read from the
+    # unified tables (spec R86), so attribute handlers and runtime-set handlers
+    # resolve through the SAME path. Returns ($descriptor, $is_dynamic) or
+    # (undef). MUST-match sdk-python
     # `self._updates.get(name) or self._updates.get(None)`.
     method _resolve_update_handler ($name) {
-        my $defs = $workflow_class->_workflow_defs;
-        if (my $named = $defs->{updates}{$name}) {
+        my $h = $self->_handlers;
+        if (my $named = $h->{updates}{$name}) {
             return ($named, 0);
         }
-        if (my $dynamic = $defs->{dynamic}{update}) {
+        if (my $dynamic = $h->{dynamic}{update}) {
             return ($dynamic, 1);
         }
         return (undef);
@@ -3293,7 +3483,7 @@ class Temporalio::Workflow::Runner {
         my $commands_before = scalar @commands;
         my $future = Future->call(sub {
             dynamically $read_only_depth = $read_only_depth + 1;
-            return Future->wrap($instance->$validator(@$args));
+            return Future->wrap($self->_invoke_handler($validator, @$args));
         });
         # Leak backstop (step R24 REFACTOR, finding R8; mirrors
         # _apply_query_workflow): commands buffered by an unguarded API inside
@@ -3424,7 +3614,9 @@ class Temporalio::Workflow::Runner {
 
         my ($handler, $is_dynamic) = $self->_resolve_query_handler($name);
         if (!defined $handler) {
-            my $known = join ' ', sort keys $workflow_class->_workflow_defs->{queries}->%*;
+            # Known names come from the unified tables (spec R86), so
+            # runtime-registered queries are listed too.
+            my $known = join ' ', sort keys $self->_handlers->{queries}->%*;
             my $err = Temporalio::Exception->new(
                 message => "Query handler for '$name' expected but not found, "
                          . "known queries: [$known]",
@@ -3466,9 +3658,10 @@ class Temporalio::Workflow::Runner {
                     query => $name,
                     args  => [@args],
                     _root => sub ($in) {
-                        return $is_dynamic
-                            ? $instance->$handler($name, @{ $in->args })
-                            : $instance->$handler(@{ $in->args });
+                        return $self->_invoke_handler($handler,
+                            $is_dynamic
+                                ? ($name, @{ $in->args })
+                                : @{ $in->args });
                     },
                 );
             return Future->wrap($workflow_inbound->handle_query($input));
@@ -3525,16 +3718,18 @@ class Temporalio::Workflow::Runner {
         return;
     }
 
-    # Resolve a query handler by name (spec section 10.3): the named :Query
-    # handler if one matches, else the dynamic catch-all if registered. Returns
-    # ($methodref, $is_dynamic) or (undef) when neither exists. MUST-match
-    # sdk-python's `self._queries.get(name) or self._queries.get(None)`.
+    # Resolve a query handler by name (spec section 10.3): the named handler
+    # if one matches, else the dynamic catch-all if registered — read from the
+    # unified tables (spec R86), so attribute handlers and runtime-set handlers
+    # resolve through the SAME path. Returns ($descriptor, $is_dynamic) or
+    # (undef) when neither exists. MUST-match sdk-python's
+    # `self._queries.get(name) or self._queries.get(None)`.
     method _resolve_query_handler ($name) {
-        my $defs = $workflow_class->_workflow_defs;
-        if (my $named = $defs->{queries}{$name}) {
+        my $h = $self->_handlers;
+        if (my $named = $h->{queries}{$name}) {
             return ($named, 0);
         }
-        if (my $dynamic = $defs->{dynamic}{query}) {
+        if (my $dynamic = $h->{dynamic}{query}) {
             return ($dynamic, 1);
         }
         return (undef);
@@ -4640,5 +4835,33 @@ An optional C<timeout> races it against a timer; C<timeout_summary> labels that 
 =head2 workflow_type
 
 Returns the workflow type name of the execution.
+
+=head2 workflow_set_signal_handler
+
+Installs, replaces, or (with an undef handler) removes the signal handler for the given name in the unified handler tables; an undef name targets the dynamic catch-all (spec R86).
+Installing a named handler drains that name's buffered signals immediately; installing the dynamic handler drains every buffered signal in arrival-stamp order.
+Raises L<Temporalio::Exception::ReadOnly> in a read-only context.
+Backs C<Temporalio::Workflow::set_signal_handler> / C<set_dynamic_signal_handler>.
+
+=head2 workflow_get_signal_handler
+
+Returns the handler installed for exactly the given signal name (undef name reads the dynamic slot), with no named-to-dynamic fallback: the exact coderef for a runtime handler, an instance-bound closure for a C<:Signal> attribute handler, or undef.
+
+=head2 workflow_set_query_handler
+
+Installs, replaces, or removes the query handler for the given name (undef name targets the dynamic catch-all, spec R86). Queries are never buffered, so nothing drains.
+
+=head2 workflow_get_query_handler
+
+Returns the handler installed for exactly the given query name (undef name reads the dynamic slot), or undef; no dynamic fallback.
+
+=head2 workflow_set_update_handler
+
+Installs, replaces, or removes the update handler (and its optional validator) for the given name; an undef name targets the dynamic catch-all (spec R86).
+The new definition replaces the old wholesale, so an omitted validator removes any previous one and removing the handler drops its validator too.
+
+=head2 workflow_get_update_handler
+
+Returns the handler installed for exactly the given update name (undef name reads the dynamic slot), or undef; no dynamic fallback.
 
 =cut

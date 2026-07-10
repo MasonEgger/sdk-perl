@@ -418,10 +418,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R85.4 Verify: both fields surface when set and stay absent when omitted; prove -lj4 t green under memory guard (t: 183 files/815 tests PASS incl. live integration; xt: 424 PASS)
 
 ### Step R86: Support Runtime Signal, Query, and Update Handler Registration
-- [ ] R86.1 RED: replay test: runtime-set signal handler runs; a buffered pre-registration signal drains on registration; getters return installed handlers
-- [ ] R86.2 GREEN: add set_*_handler/get_*_handler to Workflow.pm/Workflow/Runner.pm with buffered-drain, to _workflow_ops.py:833-985 parity
-- [ ] R86.3 REFACTOR: unify compile-time and runtime handler tables behind one lookup; comment cites finding 4 + buffered drain
-- [ ] R86.4 Verify: runtime handler runs, buffered signal drains, getters work; prove -lj4 t green under memory guard
+- [x] R86.1 RED: replay test: runtime-set signal handler runs; a buffered pre-registration signal drains on registration; getters return installed handlers (t/replay/runtime_handler_registration.t, 3 subtests over new WfDef::RuntimeHandlerRegistrar/RuntimeDynamicRegistrar/RuntimeHandlerGetters fixtures; honest RED as "Can't locate class method set_signal_handler")
+- [x] R86.2 GREEN: add set_*_handler/get_*_handler to Workflow.pm/Workflow/Runner.pm with buffered-drain, to _workflow_ops.py:833-985 parity (all 12 Python functions incl. the dynamic variants, callable as package fns or class methods; named signal install drains that name's buffer, dynamic install drains ALL by arrival stamp; setters _assert_writable; update setter carries the validator kwarg and replaces wholesale like Python's fresh _UpdateDefinition)
+- [x] R86.3 REFACTOR: unify compile-time and runtime handler tables behind one lookup; comment cites finding 4 + buffered drain (Runner's _handlers seeds per-instance descriptor tables {code,is_method} from _workflow_defs — Python's self._signals = dict(defn.signals) — and every resolver/dispatcher/known-names/validator site reads them via _invoke_handler/_handler_code; getters bind attribute methods to the instance like Python's bind_fn)
+- [x] R86.4 Verify: runtime handler runs, buffered signal drains, getters work; prove -lj4 t green under memory guard (t: 184 files/818 tests PASS incl. live integration; xt: 424 PASS)
 
 ### Step R87: Honor Per-Handler HandlerUnfinishedPolicy
 - [ ] R87.1 RED: replay test: in-flight ABANDON update handler completes with no warning; default policy still warns; signal honors the option

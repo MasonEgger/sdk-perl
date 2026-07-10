@@ -342,6 +342,98 @@ sub all_handlers_finished {
     return _runner()->_all_handlers_finished;
 }
 
+# --- runtime handler registration (spec R86) ---------------------------------
+
+# The runtime set_*_handler / get_*_handler surface (spec R86; parity audit,
+# in-workflow finding 4; MUST-match sdk-python workflow/_workflow_ops.py:833-985).
+# Each setter installs, replaces, or (with an undef handler) removes a handler
+# on the RUNNING instance, overriding any :Signal/:Query/:Update attribute
+# handler of the same name; installing a signal handler immediately drains any
+# buffered signals it now covers. Getters return the handler installed for
+# EXACTLY that name (never the dynamic catch-all): the exact coderef for a
+# runtime handler, an instance-bound closure for an attribute handler. All
+# twelve are callable as package functions or as class methods
+# (Temporalio::Workflow->set_signal_handler(...)); each drops a leading class
+# argument, so no signatures here. Outside a workflow body -> NoRunner; a
+# setter inside a read-only context (query handler, update validator) raises
+# Temporalio::Exception::ReadOnly.
+
+sub set_signal_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($name, $handler) = @_;
+    return _runner()->workflow_set_signal_handler($name, $handler);
+}
+
+sub get_signal_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($name) = @_;
+    return _runner()->workflow_get_signal_handler($name);
+}
+
+sub set_dynamic_signal_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($handler) = @_;
+    return _runner()->workflow_set_signal_handler(undef, $handler);
+}
+
+sub get_dynamic_signal_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    return _runner()->workflow_get_signal_handler(undef);
+}
+
+sub set_query_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($name, $handler) = @_;
+    return _runner()->workflow_set_query_handler($name, $handler);
+}
+
+sub get_query_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($name) = @_;
+    return _runner()->workflow_get_query_handler($name);
+}
+
+sub set_dynamic_query_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($handler) = @_;
+    return _runner()->workflow_set_query_handler(undef, $handler);
+}
+
+sub get_dynamic_query_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    return _runner()->workflow_get_query_handler(undef);
+}
+
+# set_update_handler($name, $handler, validator => $code) — the optional
+# validator mirrors Python's keyword-only validator argument; it runs
+# synchronously in a read-only context before acceptance. Omitting it removes
+# any previous validator for the name (the new definition replaces the old
+# wholesale, as Python's does).
+sub set_update_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($name, $handler, %opts) = @_;
+    return _runner()->workflow_set_update_handler(
+        $name, $handler, $opts{validator});
+}
+
+sub get_update_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($name) = @_;
+    return _runner()->workflow_get_update_handler($name);
+}
+
+sub set_dynamic_update_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($handler, %opts) = @_;
+    return _runner()->workflow_set_update_handler(
+        undef, $handler, $opts{validator});
+}
+
+sub get_dynamic_update_handler {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    return _runner()->workflow_get_update_handler(undef);
+}
+
 # --- upsert search attributes & memo (spec section 24) ----------------------
 
 # upsert_search_attributes(@updates) -> emit UpsertWorkflowSearchAttributes (spec
@@ -615,6 +707,89 @@ including changes applied by C<upsert_search_attributes> (spec R54; the same
 view Python keeps in sync on C<workflow.info()>). Seeded from the start-time
 search attributes on the initializing activation. A fresh copy per call.
 Raises L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
+
+=head2 set_signal_handler
+
+    Temporalio::Workflow->set_signal_handler('mySignal', sub (@args) { ... });
+    Temporalio::Workflow->set_signal_handler('mySignal', undef);   # unset
+
+Installs, replaces, or (with C<undef>) removes the signal handler for the
+given name on the running instance (spec R86; matches Python's
+C<workflow.set_signal_handler>). Overrides a C<:Signal> attribute handler of
+the same name. On install, all buffered past signals for the name are
+immediately sent to the new handler, in arrival order. The handler is a plain
+coderef called with the decoded signal arguments (no instance argument); it
+may be sync or async. Raises L<Temporalio::Exception::Workflow::NoRunner>
+outside a workflow body and L<Temporalio::Exception::ReadOnly> inside a query
+handler or update validator.
+
+=head2 get_signal_handler
+
+Returns the handler installed for exactly the given signal name, or C<undef>:
+the exact coderef for a runtime-set handler, an instance-bound closure for a
+C<:Signal> attribute handler. Never falls back to the dynamic handler
+(matches Python's C<workflow.get_signal_handler>).
+
+=head2 set_dynamic_signal_handler
+
+Installs, replaces, or removes the dynamic (catch-all) signal handler. The
+handler is called with C<($name, @args)>. On install, ALL buffered past
+signals are immediately sent to it, in arrival order (matches Python's
+C<workflow.set_dynamic_signal_handler>).
+
+=head2 get_dynamic_signal_handler
+
+Returns the installed dynamic signal handler, or C<undef>.
+
+=head2 set_query_handler
+
+Installs, replaces, or removes the query handler for the given name (spec
+R86; matches Python's C<workflow.set_query_handler>). Overrides a C<:Query>
+attribute handler of the same name. The handler runs in a read-only context,
+like any query handler.
+
+=head2 get_query_handler
+
+Returns the handler installed for exactly the given query name, or C<undef>
+(no dynamic fallback).
+
+=head2 set_dynamic_query_handler
+
+Installs, replaces, or removes the dynamic (catch-all) query handler, called
+with C<($name, @args)>.
+
+=head2 get_dynamic_query_handler
+
+Returns the installed dynamic query handler, or C<undef>.
+
+=head2 set_update_handler
+
+    Temporalio::Workflow->set_update_handler('myUpdate', sub ($arg) { ... },
+        validator => sub ($arg) { die "bad\n" unless ok($arg) });
+
+Installs, replaces, or removes the update handler for the given name (spec
+R86; matches Python's C<workflow.set_update_handler>). Overrides an
+C<:Update> attribute handler of the same name. The optional C<validator> runs
+synchronously in a read-only context before acceptance; omitting it removes
+any previous validator for the name, and removing the handler removes its
+validator too (the new definition replaces the old wholesale, as Python's
+does).
+
+=head2 get_update_handler
+
+Returns the handler installed for exactly the given update name, or C<undef>
+(no dynamic fallback).
+
+=head2 set_dynamic_update_handler
+
+Installs, replaces, or removes the dynamic (catch-all) update handler, called
+with C<($name, @args)>. A C<validator> option is accepted for signature parity
+with Python but is not consulted: the runner never validates a dynamic update
+(there is no dynamic validator in this SDK's update dispatch).
+
+=head2 get_dynamic_update_handler
+
+Returns the installed dynamic update handler, or C<undef>.
 
 =head2 sleep
 
