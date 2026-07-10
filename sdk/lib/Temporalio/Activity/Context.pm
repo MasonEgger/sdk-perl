@@ -106,6 +106,29 @@ class Temporalio::Activity::Context {
     # The lazily-wrapped context meter (see metric_meter below).
     field $context_metric_meter;
 
+    # The lazily-built logging-detail hash (see log_details below).
+    field $log_details;
+
+    # log_details() -> a hashref of the contextual fields worth attaching to
+    # every log line an activity body emits (spec R96, parity
+    # activity/conversion finding 6): the exact set Python's activity
+    # LoggerAdapter embeds via Info._logger_details (activity.py:148-159,
+    # surfaced through the adapter at activity.py:479-537). Built ONCE from
+    # the existing frozen Info on first access and cached, mirroring
+    # _Context.logger_details (activity.py:229-232). The resolved direction
+    # for finding 6: Perl has no single standard logging framework, so the
+    # SDK exposes the details and documents the caller-logger wiring pattern
+    # in POD instead of mandating (or depending on) a logging framework.
+    method log_details {
+        return $log_details //= do {
+            my $current = $self->info;
+            +{ map { $_ => $current->{$_} } qw(
+                activity_id activity_type attempt namespace task_queue
+                workflow_id workflow_run_id workflow_type
+            ) };
+        };
+    }
+
     # metric_meter() -> the activity metric meter (spec R83): the runtime
     # meter carrying the namespace/task_queue/activity_type attribute set,
     # built lazily on first access (Python parity: activity.py:247,461-472).
@@ -265,6 +288,39 @@ the reference SDKs' C<Activity::Info>. C<priority> and C<retry_policy>
 C<temporal.api.common.v1.RetryPolicy> proto sub-messages from the start
 job, or C<undef> when the server sent neither; their field names match
 sdk-python's C<Priority> and C<RetryPolicy> value types.
+
+=head2 log_details
+
+A hashref of the contextual fields worth attaching to every log line the
+activity body emits: C<activity_id>, C<activity_type>, C<attempt>,
+C<namespace>, C<task_queue>, C<workflow_id>, C<workflow_run_id>, and
+C<workflow_type> (spec R96). This is the exact field set sdk-python's
+C<activity.LoggerAdapter> embeds in each message (activity.py:479-537).
+Built once from L</info> on first access and cached for the invocation, so
+it reflects the current attempt.
+
+The SDK does not mandate or depend on a logging framework; Perl has no
+single standard one. Wire the details into whatever logger the application
+already uses. With L<Log::Any>, either pass them per message:
+
+    use Log::Any qw($log);
+
+    async sub my_activity (@args) {
+        my $ctx = Temporalio::Activity::context();
+        $log->info('processing started', $ctx->log_details);
+        ...
+    }
+
+or bind them once through Log::Any's context hash so every line in the
+body carries them:
+
+    my $details = Temporalio::Activity::context()->log_details;
+    $log->context->{$_} = $details->{$_} for keys %$details;
+    $log->info('processing started');   # carries the activity fields
+
+The same hashref works as the structured-fields argument of any logger
+that accepts key/value context (Log::Contextual, Mojo::Log context, a
+plain C<sprintf> over the pairs).
 
 =head2 heartbeat(@details)
 

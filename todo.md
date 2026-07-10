@@ -478,10 +478,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R95.4 Verify: batch per-history results, mutated fails Nondeterminism (core: "Timer fired event did not have expected timer id 1, it was 2!"), from_json round-trips byte-identically; prove -lj4 t green under memory guard (t: 195 files/853 tests PASS incl. live integration; xt: 439 PASS)
 
 ### Step R96: Add an Activity Context-Aware Logger
-- [ ] R96.1 RED: unit test: log_details yields the documented field set (activity id/type, attempt, namespace, task queue, workflow ids); xt POD check requires the wiring-pattern note (fails until present)
-- [ ] R96.2 GREEN: expose the logging-detail accessor on Activity/Context.pm (no logging dependency) + POD documenting the caller-logger pattern, to activity.py:479-537 field parity
-- [ ] R96.3 REFACTOR: build the detail hash once from Info; comment cites finding 6 + no-mandated-framework resolution
-- [ ] R96.4 Verify: accessor yields documented fields, POD documents wiring; prove -lj4 t and xt green under memory guard
+- [x] R96.1 RED: unit test: log_details yields the documented field set (activity id/type, attempt, namespace, task queue, workflow ids); xt POD check requires the wiring-pattern note (fails until present) (t/unit/activity_log_details.t + xt/activity_log_details_pod.t; honest RED: no log_details method, no POD section)
+- [x] R96.2 GREEN: expose the logging-detail accessor on Activity/Context.pm (no logging dependency) + POD documenting the caller-logger pattern, to activity.py:479-537 field parity (8-key hashref matching Info._logger_details activity.py:148-159 incl. workflow_type; Log::Any per-message and context-hash wiring examples)
+- [x] R96.3 REFACTOR: build the detail hash once from Info; comment cites finding 6 + no-mandated-framework resolution (field-cached //= do over $self->info, mirroring _Context.logger_details activity.py:229-232)
+- [x] R96.4 Verify: accessor yields documented fields, POD documents wiring; prove -lj4 t and xt green under memory guard (t: 196 files/856 tests PASS incl. live integration; xt: 451 PASS)
 
 ### Step R97: Document the Legacy Build-ID Worker-Versioning APIs as a Deliberate Deviation
 - [ ] R97.1 RED: xt POD check asserts Client.pm POD names the three omitted build-id APIs + deployment replacement (fails while absent); unit test asserts deployment-versioning path is green
