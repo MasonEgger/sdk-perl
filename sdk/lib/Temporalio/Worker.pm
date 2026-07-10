@@ -127,6 +127,9 @@ class Temporalio::Worker {
     field $workflow_registry;
     field $nexus_registry;
     field $activity_pool;    # Temporalio::Activity::Pool, built lazily in run
+    # The ActivityDispatcher run() built, kept so _initiate_shutdown_once can
+    # notify_shutdown running activities at shutdown-begin (spec R84).
+    field $activity_dispatcher;
     field $worker_ptr;       # TemporalCoreWorker*, NULL until _ensure_worker
     field $worker_keep;      # @keep pinning the packed options buffer
     field $is_shutdown = 0;
@@ -553,7 +556,7 @@ class Temporalio::Worker {
         $is_running = 1;
 
         my $runtime           = $self->_runtime;
-        my $activity_dispatcher = $self->_build_activity_dispatcher;
+        $activity_dispatcher  = $self->_build_activity_dispatcher;
         my $activity_loop     = Temporalio::Worker::PollLoop->new(
             dispatcher  => $activity_dispatcher,
             poll_source => sub { return $self->_poll_activity_task },
@@ -887,6 +890,16 @@ class Temporalio::Worker {
         return if $initiated || !defined $worker_ptr;
         Temporalio::Core::FFI::worker_initiate_shutdown($worker_ptr);
         $initiated = 1;
+        # Shutdown-begin notification (spec R84): flip the activity
+        # dispatcher's worker-shutdown event NOW — after initiate, BEFORE
+        # core's graceful-period cancels arrive on later polls — so running
+        # activity bodies observe is_worker_shutdown / their shutdown future
+        # distinctly from a plain cancel. Python notifies in the same spot,
+        # right after bridge initiate_shutdown (_worker.py:840-850). No
+        # dispatcher means run() never started (never-run shutdown path):
+        # nothing is running to notify.
+        $activity_dispatcher->notify_shutdown
+            if defined $activity_dispatcher;
         return;
     }
 

@@ -19,6 +19,7 @@ use Temporalio::Activity::CancellationDetails ();
 use Temporalio::Activity::Context ();
 use Temporalio::Activity::Invocation ();
 use Temporalio::Cancellation ();
+use Temporalio::Common::Event ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Activity::CompleteAsync ();
 use Temporalio::Exception::Application ();
@@ -73,12 +74,32 @@ class Temporalio::Worker::ActivityDispatcher {
     # completion (step 7).
     field %running;
 
+    # The one worker-shutdown event (spec R84, parity activity/conversion
+    # finding 4), shared with EVERY async activity context so a body can
+    # observe shutdown distinctly from cancellation. Set by notify_shutdown
+    # below when the worker begins shutdown — Python's activity worker owns
+    # the same _worker_shutdown_event and sets it in notify_shutdown
+    # (worker/_activity.py:79,185-187).
+    field $worker_shutdown_event;
+
     # Proto classes resolved once.
     field $ActivityTask;
 
     ADJUST {
         $ActivityTask = Temporalio::Core::Proto::resolve(
             'coresdk.activity_task.ActivityTask');
+        $worker_shutdown_event = Temporalio::Common::Event->new;
+    }
+
+    # notify_shutdown (spec R84): called by Temporalio::Worker at
+    # shutdown-BEGIN (right after worker_initiate_shutdown, BEFORE core's
+    # graceful-period cancels propagate), so running activities can distinguish
+    # graceful shutdown from a plain cancel and finish up cooperatively.
+    # Idempotent. Python parity: _ActivityWorker.notify_shutdown
+    # (worker/_activity.py:185-187, called from _worker.py:840-850).
+    method notify_shutdown () {
+        $worker_shutdown_event->set;
+        return;
     }
 
     method registry       { $registry }
@@ -242,6 +263,12 @@ class Temporalio::Worker::ActivityDispatcher {
                         // sub ($bytes) { return undef },
                     outbound           => $outbound,
                     cancellation_details_holder => $details_holder,
+                    # The dispatcher-wide shutdown event (spec R84): shared,
+                    # not per-activity, so one notify_shutdown reaches every
+                    # running body. The fork-pool path's child context gets
+                    # none (the event does not cross the fork — the
+                    # cancellation_details deviation, documented there).
+                    worker_shutdown_event => $worker_shutdown_event,
                     metric_meter       => $metric_meter,
                 );
                 $running{$task_token}{context} = $ctx;
@@ -556,6 +583,15 @@ Async. Dispatches one polled activity task to its registered definition and retu
 =head2 is_running
 
 Returns true while there are in-flight activity tasks.
+
+=head2 notify_shutdown
+
+Sets the dispatcher-wide worker-shutdown L<Temporalio::Common::Event> shared
+with every async activity context (spec R84), making
+C<< $ctx->is_worker_shutdown >> true and resolving every
+C<< $ctx->wait_for_worker_shutdown >> future. L<Temporalio::Worker> calls
+this at shutdown-begin, before core's graceful-period cancels propagate, so
+bodies can distinguish graceful shutdown from an ordinary cancel. Idempotent.
 
 =head2 registry
 

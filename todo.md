@@ -406,10 +406,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R83.4 Verify: live emit, replay suppress, activity + nexus emit; prove -lj4 t green under memory guard (t: 181 files/808 tests PASS incl. live integration + a core-FFI e2e through a custom sink; xt: 422 PASS)
 
 ### Step R84: Provide Worker-Shutdown Detection Inside Activities
-- [ ] R84.1 RED: unit test: worker shutdown flips is_worker_shutdown and resolves the shutdown future; a plain cancel does not
-- [ ] R84.2 GREEN: add distinct worker-shutdown event/future to Activity/Context.pm:28-30; fire it at shutdown-begin, to activity.py:400-438 parity
-- [ ] R84.3 REFACTOR: name the event/future per Python; comment cites finding 4 + shutdown-vs-cancel
-- [ ] R84.4 Verify: shutdown observed distinctly from cancel; prove -lj4 t green under memory guard
+- [x] R84.1 RED: unit test: worker shutdown flips is_worker_shutdown and resolves the shutdown future; a plain cancel does not (t/unit/activity_worker_shutdown.t, the activity_cancellation_details.t dispatcher-seam pattern; honest RED as `Can't locate object method "notify_shutdown"/"is_worker_shutdown"`; 4 subtests incl. notify-before-start and the no-event fork-pool degradation)
+- [x] R84.2 GREEN: add distinct worker-shutdown event/future to Activity/Context.pm:28-30; fire it at shutdown-begin, to activity.py:400-438 parity (new Temporalio::Common::Event — Python's _CompositeEvent shape, consumer-safe wait futures via CancellationFuture; dispatcher owns one shared event + notify_shutdown, injects it into every async context; Worker._initiate_shutdown_once notifies right after worker_initiate_shutdown, before graceful-period cancels, matching _worker.py:840-850; package fns Temporalio::Activity::is_worker_shutdown/wait_for_worker_shutdown)
+- [x] R84.3 REFACTOR: name the event/future per Python; comment cites finding 4 + shutdown-vs-cancel (naming matched Python from the start: is_worker_shutdown / wait_for_worker_shutdown / notify_shutdown / worker_shutdown_event; comments cite finding 4 + the shutdown-vs-cancel distinction; the flip mechanism lives in Common::Event for R89 nexus reuse)
+- [x] R84.4 Verify: shutdown observed distinctly from cancel; prove -lj4 t green under memory guard (t: 182 files/812 tests PASS incl. live integration; xt: 424 PASS)
 
 ### Step R85: Complete Activity Info with priority and retry_policy
 - [ ] R85.1 RED: unit test: start job with retry_policy + priority surfaces both on activity Info; neither present yields empty without error

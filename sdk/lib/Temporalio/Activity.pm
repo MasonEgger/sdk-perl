@@ -41,6 +41,16 @@ sub heartbeat (@details) { context()->heartbeat(@details) }
 # activity.py:315-317).
 sub cancellation_details () { context()->cancellation_details }
 
+# is_worker_shutdown() -> bool: true once the worker has begun shutting down
+# (spec R84; mirrors sdk-python activity.is_worker_shutdown,
+# activity.py:400-409). Distinct from cancellation.
+sub is_worker_shutdown () { context()->is_worker_shutdown }
+
+# wait_for_worker_shutdown() -> Future resolving when the worker begins
+# shutdown (spec R84; mirrors sdk-python activity.wait_for_worker_shutdown,
+# activity.py:412-418).
+sub wait_for_worker_shutdown () { context()->wait_for_worker_shutdown }
+
 # complete_async() -> declare the activity will complete out of band (spec
 # section 22). Throws Temporalio::Exception::Activity::CompleteAsync; the
 # activity dispatcher catches that class specifically and reports
@@ -114,5 +124,17 @@ Records an activity heartbeat with the given details, relaying it through the ac
 =head2 info
 
 Returns the L<Temporalio::Activity::Info> for the currently executing activity (from the activity context); dies if called outside an activity.
+
+=head2 is_worker_shutdown
+
+True once the worker running this activity has begun shutting down (spec
+R84), distinct from cancellation: an ordinary cancel leaves it false. Dies if
+called outside an activity.
+
+=head2 wait_for_worker_shutdown
+
+Returns a L<Future> that resolves when the worker begins shutdown (spec R84),
+so an activity can react to graceful shutdown independently of its
+cancellation token. Dies if called outside an activity.
 
 =cut

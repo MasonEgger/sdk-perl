@@ -6,6 +6,7 @@ use warnings;
 use feature 'class';
 no warnings 'experimental::class';
 
+use Future ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Heartbeat ();
 use Temporalio::Exception::Runtime ();
@@ -79,6 +80,20 @@ class Temporalio::Activity::Context {
     # documented spec section 0 deviation, like the heartbeat chain above).
     field $cancellation_details_holder :param = undef;
 
+    # The dispatcher-shared Temporalio::Common::Event that fires when the
+    # worker BEGINS shutdown (spec R84, parity activity/conversion finding 4:
+    # the cancellation token above used to be the only signal, folding worker
+    # shutdown into plain cancellation so a body could not tell them apart or
+    # await shutdown independently). Set by ActivityDispatcher->notify_shutdown
+    # at shutdown-begin, BEFORE core's graceful-period cancels propagate —
+    # Python's worker_shutdown_event on _Context (activity.py:200,400-438,
+    # worker/_activity.py:185-187). undef for direct constructions and the
+    # fork-pool child's context (the event does not cross the fork — the same
+    # documented spec section 0 deviation as cancellation_details_holder
+    # above): there is_worker_shutdown stays false and the wait future never
+    # resolves.
+    field $worker_shutdown_event :param = undef;
+
     # The worker runtime's metric meter (spec R83), injected by the
     # ActivityDispatcher on the async path. undef for the fork-pool child's
     # context and bare unit constructions: cross-process metrics are not
@@ -106,6 +121,27 @@ class Temporalio::Activity::Context {
                 task_queue    => $info->{task_queue},
                 activity_type => $info->{activity_type},
             });
+    }
+
+    # is_worker_shutdown() -> bool: true once the worker has begun shutting
+    # down (spec R84; Python parity: activity.is_worker_shutdown(),
+    # activity.py:400-409). Distinct from is_cancelled on the cancellation
+    # token: a plain server cancel leaves this false, and shutdown flips it
+    # BEFORE the shutdown-driven cancel arrives.
+    method is_worker_shutdown () {
+        return 0 unless defined $worker_shutdown_event;
+        return $worker_shutdown_event->is_set;
+    }
+
+    # wait_for_worker_shutdown() -> Future resolving when the worker begins
+    # shutdown (spec R84; Python parity: activity.wait_for_worker_shutdown(),
+    # activity.py:412-418). With no dispatcher event (the fork-pool child /
+    # direct constructions) the returned future is pending forever — shutdown
+    # is not observable there, mirroring the cancellation_details fork
+    # deviation.
+    method wait_for_worker_shutdown () {
+        return Future->new unless defined $worker_shutdown_event;
+        return $worker_shutdown_event->wait;
     }
 
     # cancellation_details() -> Temporalio::Activity::CancellationDetails or
@@ -258,6 +294,23 @@ sdk-python's C<activity.cancellation_details()>. The fork-pool child's
 context always reports C<undef> (the holder does not cross the fork, a
 documented spec section 0 deviation).
 
+=head2 is_worker_shutdown
+
+True once the worker has begun shutting down (spec R84; Python parity:
+C<activity.is_worker_shutdown()>). Distinct from the cancellation token: an
+ordinary cancel leaves this false, and worker shutdown flips it at
+shutdown-begin, before the shutdown-driven cancel propagates. Always false on
+the fork-pool child's context (the shutdown event does not cross the fork, a
+documented spec section 0 deviation).
+
+=head2 wait_for_worker_shutdown
+
+A L<Future> that resolves when the worker begins shutdown (spec R84; Python
+parity: C<activity.wait_for_worker_shutdown()>). Already resolved when
+shutdown has begun. On a context without a dispatcher-shared shutdown event
+(the fork-pool child, direct constructions) the returned Future never
+resolves.
+
 =head2 metric_meter
 
 The activity metric meter (spec R83): a
@@ -318,6 +371,13 @@ chain; when set, C<info> and C<heartbeat> route through it.
 
 (optional, default C<undef>) The dispatcher-shared set-on-cancel holder that
 L</cancellation_details> reads (spec R76). C<undef> reports no details.
+
+=item C<worker_shutdown_event>
+
+(optional, default C<undef>) The dispatcher-shared
+L<Temporalio::Common::Event> fired at worker shutdown-begin (spec R84);
+C<undef> means shutdown is not observable (L</is_worker_shutdown> stays
+false, L</wait_for_worker_shutdown> never resolves).
 
 =item C<metric_meter>
 
