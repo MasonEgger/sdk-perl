@@ -121,8 +121,9 @@ sub _wkt_root {
 }
 
 # The root .proto files to parse (spec section 4.6): every
-# temporal/api/workflowservice/v1/*.proto plus every coresdk root under
-# temporal/sdk/core/. The *_fq.proto variant is EXCLUDED: it redefines the
+# temporal/api/workflowservice/v1/*.proto and (spec R91, for the raw
+# operator-service client) temporal/api/operatorservice/v1/*.proto, plus
+# every coresdk root under temporal/sdk/core/. The *_fq.proto variant is EXCLUDED: it redefines the
 # coresdk.workflow_activation package with fully-qualified type names (a
 # codegen aid sdk-core itself does not compile), so parsing it would collide
 # with workflow_activation.proto in the schema index. Paths are relative to
@@ -130,8 +131,10 @@ sub _wkt_root {
 sub _root_files ($root) {
     my @roots;
 
-    my $svc = File::Spec->catdir($root, qw(temporal api workflowservice v1));
-    push @roots, glob File::Spec->catfile($svc, '*.proto');
+    for my $service_dir ([qw(workflowservice v1)], [qw(operatorservice v1)]) {
+        my $svc = File::Spec->catdir($root, 'temporal', 'api', @$service_dir);
+        push @roots, glob File::Spec->catfile($svc, '*.proto');
+    }
 
     File::Find::find({
         no_chdir => 1,

@@ -41,16 +41,6 @@ use Temporalio::Runtime ();
 use Temporalio::SDK ();
 
 class Temporalio::Client {
-    # TemporalCoreRpcService discriminator values (header lines 8-14:
-    # Workflow=1, Operator, Cloud, Test, Health).
-    my %RPC_SERVICE = (
-        workflow => 1,
-        operator => 2,
-        cloud    => 3,
-        test     => 4,
-        health   => 5,
-    );
-
     # Workflow-id reuse/conflict policy spec strings -> proto enum numbers.
     # MUST match temporal.api.enums.v1.WorkflowId{Reuse,Conflict}Policy
     # (introspected from the vendored proto; cross-checked against sdk-python
@@ -87,6 +77,14 @@ class Temporalio::Client {
     method data_converter { $data_converter }
     method runtime        { $runtime }
     method interceptors   { $interceptors }
+
+    # The raw gRPC service handles (spec R91; Python _client.py:307-322):
+    # the low-level escape hatch for RPCs the high-level client does not
+    # wrap, e.g. operator search-attribute management. Delegates to the
+    # connection, which owns the rpc funnel, exactly as Python's accessors
+    # delegate to the service client.
+    method workflow_service { $connection->workflow_service }
+    method operator_service { $connection->operator_service }
 
     # _outbound — the client outbound interceptor chain head (spec section 27.2).
     # Built once: a root OutboundInterceptor whose methods perform the real
@@ -762,93 +760,15 @@ class Temporalio::Client {
             (8 + int(rand(4))), substr($h[4], 1), $h[5], $h[6], $h[7];
     }
 
-    # _rpc_call($rpc_name, $request_msg, %opts) — async. The single funnel
-    # every client method's RPC goes through (spec section 7.5): encodes the
-    # request proto, calls temporal_core_client_rpc_call over the callback
-    # bridge, decodes the typed response, and maps failures onto the
-    # exception hierarchy via Temporalio::Core::Callback::rpc_error_for.
-    #
-    # %opts:
-    #   service        => workflow|operator|cloud|test|health (default workflow)
-    #   retry          => boolean (default 1 — every high-level client method
-    #                     sets retry, and core applies the client RetryConfig;
-    #                     pass 0 for a raw single-shot call)
-    #   timeout        => seconds (default 0 = no timeout)
-    #   response_class => proto class (default: request class s/Request$/Response/)
-    #   error_context  => hashref merged into the rpc_error_for arguments
-    #                     (e.g. workflow_id/workflow_type for ALREADY_EXISTS)
+    # _rpc_call($rpc_name, $request_msg, %opts), async. The funnel every
+    # high-level client method's RPC goes through: a thin delegator to
+    # Connection::rpc_call (spec section 7.5; the funnel body moved there for
+    # the raw service handles, spec R91 / parity audit client finding 1) that
+    # flips the retry default to 1, because every high-level method wants
+    # core's client RetryConfig applied. Callers pass the Connection::rpc_call
+    # option set (service/retry/timeout/response_class/error_context).
     async method _rpc_call ($rpc, $request, %opts) {
-        Temporalio::Common::Options::assert_known_keys(
-            '_rpc_call', \%opts,
-            { service => 1, retry => 1, timeout => 1, response_class => 1,
-              error_context => 1 });
-        my $service        = delete $opts{service} // 'workflow';
-        my $retry          = exists $opts{retry} ? !!delete $opts{retry} : 1;
-        my $timeout        = delete $opts{timeout} // 0;
-        my $response_class = delete $opts{response_class};
-        my $error_context  = delete $opts{error_context} // {};
-        my $service_code = $RPC_SERVICE{$service}
-            // Temporalio::Exception::Argument->throw(
-                message => "unknown RPC service '$service' (expected one of "
-                         . join(', ', sort keys %RPC_SERVICE) . ')');
-        Temporalio::Exception::Argument->throw(
-            message => '_rpc_call requires a proto request message object')
-            unless Scalar::Util::blessed($request) && $request->can('encode');
-        $response_class //= ref($request) =~ s/Request\z/Response/r;
-        Temporalio::Exception::Argument->throw(
-            message => "cannot derive a response class for '" . ref($request)
-                     . "'; pass response_class")
-            unless $response_class ne ref($request)
-                && $response_class->can('decode');
-
-        # Resolve the live connection pointer first: a lazy client performs
-        # its deferred core connect here, on the first RPC, and concurrent
-        # first RPCs share the single in-flight connect through Connection's
-        # once-init guard (spec R90; parity audit client finding 3).
-        my $connection_ptr = await $connection->connected_ptr;
-
-        # Build the TemporalCoreRpcCallOptions record. @keep and the record
-        # itself are lexicals held across the await — per the header, the
-        # options must live through the callback.
-        my @keep;
-        my ($rpc_data, $rpc_size) =
-            Temporalio::Core::FFI::keep_buffer(\@keep, $rpc);
-        my ($req_data, $req_size) =
-            Temporalio::Core::FFI::keep_buffer(\@keep, $request->encode);
-        my $options = Temporalio::Core::FFI::RpcCallOptions->new(
-            service              => $service_code,
-            rpc_data             => $rpc_data,
-            rpc_size             => $rpc_size,
-            req_data             => $req_data,
-            req_size             => $req_size,
-            retry                => $retry ? 1 : 0,
-            metadata_data        => undef,
-            metadata_size        => 0,
-            binary_metadata_data => undef,
-            binary_metadata_size => 0,
-            timeout_millis       => int($timeout * 1000),
-            cancellation_token   => undef,
-        );
-
-        # The rpc completion always resolves done (Callback.pm kind 4) with
-        # the raw fields; "either success or failure_message are always
-        # present" (header), so a defined failure_message IS the error case.
-        my $completion = await Temporalio::Core::Callback->issue_async(
-            $runtime, rpc => sub ($user_data, $trampoline) {
-                Temporalio::Core::FFI::client_rpc_call(
-                    $connection_ptr, $options, $user_data, $trampoline);
-            });
-
-        if (defined $completion->{failure_message}) {
-            die Temporalio::Core::Callback::rpc_error_for(
-                status_code => $completion->{status_code},
-                message     => $completion->{failure_message},
-                details     => $completion->{failure_details},
-                rpc         => $rpc,
-                %$error_context,
-            );
-        }
-        return $response_class->decode($completion->{success} // '');
+        return await $connection->rpc_call($rpc, $request, retry => 1, %opts);
     }
 
     # Default client identity, "<pid>@<hostname>" (spec section 7.1;
@@ -1110,12 +1030,19 @@ live connection synchronously; rotation is always manual (spec section
 itself; C<< lazy => 1 >> defers the core connection to the first RPC
 (spec R90, see L</connect>).
 
-Every client RPC funnels through the private C<_rpc_call> helper: it
-encodes the request proto, calls C<temporal_core_client_rpc_call> over the
-callback bridge with C<retry> set by default (retries run inside sdk-core
-against the client retry config), decodes the typed response, and maps
-failures onto the exception hierarchy via the spec section 7.5 MUST-match
-table in L<Temporalio::Core::Callback>.
+Every client RPC funnels through the private C<_rpc_call> helper, a thin
+wrapper over L<Temporalio::Client::Connection>'s C<rpc_call> with C<retry>
+set by default (retries run inside sdk-core against the client retry
+config): the funnel encodes the request proto, calls
+C<temporal_core_client_rpc_call> over the callback bridge, decodes the
+typed response, and maps failures onto the exception hierarchy via the
+spec section 7.5 MUST-match table in L<Temporalio::Core::Callback>.
+
+RPCs the high-level client does not wrap remain reachable through the raw
+service handles (spec R91): C<workflow_service> and C<operator_service>
+return L<Temporalio::Client::WorkflowService> and
+L<Temporalio::Client::OperatorService> handles whose per-rpc methods are
+generated from the vendored proto service descriptors.
 
 Workflow operations (C<start_workflow> and friends, spec section 7.4) are
 documented under L</METHODS>.
@@ -1378,5 +1305,20 @@ L<Temporalio::Exception::Argument>.
 =head2 update_api_key
 
 Updates the API key sent on subsequent RPCs for this client's connection.
+
+=head2 workflow_service
+
+Returns a L<Temporalio::Client::WorkflowService> raw service handle: the
+low-level escape hatch over the full WorkflowService RPC surface (spec R91;
+Python C<_client.py:311-314> parity). Calls made through it are single-shot
+by default (no core retry) and bypass the high-level client's interceptors
+and converters.
+
+=head2 operator_service
+
+Returns a L<Temporalio::Client::OperatorService> raw service handle over the
+OperatorService RPC surface, e.g. search-attribute management (spec R91;
+Python C<_client.py:316-318> parity). Same raw-call semantics as
+L</workflow_service>.
 
 =cut
