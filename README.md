@@ -15,14 +15,18 @@ over [IO::Async](https://metacpan.org/pod/IO::Async). Workflows run in a custom
 deterministic scheduler that resolves their futures from server activations rather
 than from wall-clock timers.
 
-> **Status: pre-1.0 (v0.2).** Both v0.1 and v0.2 (feature parity with the mature
-> SDKs) are implemented: client, worker, sync/async activities, and workflows
-> with signals, queries, updates, timers, cancellation, continue-as-new, child
-> workflows, external handles, local activities, schedules, Nexus, interceptors,
-> and worker hardening. v0.2.0 is feature-complete and verified live against a
-> dev server: the unit, replay, and live integration suites are green. The public
-> API is pre-1.0 and may still change before a 1.0 release; expect breaking
-> changes.
+> **Status: pre-1.0 (v0.2 line).** The v0.1 and v0.2 feature sets (client,
+> worker, sync/async activities, and workflows with signals, queries, updates,
+> timers, cancellation, continue-as-new, child workflows, external handles,
+> local activities, schedules, Nexus, interceptors, and worker hardening) are
+> implemented and verified live against a dev server. A 97-requirement
+> remediation and reference-SDK parity cycle (R1-R97, the root
+> [`spec.md`](spec.md)) completed 2026-07-10, covering memory safety,
+> cancellation semantics, the codec surface, the full interceptor surface, and
+> Python-parity features. The suites are green at 859 tests across 197 files,
+> including live dev-server integration, plus 462 author tests. Known
+> follow-ups are tracked as GitHub issues. The public API is pre-1.0 and may
+> still change before a 1.0 release; expect breaking changes.
 
 **Contents**
 
@@ -34,6 +38,8 @@ than from wall-clock timers.
   - [Workflows](#workflows)
   - [Activities](#activities)
   - [Common types](#common-types)
+  - [Interceptors](#interceptors)
+  - [Nexus](#nexus)
   - [Telemetry](#telemetry)
   - [Testing](#testing)
 - [Not yet supported](#not-yet-supported)
@@ -63,7 +69,7 @@ minutes (a Rust `stable` toolchain is required). To build against a local
 ### Implementing a Workflow and Activity
 
 Workflows and activities are `feature 'class'` definitions. An **activity** is an
-ordinary method — it may do I/O, call services, and fail — marked with `:Defn`:
+ordinary method (it may do I/O, call services, and fail) marked with `:Defn`:
 
 ```perl
 # Activities.pm
@@ -192,7 +198,7 @@ flowchart TD
 | `alien-core/`                 | `Alien::Temporalio::Core`       | Builds/ships `libtemporalio_sdk_core_c_bridge` from a pinned `sdk-rust` tag. |
 | `alien-perl-bridge/`          | `Alien::Temporalio::PerlBridge` | Builds our in-tree Rust shim. |
 | `sdk/`                        | `Temporalio-SDK`                | The Perl SDK: client, worker, workflows, activities, converters. |
-| `ext/temporalio-perl-bridge/` | (Rust crate)                    | Trampolines that marshal sdk-core's Tokio-thread callbacks onto a per-runtime queue the Perl event loop drains — the interpreter is never touched off the main thread. |
+| `ext/temporalio-perl-bridge/` | (Rust crate)                    | Trampolines that marshal sdk-core's Tokio-thread callbacks onto a per-runtime queue the Perl event loop drains; the interpreter is never touched off the main thread. |
 
 Protobuf support is the pure-Perl
 [`Protobuf`](https://github.com/MasonEgger/protobuf-perl) distribution: the vendored
@@ -203,10 +209,10 @@ proto trees in `sdk/share/proto/` are parsed directly (no `protoc`, no
 ## Usage
 
 The asynchronous API returns [`Future`](https://metacpan.org/pod/Future) objects.
-Outside a workflow you drive them with your `IO::Async` loop —
-`$loop->await($future)->get` — or `await` them inside an
+Outside a workflow you drive them with your `IO::Async` loop
+(`$loop->await($future)->get`) or `await` them inside an
 [`async sub`](https://metacpan.org/pod/Future::AsyncAwait). Inside a workflow you
-always `await`; the deterministic scheduler — not the event loop — resolves the
+always `await`; the deterministic scheduler, not the event loop, resolves the
 futures (see [Workflow logic constraints](#workflow-logic-constraints)).
 
 ### Client
@@ -245,6 +251,11 @@ my $client = $loop->await(Temporalio::Client->connect(
 ))->get;
 ```
 
+Connections are established eagerly inside `connect` by default. With
+`lazy => 1`, `connect` validates its options and returns at once; the core
+gRPC connection is deferred to the first RPC, and concurrent first RPCs share
+the single in-flight connect.
+
 Once connected you can start, signal-with-start, list, and count workflows, and get
 handles to existing ones:
 
@@ -264,11 +275,70 @@ my $iter = $client->list_workflows(q{WorkflowType = 'GreetingWorkflow'});
 my $n    = $loop->await($client->count_workflows(q{WorkflowType = 'GreetingWorkflow'}))->get;
 ```
 
-`start_workflow` accepts the full set of start options: `id_reuse_policy`,
-`id_conflict_policy`, `execution_timeout`, `run_timeout`, `task_timeout`,
-`start_delay`, `cron_schedule`, `retry_policy`, `priority`, `memo`,
-`search_attributes`, and `headers`. `execute_workflow` is the convenience wrapper
-that starts and awaits the result in one call.
+The workflow argument to `start_workflow` may be a plain type-name string, a
+`Temporalio::Workflow::Definition` subclass name (resolving to its `:Run`
+type), or that class's `:Run` method ref. Besides the required `id` and
+`task_queue`, `start_workflow` accepts: `id_reuse_policy`,
+`id_conflict_policy`, `cron_schedule`, `request_eager_start`,
+`execution_timeout`, `run_timeout`, `task_timeout`, `start_delay`,
+`retry_policy`, `priority`, `search_attributes`, `memo`, `headers`,
+`completion_callbacks`, `links`, `request_id`, `static_summary`,
+`static_details`, and `versioning_override`. An unknown option key raises
+`Temporalio::Exception::Argument` before any RPC (this strictness rule holds
+across the whole client surface). `execute_workflow` is the convenience
+wrapper that starts and awaits the result in one call.
+
+A few more client entry points:
+
+- `reset_workflow($workflow_id, $run_id, workflow_task_finish_event_id => $eid)`
+  resets an execution to an earlier workflow task and returns the new run id
+  (also available as `reset` on a workflow handle).
+- `async_activity_handle(task_token => $bytes)` (or
+  `workflow_id`/`run_id`/`activity_id`) returns a handle for completing,
+  failing, or heartbeating an activity out of band; no RPC is made.
+- `workflow_service` and `operator_service` return raw service handles whose
+  per-RPC methods are generated from the vendored proto service descriptors:
+  the escape hatch for any RPC the high-level client does not wrap. Raw calls
+  are single-shot (no core retry) and bypass interceptors and converters.
+- [`Temporalio::Client::WorkflowHistory`](sdk/lib/Temporalio/Client/WorkflowHistory.pm)
+  wraps a workflow's event list; `from_json` loads a CLI/UI JSON history
+  download for the replayer (see [Replay](#replay)).
+
+#### Schedules
+
+A schedule starts workflows on a spec of intervals and calendars.
+[`Temporalio::Schedule::Schedule`](sdk/lib/Temporalio/Schedule/Schedule.pm)
+combines an action with a `spec`, `policy`, and `state`; the action is a
+`Temporalio::Schedule::Action::StartWorkflow`, whose optional
+`static_summary`/`static_details` become the started workflow's fixed UI
+summary and details:
+
+```perl
+use Temporalio::Schedule;   # umbrella: loads the Temporalio::Schedule::* classes
+
+my $handle = $loop->await($client->create_schedule(
+    'nightly-report',
+    Temporalio::Schedule::Schedule->new(
+        action => Temporalio::Schedule::Action::StartWorkflow->new(
+            workflow   => 'ReportWorkflow',
+            args       => ['nightly'],
+            id         => 'report-wf',
+            task_queue => 'reports',
+        ),
+        spec => Temporalio::Schedule::Spec->new(
+            intervals => [ Temporalio::Schedule::Interval->new(every => 86400) ],
+        ),
+    ),
+))->get;
+
+my $desc = $loop->await($handle->describe)->get;
+$loop->await($handle->pause)->get;
+```
+
+`get_schedule_handle($id)` returns a handle for an existing schedule without
+an RPC; `list_schedules` returns a lazy async iterator (like
+`list_workflows`). The handle supports `describe`, `update`, `delete`,
+`pause`/`unpause`, `trigger`, and `backfill`.
 
 #### Temporal Cloud (mTLS and API keys)
 
@@ -307,8 +377,8 @@ $client->update_api_key($rotated_key);   # takes effect on subsequent RPCs
 
 #### Data conversion
 
-Every payload that crosses the boundary — workflow/activity arguments and results,
-signal/query payloads, memos, and failures — passes through a
+Every payload that crosses the boundary (workflow/activity arguments and results,
+signal/query payloads, memos, and failures) passes through a
 [`Temporalio::Converter::Data`](sdk/lib/Temporalio/Converter/Data.pm). The default
 converter encodes values with the five standard Temporal payload encodings, tried
 in spec order:
@@ -321,8 +391,8 @@ in spec order:
 | `binary/protobuf`              | protobuf messages as bytes ([`Temporalio::Payload::BinaryProto`](sdk/lib/Temporalio/Payload/BinaryProto.pm)) |
 | `json/plain`                   | everything else, via JSON |
 
-To transform payload bytes on the wire — for example to **compress or encrypt**
-them — implement a [`Temporalio::Converter::PayloadCodec`](sdk/lib/Temporalio/Converter/PayloadCodec.pm)
+To transform payload bytes on the wire, for example to **compress or encrypt**
+them, implement a [`Temporalio::Converter::PayloadCodec`](sdk/lib/Temporalio/Converter/PayloadCodec.pm)
 (an async `encode`/`decode` pair over arrays of payloads) and pass a custom data
 converter at connect time:
 
@@ -359,6 +429,7 @@ my $worker = Temporalio::Worker->new(
     # Tuning (defaults shown):
     max_concurrent_workflow_tasks => 100,
     max_concurrent_activities     => 100,
+    max_concurrent_nexus_tasks    => 100,
     sync_activity_workers         => 4,    # fork-pool size for sync activities
     graceful_shutdown_period      => 0,    # seconds to wait before hard-cancelling activities
 );
@@ -369,8 +440,14 @@ $loop->await($worker->run)->get;
 ```
 
 A single worker drives **both** an activity poll loop and a workflow poll loop
-concurrently on the event loop. Workflow runs are cached per run id and evicted on
-the server's instruction.
+concurrently on the event loop (plus a Nexus poll loop when `nexus_services`
+are registered; see [Nexus](#nexus)). Workflow runs are cached per run id and
+evicted on the server's instruction.
+
+On a fatal poll-loop failure the optional `on_fatal_error` coderef is invoked
+with the error before the shutdown sequence commences. The hook cannot stop
+the shutdown; an exception it raises is warned and ignored, and the original
+failure still propagates from `run`.
 
 ### Workflows
 
@@ -383,9 +460,19 @@ Method attributes mark the entry point and message handlers:
 | Attribute            | Meaning |
 |----------------------|---------|
 | `:Run('Name')`       | The workflow entry point. Exactly one per class. |
-| `:Signal('name')`    | A signal handler — an asynchronous message that may mutate state. |
-| `:Query('name')`     | A query handler — read-only; must not mutate state or issue commands. |
+| `:Signal('name')`    | A signal handler: an asynchronous message that may mutate state. |
+| `:Query('name')`     | A query handler: read-only; must not mutate state or issue commands. |
+| `:Update('name')`    | An update handler: a tracked message that returns a result to the caller. |
+| `:UpdateValidator('name')` | A synchronous validator run before the named update is accepted. |
 | `:Init`              | Runs before `:Run` to initialize fields from the workflow input. |
+
+Handler names default to the method name. `:Signal(dynamic=1)` (likewise
+`:Query`/`:Update`) registers a catch-all handler called with
+`($name, @args)` for any name without an explicit handler; a dynamic handler
+must not carry a name. `:Signal` and `:Update` (not `:Query`) also accept
+`unfinished_policy=ABANDON` or `unfinished_policy=WARN_AND_ABANDON` to
+control the warning when the workflow completes while that handler is still
+in flight.
 
 ```perl
 class Greeting :isa(Temporalio::Workflow::Definition) {
@@ -398,8 +485,20 @@ class Greeting :isa(Temporalio::Workflow::Definition) {
 
     method set_name   :Signal('setName')    ($value) { $name = $value; return }
     method current    :Query('currentName') ()       { return $name }
+
+    method rename       :Update('rename')          ($value) { $name = $value; return $name }
+    method check_rename :UpdateValidator('rename') ($value) {
+        die "name must not be empty\n" unless length $value;
+    }
 }
 ```
+
+Handlers can also be installed at runtime: `set_signal_handler`,
+`set_query_handler`, and `set_update_handler` (the update form takes an
+optional `validator` coderef) install, replace, or (with `undef`) remove a
+handler by name, overriding an attribute handler of the same name; the
+`set_dynamic_*` variants install the catch-all. On install, buffered past
+signals for the name are delivered to the new handler in arrival order.
 
 #### Running workflows
 
@@ -415,9 +514,27 @@ $loop->await($handle->signal('setName', ['Ada']))->get;         # send a signal
 my $result = $loop->await($handle->result)->get;                # await completion → "Hello, Ada!"
 ```
 
-The handle also supports `describe`, `cancel`, `terminate`, and
-`fetch_history_events`. `result` maps the workflow's terminal event to a value or a
-typed exception (see [Workflow exceptions](#workflow-exceptions)).
+Updates are tracked messages that return a result (and may be rejected by a
+validator):
+
+```perl
+# Start and await the outcome in one call:
+my $new_name = $loop->await($handle->execute_update('rename', ['Grace']))->get;
+
+# Or start, hold the update handle, and await the result later:
+my $uh = $loop->await($handle->start_update('rename', ['Grace'],
+    wait_for_stage => 'accepted'))->get;
+my $new_name = $loop->await($uh->result)->get;
+
+# Re-attach to a known update id without an RPC:
+my $uh = $handle->get_update_handle($update_id);
+```
+
+A failed update outcome raises `Temporalio::Exception::WorkflowUpdateFailed`.
+The handle also supports `describe`, `cancel`, `terminate`, `reset` (back to
+an earlier workflow task, returning the new run id), and
+`fetch_history_events`. `result` maps the workflow's terminal event to a value
+or a typed exception (see [Workflow exceptions](#workflow-exceptions)).
 
 #### Invoking activities
 
@@ -441,7 +558,9 @@ my ($a, $b) = await Future->needs_all($f1, $f2);
 
 Supported options include the four timeouts (`start_to_close_timeout`,
 `schedule_to_close_timeout`, `schedule_to_start_timeout`, `heartbeat_timeout`),
-`retry_policy`, `task_queue`, `activity_id`, and `cancellation_type`.
+`retry_policy`, `task_queue`, `activity_id`, `cancellation_type`, a `priority`
+(a [`Temporalio::Common::Priority`](sdk/lib/Temporalio/Common/Priority.pm)),
+and a `summary` string shown in the UI.
 
 #### Timers and conditions
 
@@ -457,6 +576,10 @@ my $signalled = await Temporalio::Workflow::wait_condition(
     sub { $self->ready }, timeout => 300,                    # false if it times out
 );
 ```
+
+`sleep` and `start_timer` take an optional `summary` label, and
+`wait_condition` a `timeout_summary`, carried on the timer command's user
+metadata and shown in the UI/CLI.
 
 #### Workflow futures and concurrency
 
@@ -481,6 +604,11 @@ the current run:
 await Temporalio::Workflow::continue_as_new('Greeting', args => [$next_input]);
 ```
 
+To decide *when* to continue-as-new, read the per-activation history gauges:
+`get_current_history_length` (events), `get_current_history_size` (bytes), and
+`is_continue_as_new_suggested` (the server's own suggestion), all updated each
+activation.
+
 #### Deterministic time, randomness, and logging
 
 Workflow code must be deterministic, so it must never read the system clock or use
@@ -490,10 +618,27 @@ all driven from the activation:
 ```perl
 my $now    = Temporalio::Workflow::now;            # deterministic wall time
 my $r      = Temporalio::Workflow::random;         # seeded, replay-stable PRNG
+my $uuid   = Temporalio::Workflow::uuid4;          # replay-stable v4 UUID string
 my $replay = Temporalio::Workflow::is_replaying;   # true while replaying history
-my $info   = Temporalio::Workflow::info;           # workflow id, run id, attempt, …
+my $info   = Temporalio::Workflow::info;           # workflow_id, run_id, attempt, …
 Temporalio::Workflow::logger->info('processing', { name => $name });  # replay-aware
 ```
+
+`info` returns a fresh hashref per call with `workflow_id`, `run_id`,
+`workflow_type`, `namespace`, `task_queue`, `attempt`, `patches`,
+`search_attributes`, and `memo`. `Temporalio::Workflow::memo` and
+`Temporalio::Workflow::search_attributes` read the current values, including
+changes applied by `upsert_memo` and `upsert_search_attributes`.
+
+For cron and scheduled runs, `has_last_completion_result` and
+`get_last_completion_result` read the previous run's completion result
+(`has_` differentiates "no previous completion" from "the previous result was
+`undef`"), and `get_last_failure` returns the previous run's failure as a
+typed exception, or `undef`.
+
+`Temporalio::Workflow::metric_meter` returns a replay-safe metric meter
+carrying the `namespace`, `task_queue`, and `workflow_type` attributes;
+values recorded while the activation replays are suppressed.
 
 The workflow logger suppresses duplicate lines during replay automatically.
 
@@ -534,8 +679,8 @@ converter, preserving the cause chain.
 Workflow code is replayed to reconstruct state, so it **must be deterministic**:
 
 - Use `Temporalio::Workflow::now`/`random`, never `time`, `localtime`, or `rand`.
-- Never do I/O, sleep with `IO::Async`/`sleep`, or call out to the network directly
-  — put that in an activity.
+- Never do I/O, sleep with `IO::Async`/`sleep`, or call out to the network
+  directly; put that in an activity.
 - Only `await` futures created by the `Temporalio::Workflow` API; awaiting an
   arbitrary event-loop future breaks determinism.
 - Use `Syntax::Keyword::Dynamically`, not `local`, for dynamic scope across an
@@ -575,14 +720,32 @@ class Activities :isa(Temporalio::Activity::Definition) {
 
 #### Activity context
 
-Inside an activity, `Temporalio::Activity` exposes the execution context — metadata,
-heartbeating, and the cancellation token:
+Inside an activity, `Temporalio::Activity` exposes the execution context:
+metadata, heartbeating, and the cancellation token:
 
 ```perl
 use Temporalio::Activity;
 
 my $info = Temporalio::Activity::info;          # activity id/type, workflow id/run id, attempt, …
 Temporalio::Activity::heartbeat('progress', 42); # report liveness + checkpoint details
+```
+
+The context also carries a metric meter:
+`Temporalio::Activity::context()->metric_meter` returns the runtime meter with
+the `namespace`, `task_queue`, and `activity_type` attributes attached.
+
+For structured logging, `Temporalio::Activity::context()->log_details` returns
+a hashref of the contextual fields worth attaching to every log line
+(`activity_id`, `activity_type`, `attempt`, `namespace`, `task_queue`,
+`workflow_id`, `workflow_run_id`, `workflow_type`). The SDK does not mandate a
+logging framework; with [`Log::Any`](https://metacpan.org/pod/Log::Any), pass
+them per message or bind them once through `$log->context`:
+
+```perl
+use Log::Any qw($log);
+
+my $ctx = Temporalio::Activity::context();
+$log->info('processing started', $ctx->log_details);
 ```
 
 #### Heartbeating and cancellation
@@ -593,7 +756,19 @@ cancelled (workflow cancelled, timed out, or worker shutting down) through the
 cancellation token on its context
 ([`Temporalio::Activity::Context`](sdk/lib/Temporalio/Activity/Context.pm)`->cancellation`),
 a [`Temporalio::Cancellation`](sdk/lib/Temporalio/Cancellation.pm) it can poll or
-await to stop cooperatively.
+await to stop cooperatively. Once cancelled,
+`Temporalio::Activity::cancellation_details` says why (reason plus boolean
+causes); it is `undef` before any cancellation.
+
+Worker shutdown is observable independently of cancellation:
+`Temporalio::Activity::is_worker_shutdown` returns true once the worker has
+begun shutting down, and `wait_for_worker_shutdown` returns a `Future` that
+resolves at that point.
+
+To override the retry-policy interval before the next attempt, throw a
+`Temporalio::Exception::Application` with `next_retry_delay` (seconds,
+possibly fractional); retries stay subject to the policy's attempt and time
+limits.
 
 #### Concurrency and the fork pool
 
@@ -624,7 +799,8 @@ my $retry = Temporalio::Common::RetryPolicy->new(
 [Typed search attributes](sdk/lib/Temporalio/Common/TypedSearchAttributes.pm) give
 type-safe Visibility keys, and
 [`Temporalio::Common::Priority`](sdk/lib/Temporalio/Common/Priority.pm) sets task
-priority:
+priority, carrying `priority_key` (lower number = higher priority) plus the
+fairness fields `fairness_key` and `fairness_weight`:
 
 ```perl
 use Temporalio::Common::SearchAttributeKey;
@@ -636,6 +812,144 @@ my $sa  = Temporalio::Common::TypedSearchAttributes->new([ [ $key => 'c-123' ] ]
 $loop->await($client->start_workflow('Greeting', [],
     id => 'wf', task_queue => 'q', search_attributes => $sa))->get;
 ```
+
+The failure converter can hide failure messages and stack traces from the
+server: build the data converter with a
+`Temporalio::Converter::Failure->new(encode_common_attributes => 1)` as its
+`failure_converter`, and `to_failure` moves each failure's message and stack
+trace into an `encoded_attributes` payload that the codec chain encrypts
+alongside the other embedded payloads, leaving the sentinel `Encoded failure`
+on the wire. `from_failure` restores them whenever `encoded_attributes` is
+present.
+
+### Interceptors
+
+Interceptors wrap the SDK's operation paths. On the client side, a class
+extending [`Temporalio::Client::Interceptor`](sdk/lib/Temporalio/Client/Interceptor.pm)
+returns a `Temporalio::Client::OutboundInterceptor` from
+`intercept_client($next)`; the outbound methods (`start_workflow`,
+`signal_with_start_workflow`, `signal_workflow`, `query_workflow`,
+`start_workflow_update`) each take one input object and return a `Future`,
+delegating to `$self->next` by default:
+
+```perl
+class LoggingOutbound :isa(Temporalio::Client::OutboundInterceptor) {
+    async method start_workflow {
+        my ($input) = @_;
+        warn "starting a workflow\n";
+        return await $self->next->start_workflow($input);
+    }
+}
+
+class LoggingInterceptor :isa(Temporalio::Client::Interceptor) {
+    method intercept_client {
+        my ($next) = @_;
+        return LoggingOutbound->new(next => $next);
+    }
+}
+
+my $client = $loop->await(Temporalio::Client->connect(
+    'localhost:7233',
+    namespace    => 'default',
+    runtime      => $runtime,
+    interceptors => [ LoggingInterceptor->new ],
+))->get;
+```
+
+On the worker side, a class extending
+[`Temporalio::Worker::Interceptor`](sdk/lib/Temporalio/Worker/Interceptor.pm)
+overrides `intercept_activity`, `intercept_workflow`, and/or
+`intercept_nexus_operation`, each returning an inbound wrapper:
+`ActivityInbound` (`init`, `execute_activity`), `WorkflowInbound`
+(`execute_workflow`, `handle_signal`, `handle_query`, `validate_update`,
+`handle_update`), and `NexusOperationInbound`
+(`execute_nexus_operation_start`, `execute_nexus_operation_cancel`). The
+activity and workflow sides also have outbound chains (`ActivityOutbound`:
+`info`, `heartbeat`; `WorkflowOutbound`: `execute_activity`,
+`execute_local_activity`, `start_child_workflow`, `signal_child_workflow`,
+`signal_external_workflow`, `continue_as_new`, `start_nexus_operation`,
+`info`), installed by wrapping the outbound received in the inbound's
+`init($outbound)`.
+
+Chains fold with the **first-listed interceptor outermost**; a worker inherits
+the client's interceptor list and appends its own. Each input object carries a
+writable `headers` field, a `Str => Payload` map that travels with the request
+across the client/worker boundary (`args` is the other writable field;
+everything else is read-only).
+
+The shipped implementation is
+[`Temporalio::Contrib::OpenTelemetry::TracingInterceptor`](sdk/lib/Temporalio/Contrib/OpenTelemetry/TracingInterceptor.pm),
+a single interceptor filling the client, activity-inbound, and
+workflow-inbound roles at once: it creates spans on client calls
+(`StartWorkflow:{wf}`, …), workflow tasks and handlers (replay-safe,
+zero-duration spans stamped at workflow time), and activity execution
+(`RunActivity:{type}`), propagating trace context across the Temporal boundary
+via the `_tracer-data` header. Pass the same instance to both
+`Temporalio::Client->connect` and `Temporalio::Worker->new`.
+Workflow-outbound spans (`StartActivity:{type}` and friends) are not wired yet
+and are tracked in issue #6.
+
+### Nexus
+
+Nexus lets a workflow call operations exposed by a service, across namespace
+boundaries, through a server-managed endpoint. A service is a class extending
+[`Temporalio::Nexus::Definition`](sdk/lib/Temporalio/Nexus/Definition.pm):
+`:NexusService` names the service, `:SyncOperation` marks an operation whose
+return value is the result, and `:WorkflowRunOperation` marks one backed by a
+workflow:
+
+```perl
+use Temporalio::Nexus::Definition;
+
+class My::NexusService :isa(Temporalio::Nexus::Definition) {
+    method svc :NexusService('greet-service') ($) { }
+
+    # Sync: the return value is the operation result.
+    method say_hello :SyncOperation('say-hello') ($ctx, $name) {
+        return "Hello, $name!";
+    }
+
+    # Workflow-backed: start the backing workflow through the context and
+    # return its handle; the operation completes when the workflow does.
+    async method report :WorkflowRunOperation('report') ($ctx, $input) {
+        return await $ctx->start_workflow('ReportWorkflow', [$input],
+            id => "report-$input", task_queue => 'reports');
+    }
+}
+```
+
+Register the service on a worker with `nexus_services =>
+['My::NexusService']`. The endpoint itself is provisioned out of band, e.g.
+`temporal operator nexus endpoint create --name my-endpoint
+--target-namespace default --target-task-queue reports`.
+
+Inside a workflow, `create_nexus_client` binds an endpoint and service;
+`execute_operation` runs an operation to completion, and `start_operation`
+returns a [`Temporalio::Workflow::NexusOperationHandle`](sdk/lib/Temporalio/Workflow/NexusOperationHandle.pm)
+once the operation has started:
+
+```perl
+my $nc = Temporalio::Workflow::create_nexus_client(
+    endpoint => 'my-endpoint', service => 'greet-service');
+
+my $greeting = await $nc->execute_operation('say-hello', 'world',
+    schedule_to_close_timeout => 60);
+
+# Or start, hold the handle, await the result later:
+my $handle = await $nc->start_operation('report', 'q3');
+my $report = await $handle->result;
+```
+
+Operations take a single input value, not an `args` arrayref (the proto
+carries one payload). A failed, timed-out, or cancelled operation raises
+`Temporalio::Exception::NexusOperation`.
+
+A `:WorkflowRunOperation` responds asynchronously: the handler's
+`$ctx->start_workflow` threads the caller's completion callback onto the
+backing workflow's start, so the server delivers the workflow's result to the
+caller's parked operation when it completes; the handler returns the
+[`Temporalio::Nexus::WorkflowHandle`](sdk/lib/Temporalio/Nexus/WorkflowHandle.pm)
+whose token identifies the operation for later cancellation.
 
 ### Telemetry
 
@@ -664,7 +978,9 @@ my $runtime = Temporalio::Runtime->new(
 
 Swap in [`Temporalio::Runtime::OpenTelemetryConfig`](sdk/lib/Temporalio/Runtime/OpenTelemetryConfig.pm)
 (with an OTLP `url`) for push-based OTel metrics. `global_tags`, `metric_prefix`,
-and `attach_service_name` are also configurable.
+and `attach_service_name` are also configurable. Custom instruments recorded
+through `Temporalio::Workflow::metric_meter` (replay-safe) and the activity
+context's `metric_meter` export through the same configured backend.
 
 #### Logging
 
@@ -674,6 +990,11 @@ Core's structured logging is configured with
 `TelemetryConfig`. Inside workflows, use the replay-aware
 `Temporalio::Workflow::logger` (see [above](#deterministic-time-randomness-and-logging)).
 
+#### Tracing
+
+For distributed traces across clients, workflows, and activities, see the
+OpenTelemetry `TracingInterceptor` under [Interceptors](#interceptors).
+
 ### Testing
 
 [`Temporalio::Test::DevServer`](sdk/lib/Temporalio/Test/DevServer.pm) boots an
@@ -681,19 +1002,25 @@ ephemeral Temporal dev server (via the [`temporal`
 CLI](https://docs.temporal.io/cli)) for integration tests, and
 [`Temporalio::Test::Worker`](sdk/lib/Temporalio/Test/Worker.pm) helps stand up a
 worker in-process. [`Temporalio::Test::WorkflowReplay`](sdk/lib/Temporalio/Test/WorkflowReplay.pm)
-drives the deterministic runner with hand-built or recorded histories — no server
+drives the deterministic runner with hand-built or recorded histories; no server
 needed. The suite is split into `t/unit/`, `t/replay/`, and `t/integration/`;
 integration tests `skip_all` when the dev server is unavailable, so a green offline
 run is expected.
 
 ## Not yet supported
 
-The v0.1 and v0.2 feature set is implemented. The following are out of scope for
-now:
+The v0.1 and v0.2 feature sets plus the R1-R97 remediation are implemented.
+The following are out of scope for now:
 
 - **A time-skipping test environment.** Workflow tests use the deterministic
   replay harness (`Temporalio::Test::WorkflowReplay`) or a real dev server
   (`Temporalio::Test::DevServer`); there is no time-skipping `WorkflowEnvironment`.
+- **The legacy build-id client RPCs.** `update_worker_build_id_compatibility`,
+  `get_worker_build_id_compatibility`, and `get_worker_task_reachability` are
+  deliberately not wrapped: all three are deprecated in the reference SDKs and
+  superseded by deployment-based worker versioning, which this SDK implements.
+  Against a server that still supports them, call them through the raw escape
+  hatch, e.g. `$client->workflow_service->get_worker_task_reachability($request)`.
 - **Windows.** The build targets Linux and other Unix-like platforms (the
   callback bridge uses `eventfd` on Linux and a pipe elsewhere).
 - **CPAN distribution.** The three distributions are not published to CPAN yet;
@@ -712,8 +1039,8 @@ now:
 
 - **Linux** is the primary target. The callback shim uses `eventfd`; other
   platforms use a self-pipe.
-- **RHEL / CentOS Stream 9** ship Perl 5.32 (frozen, EOL 2032) — too old. Use
-  [Software Collections](https://www.softwarecollections.org/) or
+- **RHEL / CentOS Stream 9** ship Perl 5.32 (frozen, EOL 2032), which is too old.
+  Use [Software Collections](https://www.softwarecollections.org/) or
   [perlbrew](https://perlbrew.pl/) to get a 5.38+ Perl.
 - **macOS** system Perl is 5.34 and Apple has signalled it will be removed. Install
   a current Perl with `perlbrew`, `plenv`, or Homebrew (`brew install perl`). Both
@@ -736,9 +1063,12 @@ dzil test                                        # per-distribution check (run i
 - Integration tests `skip_all` when the dev server is unavailable.
 
 Every public class ships hand-written POD; after installing, run
-`perldoc Temporalio::Client` (or `::Worker`, `::Workflow`, `::Activity`, …). The
-implementation contract is [`spec.md`](.ai-sessions/v1/spec.md); the TDD roadmap
-is [`plan.md`](.ai-sessions/v1/plan.md).
+`perldoc Temporalio::Client` (or `::Worker`, `::Workflow`, `::Activity`, …).
+The implementation contracts are layered: the root [`spec.md`](spec.md) (the
+R1-R97 remediation and reference-SDK parity spec, implemented) sits on top of
+the archived v1 contract at [`.ai-sessions/v1/spec.md`](.ai-sessions/v1/spec.md).
+The matching [`plan.md`](plan.md) and [`todo.md`](todo.md) are complete;
+follow-up work is tracked as GitHub issues.
 
 ## License
 
