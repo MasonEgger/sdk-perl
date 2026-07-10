@@ -50,7 +50,6 @@ requires 'File::ShareDir';
 
 on 'test' => sub {
     requires 'Test2::V1';
-    requires 'Test::Future::AsyncAwait';
 };
 
 on 'develop' => sub {
