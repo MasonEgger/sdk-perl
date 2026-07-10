@@ -472,10 +472,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R94.4 Verify: hook fires pre-return, throwing hook swallowed, original failure surfaces; prove -lj4 t green under memory guard (t: 194 files/847 tests PASS incl. the live guarded scenario; xt: 435 PASS)
 
 ### Step R95: Provide a Real-History and Multi-History Replayer Surface
-- [ ] R95.1 RED: replay test: multi-history JSON returns one result per history; mutated history yields Nondeterminism failure; from_json round-trips identically
-- [ ] R95.2 GREEN: Test/WorkflowReplay.pm accepts real WorkflowHistory + from_json, batch-replays returning per-history results with per-history nondeterminism failure, to _replayer.py:110,138,166 parity
-- [ ] R95.3 REFACTOR: reuse the R43 real nondeterminism check per history; comment cites finding 4 + resolved from-history direction
-- [ ] R95.4 Verify: batch per-history results, mutated fails Nondeterminism, from_json round-trips; prove -lj4 t green under memory guard
+- [x] R95.1 RED: replay test: multi-history JSON returns one result per history; mutated history yields Nondeterminism failure; from_json round-trips identically (t/replay/history_replayer.t; honest RED: Temporalio::Client::WorkflowHistory absent)
+- [x] R95.2 GREEN: Test/WorkflowReplay.pm accepts real WorkflowHistory + from_json, batch-replays returning per-history results with per-history nondeterminism failure, to _replayer.py:110,138,166 parity (new Client/WorkflowHistory.pm with the _helpers.py:43 legacy-enum fix pass; replay_workflow/replay_workflows over one shared _replay_session worker; Result/Results wrappers in their own file, the my-sub-then-class 5.38.2 parse trap under Future::AsyncAwait)
+- [x] R95.3 REFACTOR: reuse the R43 real nondeterminism check per history; comment cites finding 4 + resolved from-history direction (_eviction_failure shared by replay_history and the batch loop)
+- [x] R95.4 Verify: batch per-history results, mutated fails Nondeterminism (core: "Timer fired event did not have expected timer id 1, it was 2!"), from_json round-trips byte-identically; prove -lj4 t green under memory guard (t: 195 files/853 tests PASS incl. live integration; xt: 439 PASS)
 
 ### Step R96: Add an Activity Context-Aware Logger
 - [ ] R96.1 RED: unit test: log_details yields the documented field set (activity id/type, attempt, namespace, task queue, workflow ids); xt POD check requires the wiring-pattern note (fails until present)

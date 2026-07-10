@@ -1,12 +1,14 @@
 # ABOUTME: Replay test harness (spec section 10.6): push_activation drives a
 # ABOUTME: workflow Runner with hand-built activations (no server, no worker,
-# ABOUTME: no IO::Async); replay_history replays a real History through core's
-# ABOUTME: replayer, engaging its nondeterminism detection (spec R43).
+# ABOUTME: no IO::Async); replay_history/replay_workflow/replay_workflows push
+# ABOUTME: real histories through core's replayer (spec R43 + R95).
 use v5.38;
 use warnings;
 use feature 'class';
 no warnings 'experimental::class';
 
+use Scalar::Util ();
+use Temporalio::Test::WorkflowReplay::Result ();
 use Temporalio::Workflow::Runner ();
 use Temporalio::Converter::Payload ();
 
@@ -67,9 +69,10 @@ class Temporalio::Test::WorkflowReplay {
     # Runner ONLY: it checks command emission, not history consistency. The
     # resolved direction is IMPLEMENT: core's history comparison is engaged
     # through the C bridge replayer (temporal_core_worker_replayer_new /
-    # _replay_push, header :1073-1079) by replay_history below, which is where
-    # nondeterminism detection actually lives. R95 builds the public
-    # from-JSON / batch replayer surface on top of that path.
+    # _replay_push, header :1073-1079) by _replay_session below, which is
+    # where nondeterminism detection actually lives. replay_workflow and
+    # replay_workflows (spec R95, parity audit worker finding 4 resolved as
+    # from-history) are the public from-JSON / batch surface over that path.
     field $runner;
 
     ADJUST {
@@ -160,6 +163,139 @@ class Temporalio::Test::WorkflowReplay {
                 message => "replay_history: 'history' is required");
         }
 
+        my $history_bytes =
+            Scalar::Util::blessed($history) ? $history->encode : $history;
+        my $failures = $self->_replay_session([
+            { workflow_id => $workflow_id, history_bytes => $history_bytes },
+        ]);
+        die $failures->[0] if defined $failures->[0];
+        return 1;
+    }
+
+    # replay_workflow($history, %opts) -> a per-history Result for ONE
+    # Temporalio::Client::WorkflowHistory (fetched or from_json-loaded), the
+    # spec R95 public surface (sdk-python worker/_replayer.py:110
+    # replay_workflow). raise_on_replay_failure (default 1, the Python
+    # default) raises the replay failure instead of returning it in the
+    # Result.
+    method replay_workflow ($history, %opts) {
+        my $raise = delete $opts{raise_on_replay_failure} // 1;
+        _assert_known_options('replay_workflow', \%opts);
+        _assert_workflow_history('replay_workflow', $history);
+        my $failures = $self->_replay_session([_session_item($history)]);
+        die $failures->[0] if $raise && defined $failures->[0];
+        return Temporalio::Test::WorkflowReplay::Result->new(
+            history        => $history,
+            replay_failure => $failures->[0],
+        );
+    }
+
+    # replay_workflows(\@histories, %opts) -> a Results aggregate for a
+    # stream of WorkflowHistory objects (spec R95; sdk-python
+    # worker/_replayer.py:138 replay_workflows over :166
+    # workflow_replay_iterator). ONE replay worker serves the whole batch;
+    # each history is pushed in turn and its outcome recorded as a
+    # per-history Result, so a nondeterministic history fails ITS result
+    # while the others still replay. raise_on_replay_failure (default 1)
+    # raises the first failure instead.
+    method replay_workflows ($histories, %opts) {
+        my $raise = delete $opts{raise_on_replay_failure} // 1;
+        _assert_known_options('replay_workflows', \%opts);
+        if (ref $histories ne 'ARRAY') {
+            require Temporalio::Exception::Argument;
+            Temporalio::Exception::Argument->throw(message =>
+                'replay_workflows: expected an arrayref of '
+                . 'Temporalio::Client::WorkflowHistory objects');
+        }
+        _assert_workflow_history('replay_workflows', $_) for @$histories;
+
+        my $failures =
+            $self->_replay_session([map { _session_item($_) } @$histories]);
+
+        my (@results, %replay_failures);
+        for my $i (0 .. $#$histories) {
+            my $failure = $failures->[$i];
+            die $failure if $raise && defined $failure;
+            push @results, Temporalio::Test::WorkflowReplay::Result->new(
+                history        => $histories->[$i],
+                replay_failure => $failure,
+            );
+            $replay_failures{ $histories->[$i]->run_id } = $failure
+                if defined $failure;
+        }
+        return Temporalio::Test::WorkflowReplay::Results->new(
+            results         => \@results,
+            replay_failures => \%replay_failures,
+        );
+    }
+
+    # Typed strictness for the replay_workflow* option hashes (the client
+    # surface rule: a typo'd option must not be silently ignored).
+    sub _assert_known_options ($method_name, $opts) {
+        if (my @unknown = sort keys %$opts) {
+            require Temporalio::Exception::Argument;
+            Temporalio::Exception::Argument->throw(
+                message => "$method_name: unknown option(s): @unknown");
+        }
+        return;
+    }
+
+    sub _assert_workflow_history ($method_name, $history) {
+        return
+            if Scalar::Util::blessed($history)
+            && $history->isa('Temporalio::Client::WorkflowHistory');
+        require Temporalio::Exception::Argument;
+        Temporalio::Exception::Argument->throw(message =>
+            "$method_name: expected a Temporalio::Client::WorkflowHistory");
+    }
+
+    # One push item for _replay_session: the workflow_id rides alongside the
+    # serialized temporal.api.history.v1.History (histories do not embed an
+    # ID; sdk-python pushes history.workflow_id the same way,
+    # _replayer.py:350).
+    sub _session_item ($history) {
+        require Temporalio::Core::Proto;
+        my $proto_class = Temporalio::Core::Proto::resolve(
+            'temporal.api.history.v1.History');
+        return {
+            workflow_id   => $history->workflow_id,
+            history_bytes =>
+                $proto_class->new({ events => $history->events })->encode,
+        };
+    }
+
+    # Map a RemoveFromCache eviction job to a per-history failure object, or
+    # undef for a clean replay (sdk-python _replayer.py on_eviction_hook).
+    # EvictionReason (coresdk workflow_activation.proto): 1 CACHE_FULL and 5
+    # LANG_REQUESTED end a clean replay; 3 NONDETERMINISM is the history
+    # mismatch; anything else is a broken replay. This is the R43 real
+    # nondeterminism check (parity audit worker finding 4, resolved as
+    # IMPLEMENT the from-history replayer): R95 reuses it verbatim inside
+    # the per-history batch loop, so batch and single-history replay report
+    # divergence identically.
+    sub _eviction_failure ($remove_job) {
+        my $reason  = (defined $remove_job ? $remove_job->reason : 0) // 0;
+        my $message = defined $remove_job ? ($remove_job->message // '') : '';
+        if ($reason == 3) {    # NONDETERMINISM
+            require Temporalio::Exception::Nondeterminism;
+            return Temporalio::Exception::Nondeterminism->new(
+                message => $message);
+        }
+        if ($reason != 1 && $reason != 5) {  # not CACHE_FULL/LANG_REQUESTED
+            require Temporalio::Exception::Runtime;
+            return Temporalio::Exception::Runtime->new(message =>
+                "replay failed (eviction reason $reason): $message");
+        }
+        return undef;
+    }
+
+    # _replay_session(\@items) -> arrayref of per-item failure objects (undef
+    # for a clean replay), one entry per item in push order. Each item is
+    # { workflow_id, history_bytes }. One replay worker serves the whole
+    # batch (sdk-python _workflow_replay_iterator: one bridge worker, N
+    # pushes). Infrastructure errors (replayer build, push, poll-loop death,
+    # wedged replay) THROW; history-outcome failures come back per item.
+    method _replay_session ($items) {
         # Loaded lazily so activation-pushing users of this harness stay free
         # of the native bridge (the pre-R43 contract: no worker, no IO::Async).
         require Temporalio::Runtime;
@@ -175,9 +311,6 @@ class Temporalio::Test::WorkflowReplay {
         require Temporalio::Exception::Nondeterminism;
         require Temporalio::Exception::Runtime;
         require Future;
-
-        my $history_bytes =
-            Scalar::Util::blessed($history) ? $history->encode : $history;
 
         my $runtime = Temporalio::Runtime->default;
         my $loop    = $runtime->loop;
@@ -234,7 +367,10 @@ class Temporalio::Test::WorkflowReplay {
         # The dispatcher is the SAME unit the live worker drives (spec 8.3),
         # completing activations against the replay worker; the on_eviction
         # hook captures the RemoveFromCache job that ends every replayed run.
-        my $eviction_f = $loop->new_future;
+        # $eviction_f is re-created per pushed history (the hook closes over
+        # the variable, not a value), mirroring sdk-python's
+        # last_replay_complete.clear() before each push.
+        my $eviction_f;
         my $dispatcher = Temporalio::Worker::WorkflowDispatcher->new(
             registry => Temporalio::Worker::WorkflowRegistry->new(
                 workflows => [$workflow_class]),
@@ -261,7 +397,8 @@ class Temporalio::Test::WorkflowReplay {
                 return $f->on_ready(sub { @completion_keep = (); undef $ref });
             },
             on_eviction => sub ($run_id, $remove_job) {
-                $eviction_f->done($remove_job) unless $eviction_f->is_ready;
+                $eviction_f->done($remove_job)
+                    if defined $eviction_f && !$eviction_f->is_ready;
             },
         );
         my $poll_loop = Temporalio::Worker::PollLoop->new(
@@ -304,69 +441,69 @@ class Temporalio::Test::WorkflowReplay {
             return;
         }
 
-        # Push the single history. workflow_id rides alongside (histories do
-        # not embed one); the bridge decodes the History bytes synchronously,
-        # so a fail here means malformed bytes and nothing was queued.
+        # Push the histories one at a time, waiting out each run's eviction
+        # before the next push (sdk-python replay_iterator: clear the
+        # complete-event, push, wait). workflow_id rides alongside each
+        # history (histories do not embed one); the bridge decodes the
+        # History bytes synchronously, so a push fail means malformed bytes
+        # and nothing was queued. The keep buffers live for the whole
+        # session, comfortably outlasting the borrow inside the c-bridge's
+        # spawned send.
         my @push_keep;
-        my ($wid_data, $wid_size) =
-            Temporalio::Core::FFI::keep_buffer(\@push_keep, $workflow_id);
-        my ($hist_data, $hist_size) =
-            Temporalio::Core::FFI::keep_buffer(\@push_keep, $history_bytes);
-        my $pushed = Temporalio::Core::FFI::worker_replay_push(
-            $worker_ptr, $pusher_ptr,
-            Temporalio::Core::FFI::ByteArrayRef->new(
-                data => $wid_data, size => $wid_size),
-            Temporalio::Core::FFI::ByteArrayRef->new(
-                data => $hist_data, size => $hist_size),
-        );
-        if (defined(my $fail_ptr = scalar $pushed->fail)) {
-            my $byte_array =
-                Temporalio::Core::ByteArray->wrap($fail_ptr, $runtime);
-            my $message = $byte_array->bytes;
-            $byte_array->free;
-            teardown();
-            Temporalio::Exception::Bridge->throw(
-                message => "replay push failed: $message");
-        }
+        my @failures;
+        for my $item (@$items) {
+            $eviction_f = $loop->new_future;
+            my ($wid_data, $wid_size) = Temporalio::Core::FFI::keep_buffer(
+                \@push_keep, $item->{workflow_id});
+            my ($hist_data, $hist_size) = Temporalio::Core::FFI::keep_buffer(
+                \@push_keep, $item->{history_bytes});
+            my $pushed = Temporalio::Core::FFI::worker_replay_push(
+                $worker_ptr, $pusher_ptr,
+                Temporalio::Core::FFI::ByteArrayRef->new(
+                    data => $wid_data, size => $wid_size),
+                Temporalio::Core::FFI::ByteArrayRef->new(
+                    data => $hist_data, size => $hist_size),
+            );
+            if (defined(my $fail_ptr = scalar $pushed->fail)) {
+                my $byte_array =
+                    Temporalio::Core::ByteArray->wrap($fail_ptr, $runtime);
+                my $message = $byte_array->bytes;
+                $byte_array->free;
+                teardown();
+                Temporalio::Exception::Bridge->throw(
+                    message => "replay push failed: $message");
+            }
 
-        # Wait for the run's eviction (every replayed run ends in one) or a
-        # broken completion contract (poll loop failure). The delay guards CI
-        # against a wedged replay; sdk-python relies on its deadlock detector
-        # here, which the Perl runner does not have. The poll loop rides in as
-        # a ->without_cancel view: wait_any cancels its losers, and cancelling
-        # $poll_f itself would kill the in-flight eviction dispatch before its
-        # completion reaches core (the "lost its returning future" wart).
-        my $timeout_f = $loop->delay_future(after => 60);
-        $loop->await(Future->wait_any(
-            $eviction_f->without_cancel, $poll_f->without_cancel, $timeout_f));
-        $timeout_f->cancel unless $timeout_f->is_ready;
+            # Wait for the run's eviction (every replayed run ends in one) or
+            # a broken completion contract (poll loop failure). The delay
+            # guards CI against a wedged replay; sdk-python relies on its
+            # deadlock detector here, which the Perl runner does not have.
+            # The poll loop rides in as a ->without_cancel view: wait_any
+            # cancels its losers, and cancelling $poll_f itself would kill
+            # the in-flight eviction dispatch before its completion reaches
+            # core (the "lost its returning future" wart).
+            my $timeout_f = $loop->delay_future(after => 60);
+            $loop->await(Future->wait_any(
+                $eviction_f->without_cancel, $poll_f->without_cancel,
+                $timeout_f));
+            $timeout_f->cancel unless $timeout_f->is_ready;
+
+            if ($poll_f->is_failed && !$eviction_f->is_ready) {
+                teardown();
+                die(($poll_f->failure)[0]);
+            }
+            if (!$eviction_f->is_ready) {
+                teardown();
+                Temporalio::Exception::Runtime->throw(message =>
+                    'replay: no eviction for workflow '
+                    . "'$item->{workflow_id}' within 60s (replay wedged?)");
+            }
+
+            push @failures, _eviction_failure($eviction_f->get);
+        }
         teardown();
 
-        if ($poll_f->is_failed && !$eviction_f->is_ready) {
-            die(($poll_f->failure)[0]);
-        }
-        if (!$eviction_f->is_ready) {
-            Temporalio::Exception::Runtime->throw(message =>
-                "replay_history: no eviction for workflow '$workflow_id' "
-                . 'within 60s (replay wedged?)');
-        }
-
-        # Outcome mapping (sdk-python _replayer.py on_eviction_hook parity).
-        # EvictionReason (coresdk workflow_activation.proto): 1 CACHE_FULL and
-        # 5 LANG_REQUESTED end a clean replay; 3 NONDETERMINISM is the history
-        # mismatch this method exists to surface; anything else is a broken
-        # replay.
-        my $remove_job = $eviction_f->get;
-        my $reason     = (defined $remove_job ? $remove_job->reason : 0) // 0;
-        my $message    = defined $remove_job ? ($remove_job->message // '') : '';
-        if ($reason == 3) {    # NONDETERMINISM
-            Temporalio::Exception::Nondeterminism->throw(message => $message);
-        }
-        if ($reason != 1 && $reason != 5) {    # not CACHE_FULL / LANG_REQUESTED
-            Temporalio::Exception::Runtime->throw(message =>
-                "replay failed (eviction reason $reason): $message");
-        }
-        return 1;
+        return \@failures;
     }
 }
 
@@ -423,6 +560,15 @@ against the recorded events. A divergence raises
 L<Temporalio::Exception::Nondeterminism>. Still no server (core mocks the
 client internally), but the native bridge and the IO::Async loop are engaged.
 
+C<replay_workflow> and C<replay_workflows> are the public from-history
+surface over the same core replayer (spec R95, sdk-python
+C<worker/_replayer.py> parity): they take
+L<Temporalio::Client::WorkflowHistory> objects (fetched, or loaded from a
+CLI/UI JSON download via C<from_json>) and return per-history results
+instead of raising, when asked. A batch shares one replay worker; a
+nondeterministic history fails its own result while the rest of the batch
+still replays.
+
 C<push_activation> returns the decoded list of C<WorkflowCommand> protos from
 the resulting C<WorkflowActivationCompletion>. Successive calls reuse the same
 runner (the same workflow run), mirroring how the worker feeds a cached runner
@@ -452,6 +598,31 @@ L<Temporalio::Exception::Argument> on a bad argument,
 L<Temporalio::Exception::Bridge> when the replayer cannot be built or the
 history bytes fail to decode, and L<Temporalio::Exception::Runtime> when the
 replay ends abnormally (any eviction reason other than end-of-replay).
+
+=item C<replay_workflow($history, %opts)>
+
+Replay one L<Temporalio::Client::WorkflowHistory> through core's replayer
+(spec R95; sdk-python C<Replayer.replay_workflow>). Returns a
+C<Temporalio::Test::WorkflowReplay::Result> whose C<history> is the input
+and whose C<replay_failure> is C<undef> on a clean replay or the failure
+core surfaced (L<Temporalio::Exception::Nondeterminism> for a history
+mismatch). With C<raise_on_replay_failure> (default 1, the Python
+default), the failure is raised instead of returned. Raises
+L<Temporalio::Exception::Argument> for a non-WorkflowHistory input or an
+unknown option.
+
+=item C<replay_workflows(\@histories, %opts)>
+
+Replay a stream of L<Temporalio::Client::WorkflowHistory> objects through
+ONE shared replay worker (spec R95; sdk-python C<Replayer.replay_workflows>
+over C<workflow_replay_iterator>). Returns a
+C<Temporalio::Test::WorkflowReplay::Results> aggregate: C<results> is the
+per-history C<Result> list in push order (the synchronous stand-in for
+Python's async iterator) and C<replay_failures> maps each failing
+history's run id to its failure, so nondeterminism surfaces per history
+while the rest of the batch still replays. With
+C<raise_on_replay_failure> (default 1) the first failure is raised
+instead. Argument errors as for C<replay_workflow>.
 
 =item C<runner>
 

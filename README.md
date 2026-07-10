@@ -550,8 +550,9 @@ You can verify workflow code against recorded histories without a server using
 [`Temporalio::Test::WorkflowReplay`](sdk/lib/Temporalio/Test/WorkflowReplay.pm),
 useful for catching non-determinism introduced by a code change in CI.
 `replay_history` pushes a real `temporal.api.history.v1.History` through sdk-core's replayer, which compares every command the workflow emits against the recorded events and raises `Temporalio::Exception::Nondeterminism` on divergence.
+`replay_workflow` and `replay_workflows` are the public surface over the same core replayer: they take [`Temporalio::Client::WorkflowHistory`](sdk/lib/Temporalio/Client/WorkflowHistory.pm) objects (fetched, or loaded from a CLI/UI JSON download via `from_json`) and return per-history results, so one nondeterministic history in a batch fails its own result while the rest still replay.
 `push_activation` drives the deterministic runner directly with hand-built activations and returns the emitted commands; it checks command emission, not history consistency.
-The [replay tests](sdk/t/replay/) exercise both paths.
+The [replay tests](sdk/t/replay/) exercise these paths.
 
 ### Activities
 
