@@ -500,6 +500,24 @@ handler by name, overriding an attribute handler of the same name; the
 `set_dynamic_*` variants install the catch-all. On install, buffered past
 signals for the name are delivered to the new handler in arrival order.
 
+> **Define each attributed class in its own file.**
+> Loading `Future::AsyncAwait` (required for the `async`/`await` used throughout
+> workflow and activity code) installs a parser hook that breaks native-`class`
+> method-attribute parsing for the *second and any later* `class` block in the
+> same compilation unit.
+> An attributed method (`:Run`, `:Signal`, `:Query`, `:Update`,
+> `:UpdateValidator`, `:Init`, or an activity's `:Defn`) in a second-or-later
+> class fails at compile time with a misleading
+> `Subroutine attributes must come before the signature` error that points at the
+> wrong line.
+> A single class may declare any number of attributed methods (async or not); the
+> constraint is only against having two attributed classes in one file.
+> So put each workflow and each activity class in its own `.pm` and load them with
+> `use`.
+> To share logic across several workflow types, keep it in a common base class
+> that declares no attributed methods (its own file) and subclass it, one
+> attributed subclass per file.
+
 #### Running workflows
 
 Client-side, a [`Temporalio::Client::WorkflowHandle`](sdk/lib/Temporalio/Client/WorkflowHandle.pm)
@@ -717,6 +735,11 @@ class Activities :isa(Temporalio::Activity::Definition) {
     method crunch :Defn('Crunch') ($data) { return expensive_pure_perl($data) }
 }
 ```
+
+One activity class may host any number of `:Defn` methods, but the same
+one-attributed-class-per-file rule as workflows applies: two `:Defn` classes in a
+single file fail to compile once `Future::AsyncAwait` is loaded. See
+[Workflows → Definition](#definition).
 
 #### Activity context
 
