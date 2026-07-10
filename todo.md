@@ -400,10 +400,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 ## Phase P10: Parity — Medium and Low
 
 ### Step R83: Expose a User-Facing Metric Meter in Workflow, Activity, and Nexus Context
-- [ ] R83.1 RED: replay + unit tests: workflow counter emits live and is suppressed on replay; activity + nexus counters reach a test buffer
-- [ ] R83.2 GREEN: add emission surface to Runtime/MetricMeter.pm; expose metric_meter on activity/workflow/nexus contexts (workflow no-ops on replay), to Python parity
-- [ ] R83.3 REFACTOR: share one instrument wrapper across the three contexts; comment cites parity finding 6 + replay suppression
-- [ ] R83.4 Verify: live emit, replay suppress, activity + nexus emit; prove -lj4 t green under memory guard
+- [x] R83.1 RED: replay + unit tests: workflow counter emits live and is suppressed on replay; activity + nexus counters reach a test buffer
+- [x] R83.2 GREEN: add emission surface to Runtime/MetricMeter.pm; expose metric_meter on activity/workflow/nexus contexts (workflow no-ops on replay), to Python parity
+- [x] R83.3 REFACTOR: share one instrument wrapper across the three contexts; comment cites parity finding 6 + replay suppression
+- [x] R83.4 Verify: live emit, replay suppress, activity + nexus emit; prove -lj4 t green under memory guard (t: 181 files/808 tests PASS incl. live integration + a core-FFI e2e through a custom sink; xt: 422 PASS)
 
 ### Step R84: Provide Worker-Shutdown Detection Inside Activities
 - [ ] R84.1 RED: unit test: worker shutdown flips is_worker_shutdown and resolves the shutdown future; a plain cancel does not

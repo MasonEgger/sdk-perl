@@ -63,6 +63,11 @@ class Temporalio::Worker::ActivityDispatcher {
     # the chain was built by Worker.pm but the dispatch path never called it).
     field $interceptors :param = [];
 
+    # The worker runtime's metric meter (spec R83), injected into each async
+    # activity Context. The fork-pool child's context deliberately gets none
+    # (cross-process metrics unsupported; the Context raises there).
+    field $metric_meter :param = undef;
+
     # task_token => { cancellation => Temporalio::Cancellation, context => ... }.
     # Added on start (step 5), used by cancel routing (step 3), removed on
     # completion (step 7).
@@ -237,6 +242,7 @@ class Temporalio::Worker::ActivityDispatcher {
                         // sub ($bytes) { return undef },
                     outbound           => $outbound,
                     cancellation_details_holder => $details_holder,
+                    metric_meter       => $metric_meter,
                 );
                 $running{$task_token}{context} = $ctx;
 
@@ -528,6 +534,12 @@ Constructs a Temporalio::Worker::ActivityDispatcher. Named parameters:
 =item C<heartbeat_recorder>
 
 (optional, default C<undef>)
+
+=item C<metric_meter>
+
+(optional, default C<undef>) The worker runtime's user-facing metric meter
+(spec R83), injected into each async activity context. The fork-pool child's
+context gets none (cross-process metrics unsupported).
 
 =back
 

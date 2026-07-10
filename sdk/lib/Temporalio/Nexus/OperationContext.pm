@@ -35,10 +35,22 @@ class Temporalio::Nexus::StartOperationContext {
     field $logger  :param = undef;
     field $headers :param = {};
 
+    # The worker runtime's metric meter (spec R83), dispatcher-injected; the
+    # shared _context_meter helper below wraps it with the Nexus attribute
+    # set lazily (Python parity: nexus/_operation_context.py:107,201-209).
+    field $metric_meter :param = undef;
+    field $context_metric_meter;
+
     method info    { return $info }
     method client  { return $client }
     method logger  { return $logger }
     method headers { return $headers }
+
+    method metric_meter {
+        return $context_metric_meter //=
+            Temporalio::Nexus::OperationContext::_context_meter(
+                $metric_meter, $info);
+    }
 }
 
 # CancelOperationContext — passed to the cancel path. Carries the info, client,
@@ -49,10 +61,20 @@ class Temporalio::Nexus::CancelOperationContext {
     field $logger          :param = undef;
     field $operation_token :param = undef;
 
+    # The worker runtime's metric meter (spec R83); see StartOperationContext.
+    field $metric_meter :param = undef;
+    field $context_metric_meter;
+
     method info            { return $info }
     method client          { return $client }
     method logger          { return $logger }
     method operation_token { return $operation_token }
+
+    method metric_meter {
+        return $context_metric_meter //=
+            Temporalio::Nexus::OperationContext::_context_meter(
+                $metric_meter, $info);
+    }
 }
 
 # WorkflowRunOperationContext — passed as $ctx to a :WorkflowRunOperation
@@ -76,6 +98,10 @@ class Temporalio::Nexus::WorkflowRunOperationContext {
     field $request_id      :param = undef;
     field $links           :param = [];
 
+    # The worker runtime's metric meter (spec R83); see StartOperationContext.
+    field $metric_meter :param = undef;
+    field $context_metric_meter;
+
     method info            { return $info }
     method client          { return $client }
     method logger          { return $logger }
@@ -84,6 +110,12 @@ class Temporalio::Nexus::WorkflowRunOperationContext {
     method callback_header { return $callback_header }
     method request_id      { return $request_id }
     method links           { return $links }
+
+    method metric_meter {
+        return $context_metric_meter //=
+            Temporalio::Nexus::OperationContext::_context_meter(
+                $metric_meter, $info);
+    }
 
     # start_workflow($workflow, $args, %kwargs) -> (async) a
     # Temporalio::Nexus::WorkflowHandle. Mirrors sdk-python
@@ -142,6 +174,32 @@ class Temporalio::Nexus::WorkflowRunOperationContext {
             links => $temporal_links,
         }));
     }
+}
+
+# The shared context-meter builder behind the three contexts' metric_meter
+# accessors (spec R83): wraps the dispatcher-injected runtime meter with the
+# Nexus attribute set, MUST-matching sdk-python's _TemporalOperationCtx
+# .metric_meter attributes (nexus/_operation_context.py:201-209). Raises when
+# the context was constructed without a meter. Fully qualified: this file has
+# no ambient package, so a bare `sub` here would land in main::. Classic @_
+# unpacking, NOT a signature: a signatured named sub compiled at the end of
+# this file poisons the next attribute-bearing declaration a later `require`
+# compiles (the perl 5.38.2 parser-state bug in lessons.md — it broke
+# Runtime/MetricMeter.pm's `field :param` lines when this file loaded first).
+sub Temporalio::Nexus::OperationContext::_context_meter {
+    my ($meter, $info) = @_;
+    if (!defined $meter) {
+        require Temporalio::Exception::Runtime;
+        Temporalio::Exception::Runtime->throw(
+            message => 'no metric meter is available on this Nexus operation'
+                     . ' context (constructed without one)');
+    }
+    return $meter->with_additional_attributes({
+        nexus_service   => $info->service,
+        nexus_operation => $info->operation,
+        (defined $info->task_queue
+            ? (task_queue => $info->task_queue) : ()),
+    });
 }
 
 1;
@@ -205,6 +263,15 @@ The handler logger (or undef).
 =head2 headers
 
 The Nexus request headers hashref.
+
+=head2 metric_meter
+
+(all three contexts) The operation's metric meter (spec R83): a
+L<Temporalio::Runtime::MetricMeter::Meter> backed by the worker runtime's
+configured exporter, carrying the C<nexus_service>, C<nexus_operation>, and
+C<task_queue> attributes (Python parity:
+C<nexus/_operation_context.py:107>). Raises L<Temporalio::Exception::Runtime>
+when the context was constructed without a meter.
 
 =head2 operation_token
 

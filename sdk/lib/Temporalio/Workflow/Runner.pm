@@ -121,6 +121,12 @@ class Temporalio::Workflow::Runner {
     # replay harness defaults it empty (no interceptors).
     field $interceptors :param = [];
 
+    # The worker's runtime metric meter (spec R83), injected by the
+    # WorkflowDispatcher (the replay harness injects a test meter; undef
+    # falls back to the noop meter). metric_meter below wraps it with the
+    # workflow attribute set and the replay-suppression gate.
+    field $metric_meter :param = undef;
+
     field $instance;                 # the workflow Definition instance
     field $workflow_inbound;         # the built workflow-inbound interceptor chain
     field $workflow_outbound;        # the workflow-outbound chain init() produced (spec R71)
@@ -290,6 +296,10 @@ class Temporalio::Workflow::Runner {
     # built on first access so a run that never logs pays nothing.
     field $logger;
 
+    # The replay-safe workflow metric meter (spec R83), lazily built on first
+    # access like the logger (see the metric_meter method).
+    field $workflow_metric_meter;
+
     # Cancellation flag (spec section 10.3 CancelWorkflow / step 6). Set when a
     # CancelWorkflow job arrives; the outcome decision table promotes a
     # Cancelled escaping :Run to CancelWorkflowExecution only when this is set
@@ -457,6 +467,32 @@ class Temporalio::Workflow::Runner {
     method logger {
         $logger //= Temporalio::Workflow::Logger->new(runner => $self);
         return $logger;
+    }
+
+    # The replay-safe workflow metric meter (spec R83; parity in-workflow
+    # finding 6): the injected runtime meter carrying the workflow attribute
+    # set, with emits suppressed while the activation replays. MUST-match
+    # sdk-python workflow_metric_meter (_workflow_instance.py:1338-1352, the
+    # namespace/task_queue/workflow_type attributes) wrapped replay-safe
+    # (_ReplaySafeMetricMeter, :3571 — instruments are still created during
+    # replay; only their emits drop). Built once per run like the logger; the
+    # suppress closure holds the runner WEAKLY so meter -> runner cannot
+    # cycle.
+    method metric_meter {
+        return $workflow_metric_meter //= do {
+            require Temporalio::Runtime::MetricMeter;
+            my $base = $metric_meter
+                // Temporalio::Runtime::MetricMeter::Meter->noop;
+            my $weak_self = $self;
+            Scalar::Util::weaken($weak_self);
+            $base->with_additional_attributes({
+                namespace     => $namespace,
+                workflow_type => $workflow_type,
+                (defined $task_queue ? (task_queue => $task_queue) : ()),
+            })->_with_suppress(sub {
+                return !defined $weak_self || $weak_self->is_replaying;
+            });
+        };
     }
 
     # info routes through the workflow-outbound interceptor chain (spec R71;
@@ -4530,6 +4566,14 @@ Returns true while a L</durable_scheduler_disabled> block is on the stack.
 =head2 logger
 
 Returns the run's replay-aware workflow logger.
+
+=head2 metric_meter
+
+Returns the run's replay-safe metric meter (spec R83): the worker-injected
+runtime meter carrying the C<namespace>, C<task_queue>, and C<workflow_type>
+attributes, with emits suppressed while the activation replays. Backs
+C<Temporalio::Workflow::metric_meter>. Built once per run; the noop meter
+when the runner was constructed without one.
 
 =head2 memo
 

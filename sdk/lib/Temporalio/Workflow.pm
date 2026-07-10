@@ -98,6 +98,12 @@ sub uuid4 {
 # return true so user code can build messages regardless of replay state.
 sub logger { return _runner()->logger }
 
+# metric_meter -> the replay-safe workflow metric meter (spec R83): a
+# Temporalio::Runtime::MetricMeter::Meter carrying the workflow attribute set
+# (namespace, task_queue, workflow_type) whose instruments no-op while the
+# activation replays (Python parity: workflow/_context.py:710).
+sub metric_meter { return _runner()->metric_meter }
+
 # info -> the workflow info hashref (workflow_id, run_id, workflow_type,
 # namespace, task_queue, attempt, patches, search_attributes, memo; spec R36,
 # Python-parity field names).
@@ -563,6 +569,20 @@ Returns true while the workflow is replaying history.
 =head2 logger
 
 Returns the replay-aware L<Temporalio::Workflow::Logger> for the running workflow.
+
+=head2 metric_meter
+
+    Temporalio::Workflow::metric_meter()
+        ->create_counter('my_counter', unit => 'widgets')
+        ->add(1, { attr => 'value' });
+
+Returns the replay-safe workflow metric meter (spec R83): a
+L<Temporalio::Runtime::MetricMeter::Meter> backed by the worker runtime's
+configured exporter and carrying the C<namespace>, C<task_queue>, and
+C<workflow_type> attributes. Values recorded through it are B<suppressed
+while the activation replays> (instruments are still created), matching
+Python's C<workflow.metric_meter()>. Raises
+L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
 
 =head2 memo
 

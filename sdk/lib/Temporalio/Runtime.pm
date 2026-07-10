@@ -39,6 +39,12 @@ class Temporalio::Runtime {
     field $telemetry_keep;      # records core retains by pointer past runtime_new
     field $is_shutdown = 0;
 
+    # The lazily-built user-facing metric meter (spec R83) and its FFI
+    # backend. The meter is the noop meter when core has no metrics exporter
+    # configured (metric_meter_new returned NULL — sdk-python runtime.py:150).
+    field $metric_meter;
+    field $metric_meter_backend;
+
     # The lazily-created process default (spec section 4.2). Shutdown of the
     # default clears it, so a later ->default constructs a fresh one.
     our $_DEFAULT;
@@ -220,6 +226,28 @@ class Temporalio::Runtime {
     method loop ()        { $loop }
     method is_shutdown () { $is_shutdown }
 
+    # metric_meter() -> the user-facing Temporalio::Runtime::MetricMeter::Meter
+    # for this runtime (spec R83), created on first use over the core meter
+    # surface; the shared noop meter when no metrics exporter is configured
+    # (MUST-match sdk-python Runtime.metric_meter, runtime.py:150-161). The
+    # worker threads this meter to the workflow, activity, and Nexus contexts.
+    method metric_meter () {
+        $self->_assert_open;
+        return $metric_meter //= do {
+            my $meter_ptr = Temporalio::Core::FFI::metric_meter_new($core_ptr);
+            if (defined $meter_ptr) {
+                $metric_meter_backend =
+                    Temporalio::Runtime::MetricMeter::CoreBackend->new(
+                        meter_ptr => $meter_ptr);
+                Temporalio::Runtime::MetricMeter::Meter->new(
+                    backend => $metric_meter_backend);
+            }
+            else {
+                Temporalio::Runtime::MetricMeter::Meter->noop;
+            }
+        };
+    }
+
     method shutdown () {
         return if $is_shutdown;    # step 6: idempotent
 
@@ -257,6 +285,15 @@ class Temporalio::Runtime {
             require Temporalio::Worker::SlotSupplierRegistry;
             Temporalio::Worker::SlotSupplierRegistry->_clear_active;
         }
+        # 1e. Close the user-facing metric-meter backend (spec R83) BEFORE the
+        # core runtime is freed: frees every owned attribute set, metric, and
+        # the core meter while their runtime is still alive. Meters and
+        # instruments still held by user code become safe no-ops.
+        if (defined $metric_meter_backend) {
+            $metric_meter_backend->close;
+            $metric_meter_backend = undef;
+        }
+        $metric_meter = undef;
         # 2. Ordered completion-channel teardown (findings L1 and L18; spec
         # R1 + R21): barrier -> fail-pending -> queue-free, centralized in
         # one helper so every shutdown path sequences it identically.
@@ -430,6 +467,17 @@ Class method returning the process-wide default runtime, creating it on first us
 =head2 is_shutdown
 
 Accessor returning the C<is_shutdown> value.
+
+=head2 metric_meter
+
+The user-facing L<Temporalio::Runtime::MetricMeter::Meter> for this runtime
+(spec R83), lazily created over the core meter surface
+(C<temporal_core_metric_meter_new>). When no metrics exporter is configured
+this is the shared noop meter (recording is a safe no-op), matching
+sdk-python's C<Runtime.metric_meter>. The worker threads this meter to the
+workflow, activity, and Nexus contexts; C<shutdown> closes the backing core
+meter, after which held meters and instruments become safe no-ops. Raises
+C<"Runtime is shut down"> when called after C<shutdown>.
 
 =head2 loop
 

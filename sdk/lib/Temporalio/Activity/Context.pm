@@ -8,6 +8,7 @@ no warnings 'experimental::class';
 
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Heartbeat ();
+use Temporalio::Exception::Runtime ();
 use Temporalio::Worker::Interceptor ();   # Input classes for the outbound chain
 
 class Temporalio::Activity::Context {
@@ -77,6 +78,35 @@ class Temporalio::Activity::Context {
     # `cancelled` flag and the R19 live-cancel relay but no details — a
     # documented spec section 0 deviation, like the heartbeat chain above).
     field $cancellation_details_holder :param = undef;
+
+    # The worker runtime's metric meter (spec R83), injected by the
+    # ActivityDispatcher on the async path. undef for the fork-pool child's
+    # context and bare unit constructions: cross-process metrics are not
+    # supported, matching Python's non-threaded sync activities
+    # (activity.py:459-464).
+    field $metric_meter :param = undef;
+
+    # The lazily-wrapped context meter (see metric_meter below).
+    field $context_metric_meter;
+
+    # metric_meter() -> the activity metric meter (spec R83): the runtime
+    # meter carrying the namespace/task_queue/activity_type attribute set,
+    # built lazily on first access (Python parity: activity.py:247,461-472).
+    # Raises when no runtime meter was injected (the fork-pool sync path).
+    method metric_meter {
+        if (!defined $metric_meter) {
+            Temporalio::Exception::Runtime->throw(
+                message => 'metric meter is not available in fork-pool sync'
+                         . ' activities (cross-process metrics are not'
+                         . ' supported; Python parity: activity.py:459)');
+        }
+        return $context_metric_meter //=
+            $metric_meter->with_additional_attributes({
+                namespace     => $info->{namespace},
+                task_queue    => $info->{task_queue},
+                activity_type => $info->{activity_type},
+            });
+    }
 
     # cancellation_details() -> Temporalio::Activity::CancellationDetails or
     # undef while the activity has not been cancelled (Python parity:
@@ -228,6 +258,16 @@ sdk-python's C<activity.cancellation_details()>. The fork-pool child's
 context always reports C<undef> (the holder does not cross the fork, a
 documented spec section 0 deviation).
 
+=head2 metric_meter
+
+The activity metric meter (spec R83): a
+L<Temporalio::Runtime::MetricMeter::Meter> backed by the worker runtime's
+configured exporter, carrying the C<namespace>, C<task_queue>, and
+C<activity_type> attributes (Python parity: C<activity.metric_meter()>).
+Raises L<Temporalio::Exception::Runtime> on the fork-pool child's context,
+where cross-process metrics are not supported (Python raises the same for
+non-threaded sync activities).
+
 =head2 client / data_converter / payload_converter
 
 Readers for the worker's client, the data converter, and the payload
@@ -278,6 +318,11 @@ chain; when set, C<info> and C<heartbeat> route through it.
 
 (optional, default C<undef>) The dispatcher-shared set-on-cancel holder that
 L</cancellation_details> reads (spec R76). C<undef> reports no details.
+
+=item C<metric_meter>
+
+(optional, default C<undef>) The worker runtime's metric meter (spec R83);
+C<undef> makes L</metric_meter> raise (the fork-pool sync path).
 
 =back
 

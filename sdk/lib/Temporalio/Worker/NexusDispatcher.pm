@@ -44,6 +44,10 @@ class Temporalio::Worker::NexusDispatcher {
     # _interceptor.py:66-78,500-528 via _nexus.py:657-675).
     field $interceptors :param = [];
 
+    # The worker runtime's metric meter (spec R83), injected into every
+    # operation context so handlers can emit through the configured exporter.
+    field $metric_meter :param = undef;
+
     # A coderef ($completion_bytes) -> Future sending the serialized
     # NexusTaskCompletion to core. Injectable so unit tests capture completions
     # without a live worker.
@@ -215,6 +219,7 @@ class Temporalio::Worker::NexusDispatcher {
         my $ctx = $def->{kind} eq 'workflow_run'
             ? Temporalio::Nexus::WorkflowRunOperationContext->new(
                 info => $info, client => $client, logger => $logger,
+                metric_meter => $metric_meter,
                 headers => ($request->can('header') ? ($request->header // {}) : {}),
                 # B13 (#11): copy the inbound StartOperation async-completion
                 # details so start_workflow can attach them to the backing
@@ -229,6 +234,7 @@ class Temporalio::Worker::NexusDispatcher {
                                          @{ $start->links // [] } ])
             : Temporalio::Nexus::StartOperationContext->new(
                 info => $info, client => $client, logger => $logger,
+                metric_meter => $metric_meter,
                 headers => ($request->can('header') ? ($request->header // {}) : {}));
 
         # R73 (parity finding 3): fold the interceptor list over a
@@ -339,6 +345,7 @@ class Temporalio::Worker::NexusDispatcher {
         );
         my $ctx = Temporalio::Nexus::CancelOperationContext->new(
             info => $info, client => $client, logger => $logger,
+            metric_meter => $metric_meter,
             operation_token => $token);
 
         my $inbound = Temporalio::Worker::Interceptor::build_nexus_operation_inbound(
@@ -511,6 +518,9 @@ handler-running root via
 C<Temporalio::Worker::Interceptor::build_nexus_operation_inbound> and
 dispatches through the resulting
 L<Temporalio::Worker::NexusOperationInbound> chain (spec R73).
+
+C<metric_meter> (optional) is the worker runtime's user-facing metric meter
+(spec R83), injected into every operation context's C<metric_meter> accessor.
 
 =head1 METHODS
 

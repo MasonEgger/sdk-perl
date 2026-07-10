@@ -25,6 +25,324 @@ package Temporalio::Runtime::MetricMeter::Kind {
     };
 }
 
+# ---------------------------------------------------------------------------
+# The user-facing EMISSION surface (spec R83; parity in-workflow finding 6,
+# schedule/runtime finding 2, nexus finding 4): the meter user code records
+# metrics TO, mirroring sdk-python's common.MetricMeter over runtime.py:595's
+# core-backed _MetricMeter. Distinct from the custom-sink CONSUMER class below
+# (spec section 28.2), which receives what core emits. One meter/instrument
+# wrapper is shared by all three contexts: workflow (replay-suppressed via the
+# suppress gate), activity, and Nexus.
+#
+# These classes are defined BEFORE the consumer class: its signatured named
+# subs would otherwise poison the next `field :param` parse (the perl 5.38.2
+# parser-state bug in lessons.md).
+# ---------------------------------------------------------------------------
+
+# A meter: creates instruments against a backend and carries a base
+# attribute-set handle plus the replay-suppression gate. Backends are
+# duck-typed (CoreBackend, NoopBackend, or a test double) with the contract:
+#   create_instrument($kind, $name, $description, $unit) -> opaque handle
+#   attributes($base_or_undef, \%attrs)                  -> opaque handle
+#   record($instrument_handle, $value, $attrs_or_undef)  -> void
+#   release_attributes($handle)   (optional; frees a per-call ephemeral set)
+class Temporalio::Runtime::MetricMeter::Meter {
+    field $backend  :param;
+    field $attrs    :param = undef;   # backend attribute-set handle
+    field $suppress :param = undef;   # coderef; true return drops emits
+
+    # The shared process noop meter (sdk-python common.MetricMeter.noop):
+    # what Runtime->metric_meter returns when core has no metrics exporter.
+    our $NOOP;
+    sub noop {
+        return $NOOP //= Temporalio::Runtime::MetricMeter::Meter->new(
+            backend => Temporalio::Runtime::MetricMeter::NoopBackend->new);
+    }
+
+    # create_counter/create_histogram/create_gauge($name, description => ...,
+    # unit => ...) -> a Temporalio::Runtime::MetricMeter::Instrument. The
+    # integer kinds, matching Python's create_counter/create_histogram/
+    # create_gauge (common.py:755-853).
+    method create_counter ($name, %options) {
+        return $self->_create_instrument(
+            Temporalio::Runtime::MetricMeter::Kind::COUNTER_INTEGER,
+            counter => $name, %options);
+    }
+
+    method create_histogram ($name, %options) {
+        return $self->_create_instrument(
+            Temporalio::Runtime::MetricMeter::Kind::HISTOGRAM_INTEGER,
+            histogram => $name, %options);
+    }
+
+    method create_gauge ($name, %options) {
+        return $self->_create_instrument(
+            Temporalio::Runtime::MetricMeter::Kind::GAUGE_INTEGER,
+            gauge => $name, %options);
+    }
+
+    method _create_instrument ($kind, $style, $name, %options) {
+        my $description = delete $options{description};
+        my $unit        = delete $options{unit};
+        if (my @unknown = sort keys %options) {
+            Temporalio::Exception::Argument->throw(
+                message => "create_$style: unknown option(s): @unknown");
+        }
+        if (!defined $name || !length $name) {
+            Temporalio::Exception::Argument->throw(
+                message => "create_$style requires a metric name");
+        }
+        return Temporalio::Runtime::MetricMeter::Instrument->new(
+            backend     => $backend,
+            handle      => $backend->create_instrument(
+                $kind, $name, $description, $unit),
+            style       => $style,
+            name        => $name,
+            description => $description,
+            unit        => $unit,
+            attrs       => $attrs,
+            suppress    => $suppress,
+        );
+    }
+
+    # with_additional_attributes(\%attrs) -> a new meter whose instruments
+    # carry the current set plus \%attrs (Python common.py:854-869).
+    method with_additional_attributes ($additional) {
+        return Temporalio::Runtime::MetricMeter::Meter->new(
+            backend  => $backend,
+            attrs    => $backend->attributes($attrs, $additional),
+            suppress => $suppress,
+        );
+    }
+
+    # _with_suppress($coderef) -> a new meter whose instruments drop emits
+    # while $coderef returns true. SDK-internal: the workflow Runner installs
+    # its replay gate here (the Perl form of Python's _ReplaySafeMetricMeter,
+    # _workflow_instance.py:3571).
+    method _with_suppress ($code) {
+        return Temporalio::Runtime::MetricMeter::Meter->new(
+            backend  => $backend,
+            attrs    => $attrs,
+            suppress => $code,
+        );
+    }
+}
+
+# Parser-state firewall (the perl 5.38.2 bug in lessons.md): a signatured
+# named sub compiled in an EARLIER file (e.g. Temporalio::Nexus's helpers)
+# can make the next `field :param` in THIS file die "Subroutine attributes
+# must come before the signature"; a file-scope signature-less named sub
+# resets the state (verified empirically for this file's class boundaries).
+sub Temporalio::Runtime::MetricMeter::_parser_state_reset_1 { }
+
+# One instrument (counter, histogram, or gauge). The emit method is gated by
+# style — add for counters, record for histograms, set for gauges — each
+# taking ($value, \%per_call_attributes). Shared by the workflow, activity,
+# and Nexus context meters (the spec R83 one-wrapper requirement).
+class Temporalio::Runtime::MetricMeter::Instrument {
+    field $backend     :param;
+    field $handle      :param;    # backend instrument handle (undef = noop)
+    field $style       :param;    # 'counter' | 'histogram' | 'gauge'
+    field $name        :param;
+    field $description :param = undef;
+    field $unit        :param = undef;
+    field $attrs       :param = undef;
+    field $suppress    :param = undef;
+
+    method name        { return $name }
+    method description { return $description }
+    method unit        { return $unit }
+
+    # add($value, \%attrs) — counters only (Python MetricCounter.add).
+    method add ($value, $additional = undef) {
+        $self->_assert_style(counter => 'add');
+        return $self->_emit($value, $additional);
+    }
+
+    # record($value, \%attrs) — histograms only (Python MetricHistogram.record).
+    method record ($value, $additional = undef) {
+        $self->_assert_style(histogram => 'record');
+        return $self->_emit($value, $additional);
+    }
+
+    # set($value, \%attrs) — gauges only (Python MetricGauge.set).
+    method set ($value, $additional = undef) {
+        $self->_assert_style(gauge => 'set');
+        return $self->_emit($value, $additional);
+    }
+
+    # with_additional_attributes(\%attrs) -> a new instrument over the same
+    # backend handle with the appended set (Python common.py:895-911).
+    method with_additional_attributes ($additional) {
+        return Temporalio::Runtime::MetricMeter::Instrument->new(
+            backend     => $backend,
+            handle      => $handle,
+            style       => $style,
+            name        => $name,
+            description => $description,
+            unit        => $unit,
+            attrs       => $backend->attributes($attrs, $additional),
+            suppress    => $suppress,
+        );
+    }
+
+    method _assert_style ($expected, $operation) {
+        return if $style eq $expected;
+        Temporalio::Exception::Argument->throw(
+            message => "$operation is only valid on a $expected instrument"
+                     . " ('$name' is a $style)");
+    }
+
+    method _emit ($value, $additional) {
+        if (!defined $value
+            || !Scalar::Util::looks_like_number($value)
+            || $value < 0) {
+            # Python parity: every instrument raises on a negative value
+            # (runtime.py _MetricCounter.add and siblings).
+            Temporalio::Exception::Argument->throw(
+                message => "metric value must be a non-negative number"
+                         . " (metric '$name')");
+        }
+        # The replay gate: suppression skips ALL emission work, including the
+        # per-call attribute build (Python's replay-safe instruments skip the
+        # underlying call entirely, _workflow_instance.py:3652-3663).
+        return if defined $suppress && $suppress->();
+
+        my $set = $attrs;
+        my $ephemeral;
+        if (defined $additional && %$additional) {
+            $ephemeral = $backend->attributes($set, $additional);
+            $set = $ephemeral;
+        }
+        $backend->record($handle, $value, $set);
+        # A per-call set is ephemeral: release it now so a hot loop cannot
+        # accumulate core attribute handles (long-lived sets are freed by the
+        # backend at close). Optional in the backend contract.
+        $backend->release_attributes($ephemeral)
+            if defined $ephemeral && $backend->can('release_attributes');
+        return;
+    }
+}
+
+# Parser-state firewall; see _parser_state_reset_1 above.
+sub Temporalio::Runtime::MetricMeter::_parser_state_reset_2 { }
+
+# The FFI backend over the CORE meter surface (spec R83): temporal_core_
+# metric_meter_new / metric_new / metric_attributes_new[_append] /
+# metric_record_integer, the same C functions sdk-python's bridge metric
+# module wraps. Owned by Temporalio::Runtime, which closes it at shutdown
+# (before runtime_free) so no metric call can outlive the core runtime.
+class Temporalio::Runtime::MetricMeter::CoreBackend {
+    field $meter_ptr :param;    # TemporalCoreMetricMeter*
+
+    field $closed = 0;
+    field $default_attrs;       # lazily-created empty base set
+    field %owned_attrs;         # attrs ptr => 1; freed at close
+    field @owned_metrics;       # metric ptrs; freed at close
+
+    method create_instrument ($kind, $name, $description, $unit) {
+        return undef if $closed;
+        my @keep;
+        my ($name_data, $name_size) =
+            Temporalio::Core::FFI::keep_buffer(\@keep, $name);
+        my ($desc_data, $desc_size) =
+            Temporalio::Core::FFI::keep_buffer(\@keep, $description);
+        my ($unit_data, $unit_size) =
+            Temporalio::Core::FFI::keep_buffer(\@keep, $unit);
+        my $options = Temporalio::Core::FFI::MetricOptions->new(
+            name_data        => $name_data,
+            name_size        => $name_size,
+            description_data => $desc_data,
+            description_size => $desc_size,
+            unit_data        => $unit_data,
+            unit_size        => $unit_size,
+            kind             => $kind,
+        );
+        my $metric_ptr =
+            Temporalio::Core::FFI::metric_new($meter_ptr, $options);
+        push @owned_metrics, $metric_ptr if defined $metric_ptr;
+        return $metric_ptr;
+    }
+
+    method attributes ($base, $attrs) {
+        return $base if $closed;
+        return $base unless defined $attrs && %$attrs;
+        my @keep;
+        my ($array_ptr, $count) =
+            Temporalio::Core::FFI::keep_metric_attribute_array(\@keep, $attrs);
+        my $attrs_ptr = defined $base
+            ? Temporalio::Core::FFI::metric_attributes_new_append(
+                $meter_ptr, $base, $array_ptr, $count)
+            : Temporalio::Core::FFI::metric_attributes_new(
+                $meter_ptr, $array_ptr, $count);
+        $owned_attrs{$attrs_ptr} = 1 if defined $attrs_ptr;
+        return $attrs_ptr;
+    }
+
+    method record ($handle, $value, $attrs) {
+        return if $closed || !defined $handle;
+        # The bridge DEREFERENCES the attributes pointer unconditionally
+        # (metric.rs temporal_core_metric_record_integer), so a record with
+        # no attribute set must pass the empty default set, never NULL.
+        Temporalio::Core::FFI::metric_record_integer(
+            $handle, int($value), $attrs // $self->_default_attrs);
+        return;
+    }
+
+    # Free an ephemeral per-call attribute set immediately (the Instrument
+    # emit path); a set this backend does not own is left alone.
+    method release_attributes ($attrs_ptr) {
+        return unless defined $attrs_ptr && delete $owned_attrs{$attrs_ptr};
+        Temporalio::Core::FFI::metric_attributes_free($attrs_ptr);
+        return;
+    }
+
+    # The empty base attribute set (core's default attributes plus nothing).
+    # The array pointer must be non-NULL even for a zero count (the bridge
+    # slices it), so a kept dummy buffer rides along for the call.
+    method _default_attrs () {
+        return $default_attrs //= do {
+            my @keep;
+            my ($dummy_ptr) =
+                Temporalio::Core::FFI::keep_buffer(\@keep, "\0" x 8);
+            my $attrs_ptr = Temporalio::Core::FFI::metric_attributes_new(
+                $meter_ptr, $dummy_ptr, 0);
+            $owned_attrs{$attrs_ptr} = 1 if defined $attrs_ptr;
+            $attrs_ptr;
+        };
+    }
+
+    # Tear the backend down (Temporalio::Runtime::shutdown, BEFORE the core
+    # runtime is freed): free every owned attribute set and metric, then the
+    # meter. Instruments and meters holding this backend become safe no-ops.
+    method close () {
+        return if $closed;
+        $closed = 1;
+        Temporalio::Core::FFI::metric_attributes_free($_)
+            for keys %owned_attrs;
+        %owned_attrs   = ();
+        $default_attrs = undef;
+        Temporalio::Core::FFI::metric_free($_) for splice @owned_metrics;
+        Temporalio::Core::FFI::metric_meter_free($meter_ptr)
+            if defined $meter_ptr;
+        $meter_ptr = undef;
+        return;
+    }
+}
+
+# Parser-state firewall; see _parser_state_reset_1 above.
+sub Temporalio::Runtime::MetricMeter::_parser_state_reset_3 { }
+
+# The do-nothing backend behind the shared noop meter (Python's
+# _NoopMetricMeter): instruments are created and emits drop silently.
+class Temporalio::Runtime::MetricMeter::NoopBackend {
+    method create_instrument ($kind, $name, $description, $unit) {
+        return undef;
+    }
+    method attributes ($base, $attrs) { return undef }
+    method record ($handle, $value, $attrs) { return }
+}
+
 class Temporalio::Runtime::MetricMeter {
     # The marshalled-request tags the shim parks for the main-thread drain,
     # mirroring TEMPORALIO_PERL_BRIDGE_METER_REQ_* in the shim.
@@ -432,5 +750,65 @@ meter.
 
 The duck-typed surface described above. The base implementations raise
 L<Temporalio::Exception::Argument> so a meter that omits a method fails loudly.
+
+=head1 EMISSION SURFACE (spec R83)
+
+This file also carries the user-facing B<emission> classes: the meter user
+code records metrics TO, the mirror image of the custom-sink consumer above.
+One meter/instrument wrapper is shared by the workflow, activity, and Nexus
+contexts (parity: in-workflow finding 6, schedule/runtime finding 2, nexus
+finding 4; Python C<common.MetricMeter> over C<runtime.py>'s core-backed
+implementation).
+
+=head2 Temporalio::Runtime::MetricMeter::Meter
+
+    my $meter   = $runtime->metric_meter;             # or a context meter
+    my $counter = $meter->create_counter('requests',
+        description => 'inbound requests', unit => 'requests');
+    $counter->add(1, { route => '/foo' });
+
+Created by L<Temporalio::Runtime/metric_meter> over the core meter, or the
+shared noop meter (class method C<noop>) when no metrics exporter is
+configured. Methods:
+
+=over 4
+
+=item C<< create_counter($name, description => ..., unit => ...) >>
+
+=item C<< create_histogram($name, description => ..., unit => ...) >>
+
+=item C<< create_gauge($name, description => ..., unit => ...) >>
+
+Each returns a L</Temporalio::Runtime::MetricMeter::Instrument> of the
+matching integer kind. An unknown option or missing name raises
+L<Temporalio::Exception::Argument>.
+
+=item C<< with_additional_attributes(\%attrs) >>
+
+A new meter whose instruments carry the current attribute set plus
+C<\%attrs>. Attribute values are strings, integers, floats, or booleans.
+
+=item C<noop>
+
+Class method returning the shared do-nothing meter.
+
+=back
+
+=head2 Temporalio::Runtime::MetricMeter::Instrument
+
+One counter, histogram, or gauge. C<add($value, \%attrs)> (counters),
+C<record($value, \%attrs)> (histograms), and C<set($value, \%attrs)> (gauges)
+record a non-negative value with optional per-call attributes merged over the
+instrument's set; a negative value or a wrong-style call raises
+L<Temporalio::Exception::Argument>. C<name> / C<description> / C<unit> read
+the creation arguments; C<with_additional_attributes(\%attrs)> derives a new
+instrument over the same underlying metric.
+
+B<Replay safety:> a workflow-context instrument silently drops emits while
+the activation replays (the Runner installs the gate), matching Python's
+C<_ReplaySafeMetricMeter>. Instruments are still created during replay.
+
+The backends (C<::CoreBackend> over the C C<temporal_core_metric_*> surface,
+freed at runtime shutdown, and C<::NoopBackend>) are internal.
 
 =cut

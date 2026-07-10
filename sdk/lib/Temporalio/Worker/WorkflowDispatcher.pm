@@ -75,6 +75,11 @@ class Temporalio::Worker::WorkflowDispatcher {
     field $workflow_failure_exception_types :param = [];
     field $nondeterminism_as_workflow_fail  :param = 0;
 
+    # The worker runtime's metric meter (spec R83), threaded to each per-run
+    # Runner so Temporalio::Workflow::metric_meter can emit through the
+    # configured exporter (replay-suppression happens in the Runner).
+    field $metric_meter :param = undef;
+
     # A coderef ($completion_bytes) -> Future: sends the serialized
     # WorkflowActivationCompletion to core (worker_complete_workflow_activation
     # over the callback bridge). Injectable so unit tests capture completions
@@ -293,6 +298,7 @@ class Temporalio::Worker::WorkflowDispatcher {
             report_versioning_behavior => $report_versioning_behavior,
             local_activities_enabled   => $local_activities_enabled,
             interceptors               => $interceptors,
+            metric_meter               => $metric_meter,
             # spec R14+R15 (findings A1/ADJ2): the failure-routing options,
             # which pre-fix never reached a live Runner.
             $self->_runner_failure_options,
@@ -566,6 +572,12 @@ Exception class names routed to every live Runner (spec R14, finding A1); a list
 
 (optional, default C<0>)
 When true, a detected nondeterminism fails the workflow instead of the task on every live Runner (spec R15, finding ADJ2).
+
+=item C<metric_meter>
+
+(optional, default C<undef>) The worker runtime's user-facing metric meter
+(spec R83), threaded to each per-run Runner behind
+C<Temporalio::Workflow::metric_meter>.
 
 =back
 

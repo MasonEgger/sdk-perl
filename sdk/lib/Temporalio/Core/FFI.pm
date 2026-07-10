@@ -63,6 +63,24 @@ package Temporalio::Core::FFI::CallbackEntry {
     );
 }
 
+package Temporalio::Core::FFI::MetricOptions {
+    use FFI::Platypus::Record;
+    # struct TemporalCoreMetricOptions (header :327-332): three ByteArrayRef
+    # members flattened to (data, size) pairs plus the TemporalCoreMetricKind
+    # enum (C enum = 4 bytes; 1..7 in Temporalio::Runtime::MetricMeter::Kind
+    # order). Passed BY POINTER to temporal_core_metric_new (spec R83); the
+    # 4 bytes of trailing padding (52 vs 56) are irrelevant for pointer use.
+    record_layout_1(
+        opaque => 'name_data',
+        size_t => 'name_size',
+        opaque => 'description_data',
+        size_t => 'description_size',
+        opaque => 'unit_data',
+        size_t => 'unit_size',
+        uint32 => 'kind',
+    );
+}
+
 package Temporalio::Core::FFI::TestServerOptions {
     use FFI::Platypus::Record;
     # struct TemporalCoreTestServerOptions (testing.rs / header): five
@@ -512,6 +530,9 @@ $ffi->type('opaque' => $_) for qw(
     TemporalCoreEphemeralServer
     TemporalCoreWorkerReplayPusher
     TemporalioPerlBridgeQueue
+    TemporalCoreMetricMeter
+    TemporalCoreMetric
+    TemporalCoreMetricAttributes
 );
 
 # Record type aliases for the by-value structs declared above.
@@ -619,6 +640,56 @@ sub keep_byte_array_ref_array ($keep, $strings) {
     }
     my ($elements_ptr) = keep_buffer($keep, $elements);
     return ($elements_ptr, scalar @$strings);
+}
+
+# keep_metric_attribute_array(\@keep, \%attrs) — packs a contiguous array of
+# TemporalCoreMetricAttribute structs (header :321-325) into kept memory and
+# returns ($data_ptr, $count) for temporal_core_metric_attributes_new[_append]
+# (spec R83). Each element is 40 bytes on x86-64 SysV (the same LP64
+# little-endian assumption as keep_byte_array_ref_array): key ByteArrayRef
+# (ptr+size, 16), the 16-byte value union, value_type enum (4) + 4 pad.
+# Value typing mirrors sdk-python bridge/metric.py's isinstance checks using
+# perl 5.36+ builtins: is_bool -> Bool(4); created_as_number -> Int(2) when
+# the value has no fractional part, else Float(3); everything else stringifies
+# to String(1). Keys are sorted for determinism. An undef or reference value
+# raises Argument (Python type-errors there too). Returns (undef, 0) for
+# undef/empty.
+sub keep_metric_attribute_array ($keep, $attrs) {
+    return (undef, 0) unless defined $attrs && %$attrs;
+    no warnings 'experimental::builtin';
+    my $elements = '';
+    for my $key (sort keys %$attrs) {
+        my $value = $attrs->{$key};
+        if (!defined $value || ref $value) {
+            require Temporalio::Exception::Argument;
+            Temporalio::Exception::Argument->throw(
+                message => 'metric attribute values must be defined non-'
+                         . "reference scalars (key '$key')",
+            );
+        }
+        my ($key_data, $key_size) = keep_buffer($keep, $key);
+        if (builtin::is_bool($value)) {
+            $elements .= pack('Q Q C x15 L x4',
+                $key_data, $key_size, ($value ? 1 : 0), 4);
+        }
+        elsif (builtin::created_as_number($value)) {
+            if ($value == int($value)) {
+                $elements .= pack('Q Q q x8 L x4',
+                    $key_data, $key_size, int($value), 2);
+            }
+            else {
+                $elements .= pack('Q Q d x8 L x4',
+                    $key_data, $key_size, $value, 3);
+            }
+        }
+        else {
+            my ($value_data, $value_size) = keep_buffer($keep, "$value");
+            $elements .= pack('Q Q Q Q L x4',
+                $key_data, $key_size, $value_data, $value_size, 1);
+        }
+    }
+    my ($elements_ptr) = keep_buffer($keep, $elements);
+    return ($elements_ptr, scalar keys %$attrs);
 }
 
 # encode_newline_map($hashref) — encodes a hash as the C bridge's
@@ -786,6 +857,38 @@ my @phase0_attach = (
     # Temporalio::Core::ByteArray to read + free it.
     [ temporal_core_worker_record_activity_heartbeat => 'worker_record_activity_heartbeat',
       [ 'TemporalCoreWorker', 'TemporalCoreByteArrayRef' ] => 'TemporalCoreByteArray' ],
+    # User-facing metric emission (spec R83): the core meter surface backing
+    # Temporalio::Runtime::MetricMeter::CoreBackend, the same C functions
+    # sdk-python's bridge metric module wraps (bridge/metric.py). All
+    # SYNCHRONOUS calls FROM Perl INTO core (no callback bridge, no shim).
+    # metric_meter_new returns NULL when the runtime has no metrics exporter
+    # configured (-> the noop meter, sdk-python runtime.py:150-154).
+    # metric_attributes_new/_new_append take a pointer to a packed
+    # TemporalCoreMetricAttribute array (keep_metric_attribute_array below).
+    [ temporal_core_metric_meter_new => 'metric_meter_new',
+      [ 'TemporalCoreRuntime' ] => 'TemporalCoreMetricMeter' ],
+    [ temporal_core_metric_meter_free => 'metric_meter_free',
+      [ 'TemporalCoreMetricMeter' ] => 'void' ],
+    [ temporal_core_metric_attributes_new => 'metric_attributes_new',
+      [ 'TemporalCoreMetricMeter', 'opaque', 'size_t' ]
+        => 'TemporalCoreMetricAttributes' ],
+    [ temporal_core_metric_attributes_new_append => 'metric_attributes_new_append',
+      [ 'TemporalCoreMetricMeter', 'TemporalCoreMetricAttributes', 'opaque',
+        'size_t' ] => 'TemporalCoreMetricAttributes' ],
+    [ temporal_core_metric_attributes_free => 'metric_attributes_free',
+      [ 'TemporalCoreMetricAttributes' ] => 'void' ],
+    [ temporal_core_metric_new => 'metric_new',
+      [ 'TemporalCoreMetricMeter',
+        'record(Temporalio::Core::FFI::MetricOptions)*' ]
+        => 'TemporalCoreMetric' ],
+    [ temporal_core_metric_free => 'metric_free',
+      [ 'TemporalCoreMetric' ] => 'void' ],
+    [ temporal_core_metric_record_integer => 'metric_record_integer',
+      [ 'TemporalCoreMetric', 'uint64', 'TemporalCoreMetricAttributes' ] => 'void' ],
+    [ temporal_core_metric_record_float => 'metric_record_float',
+      [ 'TemporalCoreMetric', 'double', 'TemporalCoreMetricAttributes' ] => 'void' ],
+    [ temporal_core_metric_record_duration => 'metric_record_duration',
+      [ 'TemporalCoreMetric', 'uint64', 'TemporalCoreMetricAttributes' ] => 'void' ],
 
     # temporalio-perl-bridge
     [ temporalio_perl_bridge_queue_new => 'queue_new',

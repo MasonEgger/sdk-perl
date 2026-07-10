@@ -483,6 +483,14 @@ class Temporalio::Worker {
 
     method _runtime () { $client->runtime }
 
+    # The runtime's user-facing metric meter (spec R83) for the dispatcher
+    # builders. Guarded for test-double clients without a runtime (the
+    # $client->can('interceptors') precedent above): undef then, so contexts
+    # raise or noop instead of the build dying.
+    method _metric_meter () {
+        return $client->can('runtime') ? $self->_runtime->metric_meter : undef;
+    }
+
     # Lazily build the core worker (spec 8.2 step 1): pack the options and
     # call temporal_core_worker_new, raising on failure. The packed options
     # buffer must outlive the worker (the bridge copies what it needs during
@@ -643,6 +651,9 @@ class Temporalio::Worker {
             heartbeat_recorder => sub ($heartbeat_bytes) {
                 return $self->_record_heartbeat($heartbeat_bytes);
             },
+            # The runtime's user-facing metric meter (spec R83), surfaced to
+            # activity bodies as $ctx->metric_meter.
+            metric_meter => $self->_metric_meter,
         );
     }
 
@@ -707,6 +718,10 @@ class Temporalio::Worker {
             # Runner's outcome decision table consumes them.
             workflow_failure_exception_types => $workflow_failure_exception_types,
             nondeterminism_as_workflow_fail  => $nondeterminism_as_workflow_fail,
+            # The runtime's user-facing metric meter (spec R83), surfaced to
+            # workflow bodies as Temporalio::Workflow::metric_meter (the
+            # Runner adds the workflow attributes and the replay gate).
+            metric_meter   => $self->_metric_meter,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_workflow_activation($completion_bytes);
             },
@@ -729,6 +744,9 @@ class Temporalio::Worker {
             # chain the dispatcher folds over each start/cancel (spec R73,
             # parity finding 3).
             interceptors   => $all_interceptors,
+            # The runtime's user-facing metric meter (spec R83), surfaced to
+            # operation handlers as $ctx->metric_meter.
+            metric_meter   => $self->_metric_meter,
             completer      => sub ($completion_bytes) {
                 return $self->_complete_nexus_task($completion_bytes);
             },

@@ -53,6 +53,12 @@ class Temporalio::Test::WorkflowReplay {
     # (#10). Defaults empty (no interceptors).
     field $interceptors :param = [];
 
+    # A user-facing metric meter for the Runner (spec R83): a replay test can
+    # inject a Temporalio::Runtime::MetricMeter::Meter over a buffer backend
+    # and assert what Temporalio::Workflow::metric_meter emitted (and that
+    # replay suppresses it). Defaults to undef (the Runner's noop fallback).
+    field $metric_meter :param = undef;
+
     # The per-run Runner. Created lazily on the first push_activation so the
     # run_id from the activation seeds it (one harness drives one run, like
     # Python's WorkflowReplayer over a single run).
@@ -103,6 +109,7 @@ class Temporalio::Test::WorkflowReplay {
             task_queue                       => $task_queue,
             disable_eager_activity_execution => $disable_eager_activity_execution,
             interceptors                     => $interceptors,
+            metric_meter                     => $metric_meter,
         );
 
         my $completion = $runner->process_activation($activation);
@@ -488,6 +495,13 @@ Constructs a Temporalio::Test::WorkflowReplay. Named parameters:
 
 (optional, default C<undef>): the workflow execution's task queue, surfaced
 through C<Temporalio::Workflow::info-E<gt>{task_queue}>.
+
+=item C<metric_meter>
+
+(optional, default C<undef>): a user-facing metric meter (spec R83) for the
+Runner, so a replay test can capture what
+C<Temporalio::Workflow::metric_meter> emits. C<undef> falls back to the noop
+meter.
 
 =back
 

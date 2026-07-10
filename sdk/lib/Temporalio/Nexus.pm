@@ -46,6 +46,11 @@ sub client () { context()->client }
 # logger() -> the handler logger for the current operation.
 sub logger () { context()->logger }
 
+# metric_meter() -> the current operation's metric meter (spec R83), carrying
+# the nexus_service/nexus_operation/task_queue attribute set (MUST-match
+# sdk-python nexus/_operation_context.py:107). Raises outside an operation.
+sub metric_meter () { context()->metric_meter }
+
 # in_operation() -> bool: true when called inside an operation body.
 sub in_operation () { defined $CURRENT ? 1 : 0 }
 
@@ -178,6 +183,13 @@ The worker's client.
 =head2 logger
 
 The handler logger.
+
+=head2 metric_meter
+
+The current operation's metric meter (spec R83): the context's
+L<Temporalio::Runtime::MetricMeter::Meter> carrying the C<nexus_service>,
+C<nexus_operation>, and C<task_queue> attributes (Python parity:
+C<nexus.metric_meter()>). Raises outside an operation.
 
 =head2 in_operation
 
