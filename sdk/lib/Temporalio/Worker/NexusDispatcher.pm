@@ -13,6 +13,7 @@ use Future::AsyncAwait;
 use Scalar::Util ();
 use Syntax::Keyword::Dynamically;
 
+use Temporalio::Common::Event ();
 use Temporalio::Nexus ();
 use Temporalio::Nexus::OperationContext ();
 use Temporalio::Nexus::OperationResult ();
@@ -38,6 +39,12 @@ class Temporalio::Worker::NexusDispatcher {
     field $loop       :param = undef;
     field $logger     :param = undef;
 
+    # The worker's namespace, surfaced on every OperationInfo (spec R89, nexus
+    # finding 4; Python parity: Info.namespace built from the worker's
+    # namespace, worker/_nexus.py:258-266,398-405). Defaults from the client
+    # when one is present (see ADJUST).
+    field $namespace :param = undef;
+
     # The combined worker interceptor list (client-supplied then
     # worker-supplied, outermost first), folded over a handler-running root on
     # every start/cancel (spec R73, parity finding 3; sdk-python
@@ -55,6 +62,12 @@ class Temporalio::Worker::NexusDispatcher {
 
     # task_token => { ... } for tasks currently running (cancel_task aborts these).
     field %running;
+
+    # The one worker-shutdown event (spec R89, nexus finding 4), shared with
+    # EVERY operation context so a handler body can observe worker shutdown —
+    # the same Temporalio::Common::Event mechanism as ActivityDispatcher's R84
+    # event. Set by notify_shutdown below when the worker begins shutdown.
+    field $worker_shutdown_event;
 
     # Proto classes resolved once.
     field $NexusTask;
@@ -75,6 +88,29 @@ class Temporalio::Worker::NexusDispatcher {
         $StartOperationResponseAsync = Temporalio::Core::Proto::resolve('temporal.api.nexus.v1.StartOperationResponse.Async');
         $CancelOperationResponse = Temporalio::Core::Proto::resolve('temporal.api.nexus.v1.CancelOperationResponse');
         $HandlerError           = Temporalio::Core::Proto::resolve('temporal.api.nexus.v1.HandlerError');
+        $worker_shutdown_event  = Temporalio::Common::Event->new;
+        # `can` guard: unit tests inject minimal fake clients without a
+        # namespace accessor; a real Temporalio::Client always has one.
+        $namespace //= (defined $client && $client->can('namespace'))
+            ? $client->namespace : undef;
+    }
+
+    # notify_shutdown (spec R89, nexus finding 4): called by Temporalio::Worker
+    # at shutdown-BEGIN (right after worker_initiate_shutdown, alongside the
+    # activity dispatcher's R84 notify_shutdown) so in-flight Nexus handlers
+    # observe is_worker_shutdown true and their wait_for_worker_shutdown
+    # futures resolve while the dispatcher drains. Sets the shared per-context
+    # event AND the Temporalio::Nexus package flag (the module-level
+    # is_worker_shutdown fallback outside an operation — before R89 nothing
+    # ever set it). Idempotent. Python parity: _worker_shutdown_event set at
+    # shutdown-begin (_worker.py:840-850).
+    method notify_shutdown () {
+        # Flag BEFORE event: set() resolves parked waiters synchronously, and
+        # their continuations run outside the operation's dynamically scope,
+        # so they read the package flag — it must already be flipped.
+        $Temporalio::Nexus::IS_WORKER_SHUTDOWN = 1;
+        $worker_shutdown_event->set;
+        return;
     }
 
     method registry       { $registry }
@@ -214,12 +250,14 @@ class Temporalio::Worker::NexusDispatcher {
             operation  => $operation,
             endpoint   => $endpoint,
             task_queue => $task_queue,
+            namespace  => $namespace,    # R89: worker namespace on the Info
         );
 
         my $ctx = $def->{kind} eq 'workflow_run'
             ? Temporalio::Nexus::WorkflowRunOperationContext->new(
                 info => $info, client => $client, logger => $logger,
                 metric_meter => $metric_meter,
+                worker_shutdown_event => $worker_shutdown_event,
                 headers => ($request->can('header') ? ($request->header // {}) : {}),
                 # B13 (#11): copy the inbound StartOperation async-completion
                 # details so start_workflow can attach them to the backing
@@ -235,6 +273,7 @@ class Temporalio::Worker::NexusDispatcher {
             : Temporalio::Nexus::StartOperationContext->new(
                 info => $info, client => $client, logger => $logger,
                 metric_meter => $metric_meter,
+                worker_shutdown_event => $worker_shutdown_event,
                 headers => ($request->can('header') ? ($request->header // {}) : {}));
 
         # R73 (parity finding 3): fold the interceptor list over a
@@ -342,10 +381,12 @@ class Temporalio::Worker::NexusDispatcher {
             operation  => $cancel->operation,
             endpoint   => $endpoint,
             task_queue => $task_queue,
+            namespace  => $namespace,    # R89: worker namespace on the Info
         );
         my $ctx = Temporalio::Nexus::CancelOperationContext->new(
             info => $info, client => $client, logger => $logger,
             metric_meter => $metric_meter,
+            worker_shutdown_event => $worker_shutdown_event,
             operation_token => $token);
 
         my $inbound = Temporalio::Worker::Interceptor::build_nexus_operation_inbound(
@@ -522,7 +563,19 @@ L<Temporalio::Worker::NexusOperationInbound> chain (spec R73).
 C<metric_meter> (optional) is the worker runtime's user-facing metric meter
 (spec R83), injected into every operation context's C<metric_meter> accessor.
 
+C<namespace> (optional) is the worker's namespace, surfaced on every
+C<OperationInfo> (spec R89); it defaults from the client when one is present.
+
 =head1 METHODS
+
+=head2 notify_shutdown
+
+Sets the dispatcher-wide worker-shutdown L<Temporalio::Common::Event> shared
+with every operation context (spec R89, the Nexus form of the activity
+dispatcher's R84 event) and the C<Temporalio::Nexus> package flag, flipping
+C<Temporalio::Nexus::is_worker_shutdown> true and resolving every
+C<wait_for_worker_shutdown> future. L<Temporalio::Worker> calls this at
+shutdown-begin, before the dispatcher drains remaining tasks. Idempotent.
 
 =head2 dispatch_task
 

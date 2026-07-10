@@ -21,10 +21,17 @@ class Temporalio::Nexus::OperationInfo {
     field $endpoint   :param = undef;
     field $task_queue :param = undef;
 
+    # The namespace of the worker handling this operation (spec R89, nexus
+    # finding 4; Python parity: Info.namespace,
+    # nexus/_operation_context.py:85). Dispatcher-injected from the worker's
+    # client namespace (worker/_nexus.py:258-266,398-405).
+    field $namespace  :param = undef;
+
     method service    { return $service }
     method operation  { return $operation }
     method endpoint   { return $endpoint }
     method task_queue { return $task_queue }
+    method namespace  { return $namespace }
 }
 
 # StartOperationContext — passed as $ctx to a :SyncOperation handler. Carries
@@ -41,10 +48,20 @@ class Temporalio::Nexus::StartOperationContext {
     field $metric_meter :param = undef;
     field $context_metric_meter;
 
+    # The dispatcher-shared worker-shutdown Temporalio::Common::Event (spec
+    # R89, nexus finding 4; the same mechanism as the activity dispatcher's
+    # R84 event), set once at worker shutdown-begin. Backs
+    # Temporalio::Nexus::is_worker_shutdown / wait_for_worker_shutdown(_sync).
+    # Python parity: _worker_shutdown_event injected per context
+    # (worker/_nexus.py:258-266,398-405). undef (a manual construction) means
+    # shutdown is not observable through this context.
+    field $worker_shutdown_event :param = undef;
+
     method info    { return $info }
     method client  { return $client }
     method logger  { return $logger }
     method headers { return $headers }
+    method worker_shutdown_event { return $worker_shutdown_event }
 
     method metric_meter {
         return $context_metric_meter //=
@@ -65,10 +82,14 @@ class Temporalio::Nexus::CancelOperationContext {
     field $metric_meter :param = undef;
     field $context_metric_meter;
 
+    # The worker-shutdown event (spec R89); see StartOperationContext.
+    field $worker_shutdown_event :param = undef;
+
     method info            { return $info }
     method client          { return $client }
     method logger          { return $logger }
     method operation_token { return $operation_token }
+    method worker_shutdown_event { return $worker_shutdown_event }
 
     method metric_meter {
         return $context_metric_meter //=
@@ -102,6 +123,9 @@ class Temporalio::Nexus::WorkflowRunOperationContext {
     field $metric_meter :param = undef;
     field $context_metric_meter;
 
+    # The worker-shutdown event (spec R89); see StartOperationContext.
+    field $worker_shutdown_event :param = undef;
+
     method info            { return $info }
     method client          { return $client }
     method logger          { return $logger }
@@ -110,6 +134,7 @@ class Temporalio::Nexus::WorkflowRunOperationContext {
     method callback_header { return $callback_header }
     method request_id      { return $request_id }
     method links           { return $links }
+    method worker_shutdown_event { return $worker_shutdown_event }
 
     method metric_meter {
         return $context_metric_meter //=
@@ -292,6 +317,19 @@ when the context was constructed without a meter.
 =head2 task_queue
 
 (OperationInfo) the worker task queue.
+
+=head2 namespace
+
+(OperationInfo) the namespace of the worker handling this operation (spec
+R89; Python parity: C<Info.namespace>). C<undef> when constructed without one.
+
+=head2 worker_shutdown_event
+
+(all three contexts) the dispatcher-shared worker-shutdown
+L<Temporalio::Common::Event> (spec R89), set once at worker shutdown-begin.
+Backs C<Temporalio::Nexus::is_worker_shutdown> and the
+C<wait_for_worker_shutdown> waiters. C<undef> (a manual construction outside a
+worker) means shutdown is not observable through this context.
 
 =head2 start_workflow
 

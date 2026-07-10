@@ -130,6 +130,10 @@ class Temporalio::Worker {
     # The ActivityDispatcher run() built, kept so _initiate_shutdown_once can
     # notify_shutdown running activities at shutdown-begin (spec R84).
     field $activity_dispatcher;
+    # The NexusDispatcher run() built (only when Nexus is enabled), kept so
+    # _initiate_shutdown_once can notify_shutdown in-flight Nexus handlers at
+    # shutdown-begin too (spec R89, sharing the R84 mechanism).
+    field $nexus_dispatcher;
     field $worker_ptr;       # TemporalCoreWorker*, NULL until _ensure_worker
     field $worker_keep;      # @keep pinning the packed options buffer
     field $is_shutdown = 0;
@@ -575,8 +579,9 @@ class Temporalio::Worker {
         # worker must NOT start this loop.
         my $nexus_loop;
         if ($self->_nexus_enabled) {
+            $nexus_dispatcher = $self->_build_nexus_dispatcher;
             $nexus_loop = Temporalio::Worker::PollLoop->new(
-                dispatcher  => $self->_build_nexus_dispatcher,
+                dispatcher  => $nexus_dispatcher,
                 poll_source => sub { return $self->_poll_nexus_task },
                 loop        => $runtime->loop,
             );
@@ -741,6 +746,8 @@ class Temporalio::Worker {
             registry       => $nexus_registry,
             data_converter => $client->data_converter,
             task_queue     => $task_queue,
+            # The worker namespace every OperationInfo carries (spec R89).
+            namespace      => $client->namespace,
             client         => $client,
             loop           => $runtime->loop,
             # The combined interceptor list drives the nexus-operation-inbound
@@ -900,6 +907,11 @@ class Temporalio::Worker {
         # nothing is running to notify.
         $activity_dispatcher->notify_shutdown
             if defined $activity_dispatcher;
+        # Same notification for in-flight Nexus handlers (spec R89, nexus
+        # finding 4): is_worker_shutdown flips and wait_for_worker_shutdown
+        # futures resolve while the Nexus poll loop drains.
+        $nexus_dispatcher->notify_shutdown
+            if defined $nexus_dispatcher;
         return;
     }
 

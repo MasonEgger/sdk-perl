@@ -8,6 +8,7 @@ use warnings;
 # A user Nexus module says `use Temporalio::Nexus;` and then declares
 # `class My::Svc :isa(Temporalio::Nexus::Definition)`. Loading the base here
 # means the author does not have to `use` it separately.
+use Future ();
 use Temporalio::Nexus::Definition ();
 use Temporalio::Nexus::OperationContext ();
 use Temporalio::Nexus::OperationResult ();
@@ -54,9 +55,62 @@ sub metric_meter () { context()->metric_meter }
 # in_operation() -> bool: true when called inside an operation body.
 sub in_operation () { defined $CURRENT ? 1 : 0 }
 
-# is_worker_shutdown() -> bool: true once the worker has begun shutting down
-# (the dispatcher sets this while draining remaining tasks; spec section 26.3).
-sub is_worker_shutdown () { $IS_WORKER_SHUTDOWN ? 1 : 0 }
+# is_worker_shutdown() -> bool: true once the worker has begun shutting down.
+# Inside an operation this reads the context's dispatcher-shared shutdown
+# event (per-worker; Python parity: nexus/_operation_context.py:132-141);
+# outside one it falls back to the package flag the dispatcher's
+# notify_shutdown sets at shutdown-begin (spec R89, nexus finding 4 — before
+# R89 nothing ever set $IS_WORKER_SHUTDOWN, so this was always false). Never
+# raises.
+sub is_worker_shutdown () {
+    my $ctx = $CURRENT;
+    if (defined $ctx && $ctx->can('worker_shutdown_event')) {
+        my $event = $ctx->worker_shutdown_event;
+        return ($event->is_set ? 1 : 0) if defined $event;
+    }
+    return $IS_WORKER_SHUTDOWN ? 1 : 0;
+}
+
+# wait_for_worker_shutdown() -> Future resolving once the worker begins
+# shutting down (spec R89; Python parity: nexus.wait_for_worker_shutdown,
+# nexus/_operation_context.py:143-149). Raises outside an operation. A context
+# constructed without a shutdown event (manual/test construction outside a
+# worker) yields a never-resolving Future, matching
+# Temporalio::Activity::Context's R84 choice.
+sub wait_for_worker_shutdown () {
+    my $event = _shutdown_event();
+    return defined $event ? $event->wait : Future->new;
+}
+
+# wait_for_worker_shutdown_sync($timeout=undef) -> bool: block until the
+# worker begins shutting down or $timeout seconds elapse; true when shutdown
+# began, false on timeout (threading.Event.wait semantics; Python parity:
+# nexus.wait_for_worker_shutdown_sync, nexus/_operation_context.py:151-165).
+# Raises outside an operation. Perl Nexus handlers run on the main IO::Async
+# loop (not a thread pool), so blocking is done by re-entering the loop; with
+# no timeout and shutdown never arriving this blocks indefinitely, exactly
+# like the Python sync variant. Prefer the awaitable form in async handlers.
+sub wait_for_worker_shutdown_sync ($timeout = undef) {
+    my $event = _shutdown_event();
+    return 0 unless defined $event;    # shutdown not observable
+    return 1 if $event->is_set;
+    require IO::Async::Loop;
+    my $loop = IO::Async::Loop->new;
+    my $wait = $event->wait;
+    $loop->await(defined $timeout
+        ? Future->wait_any($wait, $loop->delay_future(after => $timeout))
+        : $wait);
+    return $event->is_set ? 1 : 0;
+}
+
+# The current context's worker-shutdown event (or undef when the context was
+# constructed without one); raises outside an operation. Shared by the two
+# waiters above.
+sub _shutdown_event () {
+    my $ctx = context();
+    return $ctx->can('worker_shutdown_event')
+        ? $ctx->worker_shutdown_event : undef;
+}
 
 # ---------------------------------------------------------------------------
 # gRPC status -> Nexus handler-error type (spec section 26.4 MUST-match table).
@@ -149,7 +203,12 @@ True when called inside an operation body.
 
 =item C<is_worker_shutdown>
 
-True once the worker has begun shutting down.
+True once the worker has begun shutting down. Never raises.
+
+=item C<wait_for_worker_shutdown> / C<wait_for_worker_shutdown_sync>
+
+Await (or block for) worker shutdown-begin from inside an operation body
+(spec R89). Both raise outside an operation.
 
 =back
 
@@ -197,7 +256,24 @@ True inside an operation body.
 
 =head2 is_worker_shutdown
 
-True once the worker is shutting down.
+True once the worker is shutting down (spec R89). Inside an operation it
+reads the context's dispatcher-shared shutdown event; outside one it falls
+back to the package flag the dispatcher sets at shutdown-begin. Never raises.
+
+=head2 wait_for_worker_shutdown
+
+Returns a L<Future> resolving once the worker begins shutting down (spec R89;
+Python parity: C<nexus.wait_for_worker_shutdown>). Raises
+L<Temporalio::Exception::Runtime> outside an operation.
+
+=head2 wait_for_worker_shutdown_sync
+
+C<< wait_for_worker_shutdown_sync($timeout) >> blocks (by re-entering the
+IO::Async loop) until the worker begins shutting down or C<$timeout> seconds
+elapse; returns true when shutdown began, false on timeout (spec R89; Python
+parity: C<nexus.wait_for_worker_shutdown_sync>). With no timeout it blocks
+until shutdown. Raises L<Temporalio::Exception::Runtime> outside an
+operation. Prefer L</wait_for_worker_shutdown> in async handlers.
 
 =head2 grpc_status_to_nexus_type
 
