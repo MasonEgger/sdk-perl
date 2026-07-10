@@ -183,10 +183,10 @@ distributions plus the Rust callback shim they depend on:
 
 ```mermaid
 flowchart TD
-    SDK["Temporalio-SDK (sdk/)<br/>the Perl SDK"]
-    PB["Alien::Temporalio::PerlBridge (alien-perl-bridge/)<br/>builds our Rust shim"]
-    CORE["Alien::Temporalio::Core (alien-core/)<br/>builds/ships libtemporalio_sdk_core_c_bridge"]
-    SHIM["ext/temporalio-perl-bridge/<br/>Rust callback shim (cdylib)"]
+    SDK["sdk/ (Temporalio-SDK, the Perl SDK)"]
+    PB["alien-perl-bridge/ (Alien::Temporalio::PerlBridge, builds the Rust shim)"]
+    CORE["alien-core/ (Alien::Temporalio::Core, ships the C bridge library)"]
+    SHIM["ext/temporalio-perl-bridge/ (the Rust callback shim, cdylib)"]
 
     SDK --> PB
     SDK --> CORE
