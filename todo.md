@@ -466,10 +466,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R93.4 Verify: default applied, per-call overrides, unset stays unset; prove -lj4 t green under memory guard (t: 193 files/846 tests PASS incl. the live captured-request scenario; xt: 434 PASS)
 
 ### Step R94: Add an on_fatal_error Worker Hook
-- [ ] R94.1 RED: subprocess-guarded integration test: fatal poll-loop death invokes on_fatal_error with the error before run() returns; a throwing hook is swallowed and does not mask the original failure
-- [ ] R94.2 GREEN: add on_fatal_error to Worker->new; invoke before fatal-path shutdown at Worker.pm:568,589; log-and-ignore hook exceptions, to _worker.py:47,202-204 parity
-- [ ] R94.3 REFACTOR: route the hook through the single fatal-path unwind point; comment cites finding 3
-- [ ] R94.4 Verify: hook fires pre-return, throwing hook swallowed, original failure surfaces; prove -lj4 t green under memory guard
+- [x] R94.1 RED: subprocess-guarded integration test: fatal poll-loop death invokes on_fatal_error with the error before run() returns; a throwing hook is swallowed and does not mask the original failure (t/integration/worker_on_fatal_error.t; honest RED: Worker->new rejected the unknown on_fatal_error kwarg; inducement delegates to the real poll and turns the drained ShutDown sentinel into a failure so the fatal unwind completes instead of deadlocking in finalize on undrained polls)
+- [x] R94.2 GREEN: add on_fatal_error to Worker->new; invoke before fatal-path shutdown at the single post-R62 unwind point in run() (the plan's Worker.pm:568,589 anchors are pre-R62); warn-and-ignore hook exceptions, to _worker.py:134,289-291,822-825 parity; non-coderef raises the typed Argument at construction
+- [x] R94.3 REFACTOR: route the hook through the single fatal-path unwind point; comment cites finding 3 (hook fires where the poll-loop $error is first known, before initiate/finalize; R62 folds later failures into $error as secondaries so the hook sees the primary)
+- [x] R94.4 Verify: hook fires pre-return, throwing hook swallowed, original failure surfaces; prove -lj4 t green under memory guard (t: 194 files/847 tests PASS incl. the live guarded scenario; xt: 435 PASS)
 
 ### Step R95: Provide a Real-History and Multi-History Replayer Surface
 - [ ] R95.1 RED: replay test: multi-history JSON returns one result per history; mutated history yields Nondeterminism failure; from_json round-trips identically

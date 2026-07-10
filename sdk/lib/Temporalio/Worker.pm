@@ -108,6 +108,13 @@ class Temporalio::Worker {
     field $no_remote_activities                :param = 0;
     field $disable_eager_activity_execution    :param = 0;
 
+    # Fatal-error hook (spec R94, parity audit worker finding 3). A coderef
+    # invoked with the fatal poll-loop error before the fatal-path shutdown
+    # commences (_worker.py:134). It cannot stop the shutdown; an exception
+    # it raises (or a failed Future it returns) is warned and ignored, never
+    # masking the original failure (_worker.py:289-291, 822-825).
+    field $on_fatal_error                      :param = undef;
+
     # Determinism guard (spec §29.4, R27/R38). Default ON: the worker ARMS the
     # best-effort time/entropy guard (Temporalio::Workflow::DeterminismGuard) so
     # a workflow body that calls a trapped builtin throws Nondeterminism. The
@@ -183,6 +190,13 @@ class Temporalio::Worker {
         # carries its own build_id, is not in use).
         if (!defined $build_id && !defined $deployment_options) {
             $build_id = _default_build_id();
+        }
+
+        # Fatal-error hook (spec R94): must be a coderef when given, caught
+        # here so a mistyped hook fails at construction, not at the fatal.
+        if (defined $on_fatal_error && ref $on_fatal_error ne 'CODE') {
+            Temporalio::Exception::Argument->throw(
+                message => 'on_fatal_error must be a coderef');
         }
 
         # Worker tuner (spec §29.2): must be a Temporalio::Worker::Tuner when
@@ -602,6 +616,31 @@ class Temporalio::Worker {
                 $_->is_failed and die(($_->failure)[0]) for @loops;
                 1;
             } or $error = $@;
+        }
+
+        # Fatal-error hook (spec R94, parity audit worker finding 3): this is
+        # the single fatal-path unwind point — the poll-loop $error is first
+        # known HERE, and the R62 rework folds every later failure (finalize)
+        # into it as a secondary — so the hook fires here, with the fatal
+        # error, BEFORE the shutdown sequence below commences. Python invokes
+        # on_fatal_error in the same spot: right after the fatal worker-task
+        # exception is captured and before bridge initiate_shutdown
+        # (_worker.py:822-825). The hook cannot stop the shutdown; a die from
+        # it (or a failed Future it returns) is warned and ignored so it can
+        # never mask $error (_worker.py:289-291's log-and-ignore contract).
+        if (defined $error && defined $on_fatal_error) {
+            local $@;
+            eval {
+                my $handled = $on_fatal_error->($error);
+                await $handled
+                    if Scalar::Util::blessed($handled)
+                        && $handled->isa('Future');
+                1;
+            } or do {
+                chomp(my $hook_err = "$@");
+                warn "Temporalio::Worker: on_fatal_error hook died:"
+                    . " $hook_err\n";
+            };
         }
 
         # Both loops have drained (sentinels seen). Make sure shutdown was
@@ -1386,6 +1425,15 @@ schedule-to-start (spec 23.2).
 (boolean; default 0) Workflow-side flag: sets C<do_not_eagerly_execute> on
 every emitted C<ScheduleActivity> command (spec 23.2).
 
+=item C<on_fatal_error>
+
+(coderef; default C<undef>) Invoked with the fatal poll-loop error before
+C<run>'s shutdown sequence commences (spec R94). The hook cannot stop the
+shutdown, and an exception it raises (or a failed L<Future> it returns) is
+warned and ignored: the original failure still propagates from C<run>. A
+non-coderef value raises L<Temporalio::Exception::Argument>. May return a
+L<Future>, which is awaited under the same guard.
+
 =item C<disable_determinism_guard>
 
 (boolean; default 0) This worker never arms the process-global determinism
@@ -1442,6 +1490,7 @@ Accessor returning the C<nexus_registry> value (the L<Temporalio::Worker::NexusR
 =head2 run
 
 Async. Runs the worker: starts the workflow and activity poll loops and returns a L<Future> that completes when the worker is shut down.
+On a fatal poll-loop failure the C<on_fatal_error> hook (when given) is invoked with the error before the shutdown sequence commences; the failure then propagates from C<run> after finalize and free.
 
 =head2 shutdown
 
