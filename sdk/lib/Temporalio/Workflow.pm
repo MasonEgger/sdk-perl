@@ -136,6 +136,35 @@ sub memo { return _runner()->memo }
 
 sub search_attributes { return _runner()->search_attributes }
 
+# --- last-run carry-over (spec R88) ------------------------------------------
+
+# has_last_completion_result / get_last_completion_result / get_last_failure ->
+# the previous run's completion result and failure for cron and scheduled
+# workflows (spec R88; parity audit, in-workflow finding 7; MUST-match
+# sdk-python workflow.has_last_completion_result / get_last_completion_result /
+# get_last_failure, workflow/_context.py:675,688,696). All three are callable
+# as package functions or as class methods; each drops a leading class
+# argument, so no signatures on the hint-taking getter. Sourced from the
+# InitializeWorkflow job's last_completion_result / continued_failure and
+# decoded lazily on first access (finding 7). Outside a workflow body ->
+# NoRunner.
+
+sub has_last_completion_result {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    return _runner()->workflow_has_last_completion_result;
+}
+
+sub get_last_completion_result {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    my ($type_hint) = @_;
+    return _runner()->workflow_last_completion_result($type_hint);
+}
+
+sub get_last_failure {
+    shift if @_ && defined $_[0] && !ref $_[0] && $_[0] eq __PACKAGE__;
+    return _runner()->workflow_last_failure;
+}
+
 # --- versioning / patching (spec section 10.4) ------------------------------
 
 # patched($patch_id) -> a boolean: should this run take the "with change"
@@ -615,6 +644,38 @@ service (spec section 26.1). A synchronous, non-command constructor; the client'
 C<start_operation>/C<execute_operation> emit a C<ScheduleNexusOperation> command
 through the stream. Raises L<Temporalio::Exception::Workflow::NoRunner> outside a
 workflow body.
+
+=head2 has_last_completion_result
+
+Returns true when the previous run of this workflow (a cron or scheduled
+run, or a continued run) carried over a completion result on the
+initializing activation, false otherwise (spec R88; matches Python's
+C<workflow.has_last_completion_result()>). Differentiates "no previous
+completion" from "the previous result was C<undef>" for
+C<get_last_completion_result>. Callable as a package function or a class
+method. Raises L<Temporalio::Exception::Workflow::NoRunner> outside a
+workflow body.
+
+=head2 get_last_completion_result
+
+C<get_last_completion_result($type_hint = undef)> returns the previous run's
+completion result, decoded through the payload converter with the optional
+type hint forwarded to C<from_payload> (spec R88; matches Python's
+C<workflow.get_last_completion_result()>). Returns C<undef> when there was
+no previous completion OR the previous result was C<undef>;
+C<has_last_completion_result> differentiates. A multi-payload previous
+result warns and returns C<undef> (Python parity). Decoded lazily on first
+access. Callable as a package function or a class method. Raises
+L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
+
+=head2 get_last_failure
+
+Returns the previous run's failure as a typed C<Temporalio::Exception::*>
+object via the failure converter, or C<undef> when the workflow has not run
+before or the previous run did not fail (spec R88; matches Python's
+C<workflow.get_last_failure()>). Converted lazily on first access and cached
+for the run. Callable as a package function or a class method. Raises
+L<Temporalio::Exception::Workflow::NoRunner> outside a workflow body.
 
 =head2 get_current_build_id
 

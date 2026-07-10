@@ -430,10 +430,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R87.4 Verify: ABANDON no warning, default warns, signal honors policy; prove -lj4 t green under memory guard (t: 185 files/823 tests PASS incl. live integration; xt: 424 PASS)
 
 ### Step R88: Expose Last-Completion-Result and Last-Failure
-- [ ] R88.1 RED: replay test: seeded last-completion-result decodes via has_/get_last_completion_result; seeded last_failure types via get_last_failure; absent fields report false/undef
-- [ ] R88.2 GREEN: capture and surface the carry-over fields from Workflow/Runner.pm, exposed on Workflow.pm, to _context.py:675,688,696 parity
-- [ ] R88.3 REFACTOR: decode lazily on first access; comment cites finding 7
-- [ ] R88.4 Verify: result decodes, failure types, absent reports false/undef; prove -lj4 t green under memory guard
+- [x] R88.1 RED: replay test: seeded last-completion-result decodes via has_/get_last_completion_result; seeded last_failure types via get_last_failure; absent fields report false/undef (t/replay/last_completion_result.t, 3 subtests over new WfDef::LastRunReader fixture; honest RED as `Can't locate object method "has_last_completion_result"`)
+- [x] R88.2 GREEN: capture and surface the carry-over fields from Workflow/Runner.pm, exposed on Workflow.pm, to _context.py:675,688,696 parity (_apply_initialize captures the raw last_completion_result Payloads + continued_failure; Runner workflow_has_last_completion_result / workflow_last_completion_result($type_hint) / workflow_last_failure mirror _workflow_instance.py:1837-1864 incl. the multi-payload warn+undef; Workflow.pm has_/get_last_completion_result + get_last_failure callable as package fns or class methods, type hint forwarded to from_payload)
+- [x] R88.3 REFACTOR: decode lazily on first access; comment cites finding 7 (satisfied by construction: nothing decodes at init, the failure conversion caches on first access, the result decodes per call because the type hint can differ between calls like Python; finding-7 comments at the capture site, the reader block, and the field declarations)
+- [x] R88.4 Verify: result decodes, failure types, absent reports false/undef; prove -lj4 t green under memory guard (t: 186 files/826 tests PASS incl. live integration; xt: 424 PASS)
 
 ### Step R89: Restore Dropped Nexus Handler-Context Capabilities
 - [ ] R89.1 RED: unit test: dispatched nexus op has OperationInfo->namespace = worker namespace; is_worker_shutdown flips true on dispatcher drain and waiters resolve

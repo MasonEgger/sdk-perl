@@ -445,6 +445,18 @@ class Temporalio::Workflow::Runner {
     # namespace from the worker.
     field %init_info;
 
+    # The previous run's carry-over off the InitializeWorkflow job (spec R88;
+    # parity audit, in-workflow finding 7): the raw last_completion_result
+    # Payloads and continued_failure Failure protos, captured un-decoded in
+    # _apply_initialize and converted LAZILY on first accessor call (Python
+    # seeds the same two fields at worker/_workflow_instance.py:376-377 from
+    # worker/_workflow.py:719-735). $last_failure_exception caches the
+    # from_failure conversion — it takes no arguments, so the result is
+    # stable across calls.
+    field $last_completion_result;
+    field $last_failure_proto;
+    field $last_failure_exception;
+
     ADJUST {
         $payload_converter //= Temporalio::Converter::Payload->default;
         $failure_converter //= Temporalio::Converter::Failure->default;
@@ -573,6 +585,45 @@ class Temporalio::Workflow::Runner {
     method memo { return { %memo_view } }
 
     method search_attributes { return { %search_attributes_view } }
+
+    # --- last-run carry-over readers (spec R88) -------------------------------
+
+    # The previous run's completion result / failure for cron and scheduled
+    # workflows (spec R88; parity audit, in-workflow finding 7; MUST-match
+    # sdk-python workflow_has_last_completion_result /
+    # workflow_last_completion_result / workflow_last_failure,
+    # worker/_workflow_instance.py:1837-1864). Decode is LAZY (finding 7):
+    # _apply_initialize captures the raw protos and nothing is converted until
+    # first access, so a run that never reads them pays nothing. The failure
+    # conversion is cached; the completion result is decoded per call because
+    # the optional $type_hint can differ between calls (Python re-decodes
+    # every call for the same reason).
+
+    method workflow_has_last_completion_result {
+        return 0 unless defined $last_completion_result;
+        return (($last_completion_result->payloads // [])->@* > 0) ? 1 : 0;
+    }
+
+    method workflow_last_completion_result ($type_hint = undef) {
+        return undef unless defined $last_completion_result;
+        my @payloads = ($last_completion_result->payloads // [])->@*;
+        return undef if @payloads == 0;
+        if (@payloads > 1) {
+            # Python warns and returns None on a multi-payload result
+            # (_workflow_instance.py:1843-1847).
+            warn 'Temporalio::Workflow: expected a single last completion '
+               . 'result, got ' . scalar(@payloads) . "\n";
+            return undef;
+        }
+        return $payload_converter->from_payload($payloads[0], $type_hint);
+    }
+
+    method workflow_last_failure {
+        return undef unless defined $last_failure_proto;
+        $last_failure_exception //= $failure_converter->from_failure(
+            $last_failure_proto, $payload_converter);
+        return $last_failure_exception;
+    }
 
     # patched($patch_id, deprecated => $bool) -> a boolean: should the workflow
     # take the "with change" branch? (spec section 10.4 versioning; MUST-match
@@ -2283,6 +2334,16 @@ class Temporalio::Workflow::Runner {
             workflow_id => $init->workflow_id // '',
             attempt     => $init->attempt     // 0,
         );
+
+        # Capture the previous run's carry-over RAW (spec R88; parity audit,
+        # in-workflow finding 7): the last_completion_result Payloads and the
+        # continued_failure back has_/get_last_completion_result and
+        # get_last_failure (Python workflow/_context.py:675,688,696 over the
+        # instance state seeded at _workflow_instance.py:376-377 from
+        # worker/_workflow.py:719-735). No decode here — the accessors
+        # convert lazily on first access.
+        $last_completion_result = $init->last_completion_result;
+        $last_failure_proto     = $init->continued_failure;
 
         # Seed the in-workflow search-attribute / memo views from the start-time
         # values on the InitializeWorkflow job (spec section 24 / T-upsert-4). Each
@@ -4929,5 +4990,20 @@ The new definition replaces the old wholesale, so an omitted validator removes a
 =head2 workflow_get_update_handler
 
 Returns the handler installed for exactly the given update name (undef name reads the dynamic slot), or undef; no dynamic fallback.
+
+=head2 workflow_has_last_completion_result
+
+Returns true when the initializing activation carried a previous-run completion result with at least one payload (spec R88).
+Backs C<Temporalio::Workflow::has_last_completion_result>.
+
+=head2 workflow_last_completion_result
+
+C<workflow_last_completion_result($type_hint = undef)> decodes and returns the previous run's completion result through the payload converter, forwarding the optional type hint; undef when absent or empty, and a multi-payload result warns and returns undef (spec R88, Python parity).
+Backs C<Temporalio::Workflow::get_last_completion_result>.
+
+=head2 workflow_last_failure
+
+Returns the previous run's failure converted to a typed C<Temporalio::Exception::*> (cached after the first call), or undef when the init job carried no continued failure (spec R88).
+Backs C<Temporalio::Workflow::get_last_failure>.
 
 =cut
