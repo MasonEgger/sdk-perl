@@ -1,0 +1,20 @@
+# ABOUTME: Manifest for the temporalio-perl-bridge shim crate (spec section 3).
+# ABOUTME: cdylib of C ABI trampolines that enqueue sdk-core completions for Perl.
+
+[package]
+name = "temporalio-perl-bridge"
+version = "0.2.0"
+edition = "2021"
+publish = false
+description = "Callback trampoline shim between temporal-sdk-core-c-bridge and the Temporalio Perl SDK"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crossbeam-queue = "0.3"
+libc = "0.2"
+
+[build-dependencies]
+cbindgen = "0.29"

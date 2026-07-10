@@ -1,0 +1,665 @@
+# sdk-perl live-hardening plan (bug-fix phase)
+
+TDD blueprint for fixing the live-SDK defects in
+`sdk-perl-issues-from-samples.md`. This is a bug-fix / live-hardening phase, not
+feature work: every item is a behavior that passes the unit and replay suites
+today but fails against a real `temporal server start-dev`. The spec for this
+plan is `sdk-perl-issues-from-samples.md`.
+
+## Prime directives for this phase
+
+1. **Reproduce before patching, inside each fix step.** No fix is written until a
+   RED test reproduces the bug and fails for the documented reason. Reproduction
+   and fix live in the SAME step (RED, then GREEN, then commit), so every commit
+   leaves the suite green and the repro ships as permanent passing coverage. The
+   issues doc is explicit these were not all independently re-reproduced, so the
+   RED step is also the triage that confirms the bug is real and pins the root.
+2. **Fix by root cause, not by symptom.** The 11 bugs collapse into 6 clusters
+   (below). A cluster is one fix with one or more reproducers, not N edits.
+3. **Every patch ships its reproducer as permanent coverage.** These bugs escaped
+   the green unit/replay suites: there is a live-integration coverage gap. Each
+   repro stays in `sdk/t/integration/` (timing/live paths) or `sdk/t/replay/`
+   (deterministic command-sequence paths) so the next refactor cannot silently
+   regress it. Closing that coverage gap is part of "done."
+4. **Crash and hang repros run in a timeout-guarded subprocess.** Several bugs
+   SEGV the worker (#7, #9) or hang it (#1, #3, #6, #8, #11). A repro that ran the
+   dangerous workflow in-process would crash or hang the whole `prove` run, not
+   produce a clean failure. Those repros fork/exec the worker plus workflow in a
+   child under a hard timeout and assert the child exited 0 within the bound, so
+   RED is a clean failing assertion (child crashed or timed out), never a harness
+   crash. Prefer a deterministic `sdk/t/replay/` repro (asserts on the emitted
+   command list, no live worker) wherever the bug is command-sequence shaped.
+5. **Every commit is green; the suite never goes red.** This is the autonomous
+   per-commit gate. It is why the repro lands together with its fix in one commit
+   and B0 commits no failing tests.
+6. **Shim changes follow the memory guard.** The signal-FD fix (and possibly the
+   Nexus and local-activity fixes) touch `ext/temporalio-perl-bridge/src/lib.rs`.
+   Per CLAUDE.md: `CARGO_BUILD_JOBS=2`, FOREGROUND builds, then `cargo test`,
+   regenerate the cbindgen header, and rebuild the installed
+   `Alien::Temporalio::PerlBridge` so the SDK loads the new symbols.
+
+## Root-cause clusters
+
+| Cluster | Bugs | Primary files | Test type | Shim? |
+|---|---|---|---|---|
+| C-COND: `_check_conditions` drops re-registered conditions | #3, #4 | `Workflow/Runner.pm` (~1351-1373) | replay | no |
+| C-CANCEL-CMD: cancel emits invalid / duplicate commands, double-complete SEGV | #6, #7 | `Workflow/Runner.pm`, `Workflow/Commands.pm` | replay | no |
+| C-CANCEL-LIVE: never-true wait_condition not throwable-Cancelled; client-cancel mid-update | #5, #8 | `Workflow/Runner.pm` (~2667), `Workflow/Future.pm` | integration | no |
+| C-FD: fork-pool reaper steals sdk-core's dev-server child at `$server->shutdown` (SEGV) | #1, (#2 already healthy) | `sdk/lib/Temporalio/Test/DevServer.pm` (`shutdown`) | integration | no |
+| C-LOCALACT: `execute_local_activity` segfaults the worker | #9 | `Workflow/Runner.pm`, `Worker.pm`, shim TBD | integration | maybe |
+| C-NEXUS: worker hardcodes `enable_nexus => 0`, never polls Nexus tasks | #11 | `Worker.pm:424`, Nexus poller wiring | integration | maybe |
+| C-ICEPT: worker inbound interceptor chains built but never invoked | #10 | `Worker.pm` (build_*_inbound), dispatch path | unit + integration | no |
+
+The doc's cross-cutting note (items B, C, FD may share a root in the runner's
+condition/teardown and the bridge signal-FD lifecycle) is why C-COND and the two
+cancel clusters come first and are sequenced together: fixing the condition
+rebuild may change the cancel symptoms, so re-run all cancel reproducers after
+C-COND lands.
+
+## Current Status
+
+- [ ] B0 Triage doc: ROOT-CAUSE-MAP.md (investigation only, no failing tests)
+- [ ] B1 C-COND: preserve continuation-registered conditions (#3, #4)
+- [ ] B2 C-CANCEL-CMD: valid, de-duplicated cancel command sequences (#6, #7)
+- [ ] B3 C-CANCEL-LIVE: throwable Cancelled + clean cancel-mid-update (#5, #8)
+- [ ] B4 C-FD: fork-pool/dev-server child-reaper ownership at teardown (#1; #2 regression guard)
+- [ ] B5 C-LOCALACT: fix execute_local_activity segfault (#9)
+- [ ] B6 C-NEXUS: enable Nexus serving + wire the task poller (#11)
+- [ ] B7 C-ICEPT: invoke worker inbound interceptor chains (#10)
+- [~] B8 Cleanup: activity-choice sample fix, revert sample workarounds, docs live-verified (PARTIAL: B8.1 done, B8.2 8/11 reverts landed; #1/#4/#10/#11 deferred to B9/B10/B11)
+- [~] B9 C-FD-REAL (RE-SCOPED): NO SDK signal-fd bug. #1 is a samples-perl import bug; the fix moves to B8 reconciliation. Fork-pool/signal-fd path verified healthy.
+- [ ] B10 C-COND-TIMEOUT: wait_condition-with-timeout timer cancel/re-arm wedge (#4)
+- [x] B11 C-ICEPT-HEADERS: workflow-inbound input missing start headers (#10)
+- [ ] B12 C-ICEPT-ACTIVITY-HEADERS: activity-inbound input missing headers + header double-encoding (#10, two gaps)
+- [ ] B13 C-NEXUS-CALLBACK: :WorkflowRunOperation async completion callback (#11)
+
+---
+
+## Step B0: Triage doc (ROOT-CAUSE-MAP.md)
+
+**NOTE**: Doc-only step: NO test files and NO source changes, so the suite stays
+green and the commit passes the per-commit gate. The reproductions are written
+inside each fix step (B1-B7), where they land green with the fix. The value here
+is confirming the clustering, pinning the suspected root file:line, and deciding
+Perl-side vs shim-side BEFORE the fixes start. Live integration tests already
+exist under `sdk/t/integration/` (using `Temporalio::Test::DevServer` + the
+`Temporalio::Test::Worker` retry helpers, `skip_all` when the `temporal` CLI is
+absent, phased serially via `sdk/.proverc`); replay tests live under
+`sdk/t/replay/` and need no server. The fix steps reuse both.
+
+```text
+1. Investigate each cluster against the code (read-only) and the issues doc:
+   - Locate the suspected root file:line per cluster: _check_conditions in
+     Workflow/Runner.pm (~1351); the cancel/teardown path (~2667); the shim
+     signal_fd alloc in ext/temporalio-perl-bridge/src/lib.rs (~1670);
+     enable_nexus in Worker.pm:424; the inbound-chain build-vs-dispatch gap in
+     Worker.pm (~246-251); the local-activity exec path (Runner.pm / Worker.pm).
+   - Where a quick read is ambiguous (the local-activity segfault layer, whether
+     the Nexus poller needs shim support), record the open question to resolve in
+     that fix step rather than guessing now.
+2. Write ROOT-CAUSE-MAP.md: a table mapping each bug # to its cluster, the planned
+   repro test path, the suspected root file:line, Perl-side vs shim-side, and the
+   test type (replay vs subprocess-guarded integration). Flag any bugs that look
+   like the same root (candidates to fix together).
+3. GREEN: none. No test or source files change in this step; the deliverable is
+   ROOT-CAUSE-MAP.md only.
+4. Verify: full `prove -lj4 t` stays green (nothing changed but the doc); commit
+   ROOT-CAUSE-MAP.md plus the session summary.
+```
+
+---
+
+## Step B1: C-COND preserve continuation-registered conditions (#3, #4)
+
+**NOTE**: `Temporalio/Workflow/Runner.pm` `_check_conditions` (~1351-1373) rebuilds
+its pending list with `@conditions = @still`, which drops a `wait_condition`
+registered synchronously by a continuation that ran inside the same
+`_check_conditions` pass. This is the "deepest find" and is replay-testable
+(deterministic), so prefer replay tests over live ones here.
+
+```text
+1. RED: Create sdk/t/replay/repro_check_conditions.t (a replay regression; confirm
+   it FAILS for the documented reason before GREEN):
+   - Assert that when a completion wakes the body and the continuation registers a
+     fresh wait_condition during _check_conditions, the new condition survives the
+     pending-list rebuild and is re-evaluated.
+   - Add the #4 variant: arm a long timer, an :Update wakes the predicate, re-arm a
+     short timer; assert the re-armed condition is honored (no wedge).
+2. GREEN: Fix _check_conditions to merge conditions registered DURING the pass
+   instead of overwriting the list with @still. Re-snapshot or append the
+   newly-registered conditions before assigning, so a synchronous re-park is not
+   lost.
+3. REFACTOR: Make the condition-list mutation re-entrancy-safe (a condition added
+   while iterating is tracked deterministically); add a comment citing #3.
+4. Verify: both replay repros pass; full `prove -lj4 t` green; no behavior change
+   for the existing replay/wait_condition tests.
+```
+
+---
+
+## Step B2: C-CANCEL-CMD valid, de-duplicated cancel commands (#6, #7)
+
+**NOTE**: Two command-emission defects, both replay-testable. #6: a try_cancel
+activity under whole-workflow cancel emits a duplicate CancelWorkflowExecution.
+#7: a `Future->wait_any` timer-vs-activity race emits cancel + double-complete and
+the timer-wins path SEGVs the worker. Run AFTER B1, since the condition fix may
+alter the activation sequence.
+
+```text
+1. RED: Create sdk/t/replay/repro_cancel_commands.t and sdk/t/replay/repro_wait_any_race.t
+   (replay regressions; confirm both FAIL for the documented reason before GREEN):
+   - Assert a try_cancel activity under workflow cancel yields a command list with
+     exactly one CancelWorkflowExecution and a single RequestCancelActivity.
+   - repro_wait_any_race.t: a wait_any(timer, activity); on the timer-wins path
+     assert exactly one CompleteWorkflowExecution and no RequestCancel for an
+     already-resolved seq (today: cancel + double-complete). #7 SEGVs in-process,
+     so this asserts on the EMITTED COMMAND LIST from a replay (deterministic, no
+     live worker), which surfaces the double-complete without crashing the suite.
+2. GREEN: De-duplicate terminal commands in the runner / Commands.pm: emit at most
+   one workflow-terminal command (Complete/Cancel/Fail) per activation; when the
+   loser of a wait_any is already resolved, do not emit a RequestCancel for it.
+3. REFACTOR: Centralize "terminal command already emitted" guarding so all three
+   terminal commands share it; comment citing #6/#7.
+4. Verify: both replay repros pass; full `prove -lj4 t` green; the existing
+   cancellation replay tests still pass.
+```
+
+---
+
+## Step B3: C-CANCEL-LIVE throwable Cancelled + clean cancel-mid-update (#5, #8)
+
+**NOTE**: #5: parking on a never-true `wait_condition` and cancelling yields a raw
+"was cancelled" string, not a throwable `Temporalio::Exception::Cancelled` routed
+to CancelWorkflowExecution; today you must park on a durable timer instead. #8: a
+client cancel landing while an `:Update` handler is mid-flight (`Runner.pm` ~2667)
+raises a raw cancelled Future and hangs ~183s. The prior lesson applies: a
+cancellable workflow awaitable must be a Future SUBCLASS whose `cancel` fails with
+the Temporal `Cancelled` exception, never native `->cancel`. These are timing
+paths, so use live integration tests.
+
+```text
+1. RED: Create sdk/t/integration/repro_cancel_live.t and repro_cancel_mid_update.t
+   (SUBPROCESS-GUARDED per directive 4: the mid-update path hangs ~183s today, so
+   run the worker+cancel in a child under a ~30s hard timeout and assert clean
+   exit; confirm both FAIL for the documented reason before GREEN):
+   - Assert a workflow parked on a never-true wait_condition, when client-cancelled,
+     ends Cancelled (CancelWorkflowExecution) without a durable-timer workaround.
+   - repro_cancel_mid_update.t: start an :Update handler that awaits, then
+     client-cancel the run mid-update; assert a clean WorkflowFailure/Cancelled
+     surfaces within the timeout (today: ~183s hang trips the guard).
+2. GREEN: Make wait_condition's awaitable (and the update-dispatch await at
+   Runner.pm ~2667) raise Temporalio::Exception::Cancelled on cancel via the
+   Future-subclass pattern, so the body unwinds to CancelWorkflowExecution instead
+   of leaking a raw cancelled Future.
+3. REFACTOR: Ensure every internal workflow await (timer, activity, condition,
+   update, child) routes cancel through the same throwable-Cancelled path; comment
+   citing #5/#8.
+4. Verify: both live repros pass un-gated; full `prove -lj4 t` green; re-run the B1
+   and B2 repros (cross-cluster regression check).
+```
+
+---
+
+## Step B4: C-FD fork-pool/dev-server child-reaper ownership at teardown (#1; #2 regression guard)
+
+**NOTE (CORRECTED, NOT SHIM-TOUCHING).** The original signal-fd-CLOEXEC
+hypothesis for #1 (whether shim-side at lib.rs ~1670 or Perl-side in
+Callback.pm:257-271) was DISPROVEN by experiment. The verified root cause of the
+exit-139 SEGV is a child-process REAPER race, not an fd close:
+
+- A worker that registers a sync (`:Defn(...,'sync=1')`) activity runs it in an
+  `IO::Async::Function` fork pool. The first fork makes IO::Async install a
+  process-wide SIGCHLD reaper (`IO::Async::Loop::watch_process` -> a single
+  CHLD handler whose `_reap_children` does `waitpid(-1, WNOHANG)`). That handler
+  LINGERS past worker shutdown (the loop only detaches it via
+  `unwatch_process`; reaping a child through the SIGCHLD path never does).
+- An ephemeral `Temporalio::Test::DevServer` makes sdk-core spawn and reap its
+  own `temporal` CLI subprocess. At `$server->shutdown`, IO::Async's lingering
+  reaper wins the `waitpid(-1)` race and reaps core's CLI child before core's
+  own `waitpid`, so core SEGVs (exit 139 / signal 11).
+- PRODUCTION IS UNAFFECTED: a worker against an external server never runs the
+  ephemeral-server shutdown; skipping `$server->shutdown` also exits cleanly. A
+  naive `local $SIG{CHLD}='DEFAULT'` does NOT help (IO::Async installs the
+  handler below `%SIG`).
+
+Fix is TEST-INFRASTRUCTURE / teardown-ordering, in `Temporalio::Test::DevServer`.
+NO shim, NO Callback.pm, NO cargo/Alien rebuild. #2 (cross-workflow signal
+hand-off) is ALREADY HEALTHY on current v1 — its repro is kept as a regression
+guard, not a fail-first test.
+
+```text
+1. RED: Create sdk/t/integration/repro_fd_signal.t and repro_external_signal.t,
+   both SUBPROCESS-GUARDED (reuse t/lib/SubprocessGuard.pm) — the #1 failure is a
+   SEGV that would crash prove otherwise:
+   - repro_fd_signal.t: a worker with a SYNC fork-pool activity + an ephemeral
+     dev server runs the full lifecycle INCLUDING $server->shutdown in the guard
+     child; assert the child exits 0. FAILS FIRST with signal 11 at
+     $server->shutdown for the documented reaper-race reason.
+   - repro_external_signal.t: workflow A signals workflow B twice via
+     get_external_workflow_handle; assert both delivered. Passes unmodified on
+     current v1 (regression guard; #2 was already healthy — not fabricated red).
+2/3. GREEN: in Temporalio::Test::DevServer->shutdown, suspend IO::Async's
+   lingering process-wide SIGCHLD reaper for the core-shutdown window so core
+   reaps its own CLI child: detach the loop's childwatch CHLD handler, reap any
+   still-watched (stopped) fork-pool worker ourselves to avoid a zombie, then run
+   the ephemeral_server_shutdown await. IO::Async lazily re-arms the handler on
+   the next watch_process.
+4. REFACTOR: document the reaper-ownership contract at both sites — the helper in
+   DevServer.pm (citing #1) and a cross-reference comment at the fork pool in
+   Activity/Pool.pm where the reaper is installed.
+5. Verify: repro_fd_signal.t passes un-gated; repro_external_signal.t passes;
+   full `prove -lj4 t` green.
+```
+
+---
+
+## Step B5: C-LOCALACT fix execute_local_activity segfault (#9)
+
+**NOTE**: A live `execute_local_activity` segfaults the worker (exit 139) even for
+a plain activity, while the same activity run as a normal (remote) activity is
+green and the SDK's own local-activity coverage is replay-only. Root cause is
+unknown: diagnose first and decide Perl-side vs shim-side. If shim, follow the
+memory guard.
+
+```text
+1. RED: Create sdk/t/integration/repro_local_activity.t (SUBPROCESS-GUARDED per
+   directive 4: this SEGVs the worker exit 139, so run the worker in a child and
+   assert exit 0; confirm it FAILS for the documented reason before GREEN):
+   - Assert a workflow that runs one execute_local_activity returns the activity
+     result and the child worker process exits cleanly (no SEGV / exit 139).
+   - Add a second case with start_to_close_timeout + a retry_policy to exercise the
+     local-activity backoff loop.
+2. Diagnose: capture where the segfault originates (Perl-side local-activity
+   resolution in Runner.pm / Worker.pm vs a shim local-activity path). Record the
+   finding in ROOT-CAUSE-MAP.md and state whether the fix is shim-touching.
+3. GREEN: Apply the minimal fix at the identified layer. If shim, follow the
+   CLAUDE.md memory guard + Alien rebuild.
+4. REFACTOR: add an assertion/guard at the boundary that previously crashed so a
+   regression surfaces as a clean error, not a SEGV.
+5. Verify: the live repro passes; eager-workflow-start's local-activity path also
+   works live; full `prove -lj4 t` green.
+```
+
+---
+
+## Step B6: C-NEXUS enable Nexus serving + wire the task poller (#11)
+
+**NOTE**: `Worker.pm:424` hardcodes `enable_nexus => 0`, so the worker never polls
+Nexus tasks; a handler worker cannot serve operations and a caller's result blocks
+forever. The CLAUDE.md notes the Nexus dispatcher is shim-adjacent (P9.2), so a
+Nexus task poll loop may need shim wiring; confirm during diagnosis.
+
+```text
+1. RED: Create sdk/t/integration/repro_nexus.t (SUBPROCESS-GUARDED per directive 4:
+   the caller blocks forever today, so run the round-trip in a child under a hard
+   timeout and assert clean exit; confirm it FAILS for the documented reason before
+   GREEN):
+   - Register a Nexus service + operation handler and a caller workflow on one
+     worker; assert the caller's execute_nexus_operation resolves with the handler
+     result (today: blocks and trips the guard). Gate only on a configured endpoint
+     if the test server requires it, otherwise run by default.
+2. GREEN: Set enable_nexus based on whether the worker has registered Nexus
+   services (not hardcoded 0), and wire the Nexus task poll loop so handler
+   operations are serviced. If the poller needs shim support, follow the memory
+   guard + Alien rebuild.
+3. REFACTOR: gate enable_nexus on actual Nexus registration so non-Nexus workers
+   are unaffected; comment citing #11.
+4. Verify: the live caller->handler round-trip passes; full `prove -lj4 t` green;
+   non-Nexus integration tests unaffected.
+```
+
+---
+
+## Step B7: C-ICEPT invoke worker inbound interceptor chains (#10)
+
+**NOTE**: `Worker.pm` builds `build_activity_inbound`/`build_workflow_inbound`
+(~246-251) but the dispatch path never calls the resulting chain; only the
+client-outbound chain is wired. This is a missing-wiring gap, not a crash, and is
+unit-testable with a spy interceptor plus a live smoke.
+
+```text
+1. RED: Write sdk/t/unit/worker_inbound_interceptor.t (or extend the interceptor
+   unit test):
+   - Register a spy WorkflowInbound + ActivityInbound interceptor; dispatch an
+     activity task and a workflow activation through the worker's dispatch path;
+     assert the inbound execute_activity / execute_workflow (and
+     handle_signal/handle_query/handle_update) methods were invoked in order.
+   - sdk/t/integration/repro_interceptor_inbound.t: an end-to-end run that asserts
+     an inbound interceptor observed the activity and workflow execution.
+2. GREEN: Wire the built inbound chains into the activity dispatcher and workflow
+   activation dispatch so execution flows through the chain to the root impl.
+3. REFACTOR: ensure ordering (client-supplied then worker-supplied, outermost
+   first) matches the outbound contract; comment citing #10.
+4. Verify: the unit spy test and live smoke pass; full `prove -lj4 t` green.
+```
+
+---
+
+## Step B8: Cleanup: sample fix, revert workarounds, docs live-verified
+
+**NOTE**: After the SDK fixes land, the samples must go back to idiomatic code (the
+issues doc's cleanup contract) and the docs can finally claim live-verified. The
+activity-choice fix is a samples-perl change, not an SDK change.
+
+```text
+1. activity-choice sample fix (in ../samples-perl):
+   - activity-choice/lib/ActivityChoice/Menu.pm: return undef for an unknown/empty
+     choice instead of die (keep Menu SDK-free).
+   - activity-choice/lib/ActivityChoice/Workflow.pm: when resolve returns undef,
+     raise Temporalio::Exception::Application->throw(type=>'UnknownBeverage',
+     non_retryable=>1).
+   - Update activity-choice/t/01-*.t to assert resolve('nope') returns undef; confirm
+     t/02-smoke.t resolves fast as a WorkflowFailure (no timeout) with the SDK present.
+2. Revert each sample workaround per the cleanup contract, one box at a time,
+   verifying the now-un-gated live smoke passes against a dev server:
+   - #1 sync-activity: FIX THE IMPORT BUG FIRST (this is the real #1 root cause,
+     not an SDK bug; see re-scoped Step B9). In
+     sync-activity/lib/SyncActivity/Activities.pm the `use SyncActivity::Compute
+     qw(count_primes)` imports into package `main`, so the unqualified call inside
+     `class SyncActivity::Activities` resolves to an undefined sub and the activity
+     dies every dispatch (the ~200s loop). Either qualify the call to
+     `SyncActivity::Compute::count_primes(...)` OR import into the activity's own
+     package. THEN drop the TEMPORAL_SYNC_ACTIVITY_LIVE gate AND the stale "wedges
+     the worker loop" comment in sync-activity/t/02-smoke.t. The "signal fd write
+     failed (Bad file descriptor)" line is a benign teardown artifact, not a bug.
+   - #2 mutex: drop MUTEX_SMOKE gate; verify full multi-caller hand-off.
+   - #3 batch-sliding-window: restore the snapshot wait_condition form.
+   - #4 updatable-timer: drop TEMPORAL_UPDATABLE_TIMER_LIVE gate.
+   - #5 external-workflow: drop the durable-timer park; use never-true wait_condition.
+   - #6 cancellation: switch abandon back to try_cancel.
+   - #7 timer: restore Future->wait_any.
+   - #8 waiting-for-handlers(-and-compensation): drive the live smoke with a real
+     client cancel mid-update.
+   - #9 local-activity / eager-workflow-start: drop TEMPORAL_SMOKE_LOCAL_ACTIVITY guard.
+   - #10 context-propagation: drop the explicit context-forward; rely on the inbound
+     interceptor.
+   - #11 nexus-*: drop the endpoint/enable_nexus gating; verify the live round-trip.
+3. Update sdk-perl docs to claim live-verified: CLAUDE.md status line and
+   README.md status block change from "unit and replay suites green" to "verified
+   live against a dev server" once all repros pass.
+4. (Optional, lower priority) SDK diagnostic: a clearer message when a plain die in
+   workflow code becomes a retryable task failure, plus a doc note that
+   business/validation errors should be Temporalio::Exception::Application.
+5. Verify: full `prove -lj4 t` green in sdk-perl; samples-perl `just check` green
+   offline AND every reverted live smoke passes with the SDK on PERL5LIB.
+```
+
+**B8 STATUS + reconciliation (recorded during the B8 cleanup).** B8.1 is DONE:
+the activity-choice fix landed in samples-perl @3b3dded (Menu returns undef,
+Workflow raises a non-retryable Application). B8.2 is PARTIAL: 8 of the 11
+reverts landed and were verified live un-gated in samples-perl @3b3dded (#2, #3,
+#5, #6, #7, #8, #9). The reverts for #1, #4, #10, #11 are DEFERRED.
+
+CORRECTION (2026-06-26): the B8.2 safety valve was originally read as surfacing
+FOUR residual SDK bugs. The B9 investigation revised that down to THREE. #1 is
+NOT an SDK bug: it is a samples-perl import bug (see re-scoped Step B9), fixed in
+the #1 reconciliation entry above, not in the SDK. B9 is therefore re-scoped to
+"no SDK fix needed". B10 (#4) and B11 (#10) landed.
+
+PASS 2 (samples-perl @0195c34): reverted #1 sync-activity and #4 updatable-timer
+and verified BOTH live, so 10/11 reverts have now landed un-gated. Pass 2 also
+instrumented the last two failures more precisely and surfaced THREE more SDK
+gaps blocking #10 and #11:
+- #10 context propagation still reads `request_id=(none)` live for TWO reasons on
+  the ACTIVITY side: (A) the activity-inbound interceptor input has no headers
+  (ActivityDispatcher.pm `_handle_start` never reads the Start task's
+  `header_fields`), and (B) header double-encoding (the outbound path re-encodes an
+  already-Payload header value through `to_payload`). Tracked as Step B12.
+- #11 (nexus) `:WorkflowRunOperation` async never completes for the caller:
+  OperationContext.pm `WorkflowRunOperationContext::start_workflow` starts the
+  backing workflow with NO completion callback / operation token / event links, so
+  the operation parks forever. The fd theory for #11 is CONFIRMED DEAD. Tracked as
+  Step B13.
+RECONCILIATION ORDER (revised): land B12 and B13 first; THEN do the final samples
+pass to revert #10 (context-propagation) and #11 (nexus) in samples-perl and
+verify their un-gated live smokes; THEN do B8.3 (flip the sdk-perl CLAUDE.md +
+README status lines to "verified live against a dev server") and B8.5 (final
+green-suite + all-reverts-pass verification).
+
+---
+
+## Step B9: C-FD-REAL (RE-SCOPED, NOT AN SDK BUG)
+
+**RE-SCOPED 2026-06-26. There is NO SDK signal-fd bug.** The B9 investigation
+disproved the premise this step was written on. The fork-pool / bridge-signal-fd
+path is verified healthy, so steps B9.3 through B9.5 (the SDK fix / refactor /
+verify) are N/A: there is nothing in the SDK to fix. The #1 failure is a
+samples-perl import bug; its fix moves into the B8 samples-reconciliation list
+below (reconciliation item #1, alongside the still-pending #4, #10, #11 reverts).
+
+What the investigation actually found (each point verified by experiment):
+
+1. A faithful sync-activity repro fails the SAME way IN-PROCESS with NO fork at
+   all. A fork-pool FD sweep cannot be the cause of a failure that reproduces
+   without a fork.
+2. The parent's bridge signal fd stays OPEN throughout the apparent "hang": a
+   `dup` probe on it succeeds on every tick. Nothing closes or corrupts it.
+3. A CORRECT sync `:Defn(...,'sync=1')` activity runs cleanly end to end through
+   the fork pool against a live dev server and returns its value (25 in the probe).
+   The fork-pool path works.
+4. The bridge eventfd is already created `EFD_CLOEXEC`. The close-on-exec
+   hypothesis that motivated B9.3 was already satisfied in the code.
+
+Real root cause of #1 (a samples-perl bug, not an SDK bug):
+`samples-perl/sync-activity/lib/SyncActivity/Activities.pm` does
+`use SyncActivity::Compute qw(count_primes)` at FILE scope (package `main`),
+before the `class SyncActivity::Activities` block. The import lands in `main`, so
+the unqualified `count_primes(...)` call INSIDE the class resolves to an
+undefined `SyncActivity::Activities::count_primes`. The activity dies on every
+dispatch, and the sample's unlimited retry policy loops for ~200s before the
+harness gives up. The "signal fd N write failed (Bad file descriptor)" line is a
+BENIGN teardown-race artifact: it is printed AFTER the await has already failed,
+during runtime/callback teardown, and it misled three prior investigators into
+hunting a non-existent fd bug.
+
+The #1 fix is therefore a samples-perl change (see B8 reconciliation item #1
+below): qualify the call to `SyncActivity::Compute::count_primes(...)` (or import
+into the activity's own package), then drop the `TEMPORAL_SYNC_ACTIVITY_LIVE`
+gate and the stale "wedges the worker loop" comment in
+`sync-activity/t/02-smoke.t`. #11 (nexus) shares NO fd path with #1 and must be
+re-verified INDEPENDENTLY: its live status depends on its own registration and
+sample, not on a non-existent fd fix.
+
+```text
+B9.1 / B9.2 DONE (diagnosis corrected: not an SDK bug). The RED repro and the
+diagnosis were carried out and inverted the original conclusion, per the four
+verified points above.
+
+B9.3 / B9.4 / B9.5 N/A (no SDK bug to fix). The SDK fix / refactor / verify
+sub-steps are dropped. The actual #1 fix lives in samples-perl and is tracked as
+B8 reconciliation item #1. The loop must NOT keep trying to make an SDK fix for a
+non-bug; the next remaining step is B10.
+
+Nice-to-have (NOT a bug, optional, lower priority): the fork-pool child could
+explicitly EXCLUDE the inherited bridge signal fd from any FD-close sweep so the
+misleading EBADF-on-close teardown noise never prints. This is cosmetic
+log-hygiene, not a correctness fix; the fd path is already healthy.
+```
+
+---
+
+## Step B10: C-COND-TIMEOUT wait_condition-with-timeout timer cancel/re-arm wedge (#4)
+
+**NOTE.** B1 fixed the plain `wait_condition` re-park (covers #3): a condition
+re-registered by a synchronous continuation is no longer dropped at the
+`_check_conditions` rebuild. But a `wait_condition` WITH A TIMEOUT is
+durable-timer-backed, and the timer-cancel/re-arm path still wedges when the
+deadline MOVES: arm a long timer, an `:Update` moves the deadline, re-arm a short
+timer — the stale timer is not cleanly cancelled before the new one arms and the
+workflow hangs. B1's fix is present and does not cover this distinct
+timeout-timer path.
+
+```text
+1. RED: Create the timeout repro — prefer a deterministic sdk/t/replay/ repro of
+   the timer cancel/re-arm command sequence; fall back to a SUBPROCESS-GUARDED
+   sdk/t/integration/ repro if the wedge only reproduces live:
+   - Arm a long durable timer behind a wait_condition timeout; an :Update moves
+     the deadline; re-arm a short timer against the moved deadline.
+   - Assert the workflow does not wedge (the short timer fires / the condition
+     resolves) and, in replay form, that exactly one StartTimer + one CancelTimer
+     are emitted for the moved deadline. Today it FAILS (wedge) for the documented
+     reason.
+2. GREEN: Fix the timeout-timer cancel/re-arm path in
+   sdk/lib/Temporalio/Workflow/Runner.pm so a moved deadline cancels the stale
+   timer and arms the new one without leaving the condition parked forever.
+3. REFACTOR: unify the timeout-timer cancel/re-arm with the plain re-park path so
+   both share one re-arm helper; comment citing #4.
+4. Verify: the timeout repro passes; B1's #3 plain re-park repro still passes;
+   full `prove -lj4 t` green.
+```
+
+---
+
+## Step B11: C-ICEPT-HEADERS workflow-inbound input missing start headers (#10)
+
+**NOTE.** B7 wired the workflow-inbound interceptor chain so the inbound hook is
+now invoked (covers #10's "never called" half). But the runner builds the
+workflow-inbound `ExecuteWorkflow` input WITHOUT the start headers: Runner.pm
+(~1685-1690) passes only `type` / `args` / `_root`, so the now-invoked inbound
+hook has no header to read, and context propagation forwards an EMPTY header (the
+downstream activity reads `request_id=(none)`). The InitializeWorkflow activation
+job carries the start headers; they just are not threaded into the inbound input.
+
+```text
+1. RED: Create the repro — a unit test on the inbound-input build, or an
+   integration repro of context propagation:
+   - Drive an InitializeWorkflow job carrying a non-empty `headers` map; assert the
+     workflow-inbound ExecuteWorkflow input the runner builds carries those start
+     headers (today it is empty / absent). For the integration form, a header-reading
+     inbound interceptor forwards a request_id to an activity and the activity
+     asserts it is the real id, not "(none)". Today it FAILS for the documented
+     reason (input has no headers).
+2. GREEN: Populate the workflow-inbound input headers from the InitializeWorkflow
+   job in Runner.pm so the inbound interceptor and context propagation see the real
+   start headers.
+3. REFACTOR: thread the start headers through the inbound-input build the same way
+   the outbound path carries them; comment citing #10.
+4. Verify: the inbound-headers repro passes; the context-propagation live smoke
+   forwards a non-empty header (the activity reads the real request_id); full
+   `prove -lj4 t` green.
+```
+
+---
+
+## Step B12: C-ICEPT-ACTIVITY-HEADERS activity-inbound input missing headers + header double-encoding (#10)
+
+**NOTE.** B11 threaded the WORKFLOW-inbound start headers, so the workflow-inbound
+hook now reads the real request id. But context propagation STILL reads
+`request_id=(none)` live, for two distinct reasons on the ACTIVITY side:
+
+(A) The activity-inbound interceptor input carries NO headers.
+`sdk/lib/Temporalio/Worker/ActivityDispatcher.pm` `_handle_start` (the sync branch
+~L158 and the async branch ~L182) builds the `ExecuteActivity` interceptor input
+as `Input::ExecuteActivity->new(args => ..., _root => ...)` and never reads the
+activity Start task's `header_fields` (proto field 6). The activity-inbound hook
+therefore sees an empty `$input->headers`.
+
+(B) Header representation asymmetry / double-encoding. The client-outbound path
+runs an already-Payload-shaped header value through the data converter
+`to_payload`, so the inbound hook receives a blessed
+`Temporalio::Proto::Api::Common::V1::Payload` whose `data` is doubly encoded,
+while consumers (and sdk-python) expect a pass-through Payload, not a re-encoded
+one. Headers must travel as Payloads consistently in BOTH directions.
+
+```text
+1. RED: a unit/integration repro asserting (a) the activity-inbound ExecuteActivity
+   input carries the Start task's header_fields, AND (b) a header set at start
+   round-trips to the activity-inbound hook un-double-encoded. Today it FAILS for
+   the documented reason: the header is absent on activity-inbound, and where a
+   header IS present its value is a doubly-encoded Payload.
+2. GREEN:
+   (A) Thread the activity Start `header_fields` into the ExecuteActivity
+       interceptor input in ActivityDispatcher.pm `_handle_start` (both the sync
+       branch ~L158 and the async branch ~L182) so `$input->headers` is populated
+       in the activity-inbound hook.
+   (B) Settle the interceptor-header representation so headers pass through as
+       Payloads consistently in BOTH directions (outbound and inbound), matching
+       sdk-python; do not run an already-Payload header value back through
+       `to_payload` (no double-encode).
+3. REFACTOR: one header-representation contract shared by the outbound and inbound
+   paths (pass-through Payload, never re-encoded); comment citing #10.
+4. Verify: the activity-inbound header repro passes; B7's
+   t/unit/workflow_inbound_interceptor.t and B11's t/unit/workflow_inbound_headers.t
+   still pass; full `prove -lj4 t` green.
+```
+
+---
+
+## Step B13: C-NEXUS-CALLBACK :WorkflowRunOperation async completion callback (#11)
+
+**NOTE.** B6 enabled Nexus serving and the SYNC Nexus operation works, but a
+`:WorkflowRunOperation` (async) operation never completes for the CALLER.
+`sdk/lib/Temporalio/Nexus/OperationContext.pm`
+`WorkflowRunOperationContext::start_workflow` (~L76-84) issues a plain
+`$client->start_workflow` with NO Nexus completion callback, operation token, or
+workflow event links. The backing workflow runs and reaches
+`WorkflowExecutionCompleted`, but the caller's Nexus operation parks forever (the
+server shows `Pending Nexus Operations: 1`, and the backing workflow's
+`WorkflowExecutionStarted` has `completionCallbacks: null`). The fd theory for #11
+is confirmed dead: #11 shares no fd path with #1 and there is no SDK fd bug. All
+three nexus samples use WorkflowRunOperation, so this fix unblocks all three.
+
+```text
+1. RED: a SUBPROCESS-GUARDED live repro of a `:WorkflowRunOperation`
+   caller -> handler round-trip asserting the caller's operation resolves with the
+   backing workflow's result. Today it FAILS for the documented reason: the
+   operation parks forever / the repro times out.
+2. Investigate first: whether the pinned c-bridge / proto already lets Perl populate
+   the StartWorkflowExecution request's `completion_callbacks` (plus the Nexus
+   operation token / workflow event links) from the Nexus operation context. The
+   likely answer is yes, Perl-side only (the B6 Nexus poll needed no shim). If shim
+   work IS required, follow the CLAUDE.md memory guard (CARGO_BUILD_JOBS=2,
+   foreground, cargo test + cbindgen regen + Alien rebuild).
+3. GREEN: attach the Nexus async completion callback (plus operation token and
+   workflow event links) to the WorkflowRunOperation backing-workflow start in
+   OperationContext.pm `WorkflowRunOperationContext::start_workflow` so the server
+   notifies the caller on completion. This means populating the
+   StartWorkflowExecution request's `completion_callbacks` (and the Nexus operation
+   token / links) from the Nexus operation context.
+4. REFACTOR: the callback/token/links wiring lives in one place on the
+   WorkflowRunOperation start path; comment citing #11.
+5. Verify: the live round-trip repro passes (the caller's operation resolves with
+   the backing workflow's result); B6's repro_nexus.t still passes; full
+   `prove -lj4 t` green.
+```
+
+---
+
+## Implementation Guidelines
+
+- **One step per commit, always green.** B0 is one commit (the map). Each fix step
+  (B1-B7 and the residual SDK fix steps B10-B13) is one commit carrying its repro
+  AND its fix, so the repro lands green and the suite never goes red. B9 is
+  re-scoped to "no SDK bug" (its #1 fix is a samples-perl change tracked under B8).
+  B8's reverts commit
+  per the project process. Shim steps fold the cargo test + cbindgen regen + Alien
+  rebuild into the same commit.
+- **Crash/hang repros are subprocess-guarded** (directive 4): run the dangerous
+  worker+workflow in a child under a hard timeout, assert exit 0; never in-process.
+- **Replay over live where deterministic.** C-COND and C-CANCEL-CMD are
+  command-sequence bugs: prefer `sdk/t/replay/` repros (no server, no flakiness).
+  Use `sdk/t/integration/` only for genuine timing/live paths (C-CANCEL-LIVE,
+  C-FD, C-LOCALACT, C-NEXUS, and the C-ICEPT live smoke).
+- **Live tests follow the existing pattern.** Reuse `Temporalio::Test::DevServer`,
+  the `Temporalio::Test::Worker` retry helpers, and the `.proverc` serial-integration
+  phasing. Tests `skip_all` cleanly when the `temporal` CLI is absent.
+- **Memory guard for shim builds.** `CARGO_BUILD_JOBS=2`, foreground, retry once at
+  jobs=1 on OOM; never background a build. Rebuild + reinstall the Alien bridge so
+  the SDK loads new symbols (`nm -D` to confirm).
+- **Cross-cluster regression checks.** After B1-B3 (the shared Runner.pm roots),
+  re-run all cancel/condition repros together; a fix in one may move another.
+- **Do not weaken the existing suites.** No repro test may be made to pass by
+  loosening an existing assertion. If a fix changes existing replay golden output,
+  justify it in the commit message.
+
+## Success Metrics
+
+- Each cluster's repro lands green with its fix and remains in the suite as
+  permanent `t/integration` / `t/replay` coverage.
+- `prove -lj4 t` is green in sdk-perl with every repro un-gated (the live-coverage
+  gap is closed).
+- Every cleanup-contract box in `sdk-perl-issues-from-samples.md` is checked: the
+  matching sample is back to idiomatic code and its live smoke passes un-gated.
+- samples-perl `just check` is green offline and with the SDK on PERL5LIB.
+- CLAUDE.md and README status lines are updated to "verified live against a dev
+  server."

@@ -1,0 +1,131 @@
+# ABOUTME: Alien::Build recipe for the in-tree temporalio-perl-bridge Rust shim:
+# ABOUTME: cargo-builds the cdylib and installs it plus its cbindgen-made header.
+use alienfile;
+
+use Path::Tiny qw(path);
+
+my $crate       = 'temporalio-perl-bridge';
+my $lib_stem    = 'temporalio_perl_bridge';
+my $header_name = 'temporalio-perl-bridge.h';
+
+# The shim is our own code, version-locked with the SDK distribution, and never
+# expected on the host: always a share install (spec section 2.1).
+probe sub { 'share' };
+
+# Locate the in-tree crate. This alienfile sits at <dist-root>/alienfile and
+# the crate at <repo-root>/ext/temporalio-perl-bridge, so walking up from
+# __FILE__ resolves it from a monorepo checkout AND from inside a dzil .build
+# directory (Alien::Build loads alienfiles via `do`, so __FILE__ is real).
+# The env override covers out-of-tree layouts.
+my $resolve_ext = sub {
+    my $override = $ENV{ALIEN_TEMPORALIO_PERL_BRIDGE_EXT_PATH};
+    if (defined $override && length $override) {
+        die "ALIEN_TEMPORALIO_PERL_BRIDGE_EXT_PATH path does not exist: $override\n"
+            unless -d $override;
+        return path($override)->absolute;
+    }
+
+    my $dir = path(__FILE__)->absolute->parent;
+    while (1) {
+        my $candidate = $dir->child('ext', $crate);
+        return $candidate if $candidate->child('Cargo.toml')->is_file;
+        last if $dir->is_rootdir;
+        $dir = $dir->parent;
+    }
+    die "cannot locate the in-tree ext/$crate crate above "
+      . path(__FILE__)->absolute->parent
+      . " (set ALIEN_TEMPORALIO_PERL_BRIDGE_EXT_PATH to the crate directory)\n";
+};
+
+share {
+    download sub {
+        my ($build) = @_;
+
+        # Spec section 2.1 failure mode: the core Alien supplies the upstream
+        # sdk-core C bridge header the shim is built against; require it
+        # before doing any work, with install instructions on failure.
+        eval { require Alien::Temporalio::Core; 1 } or die
+            "Alien::Temporalio::Core is required to build $crate but could"
+          . " not be loaded. Install it first (cpanm Alien::Temporalio::Core);"
+          . " for a monorepo checkout, add alien-core/lib to PERL5LIB.\n"
+          . "Loader said: $@";
+
+        my $ext = $resolve_ext->();
+        $build->log("building in-tree shim crate in place: $ext");
+
+        # The real source stays where it is; satisfy the download/extract
+        # pipeline with a stub directory (non-empty, or Extract::Directory
+        # reports "no files extracted").
+        my $stub = path('temporalio-perl-bridge-in-tree');
+        $stub->mkdir;
+        $stub->child('IN-TREE')->spew("in-tree shim crate: $ext\n");
+        # An in-tree source is a trusted local fetch; record it so the digest
+        # stage does not flag a missing digest (protocol 'file' is on
+        # Alien::Build's secure list).
+        $build->install_prop->{download_detail}{ $stub->absolute->stringify }
+            = { protocol => 'file' };
+    };
+    plugin 'Extract::Directory';
+
+    # Spec section 2 failure modes, in one place: cargo missing -> rustup URL;
+    # cargo build failure -> die with the cargo output captured verbatim.
+    my $run_cargo_build = sub {
+        my ($build, $ext) = @_;
+
+        require File::Which;
+        File::Which::which('cargo')
+            or die "cargo not found on PATH. Building $crate requires a Rust"
+                 . " toolchain: install one via rustup (https://rustup.rs/)\n";
+
+        my @cmd = (
+            qw(cargo build --release),
+            '--manifest-path', $ext->child('Cargo.toml')->stringify,
+        );
+        $build->log("+ @cmd");
+
+        require Capture::Tiny;
+        my ($output, $exit) = Capture::Tiny::capture_merged(sub {
+            system @cmd;
+            $?;
+        });
+        $build->log($output) if length $output;
+        die "cargo build failed (exit @{[ $exit >> 8 ]}). Cargo output:\n$output" if $exit;
+    };
+
+    build [
+        sub {
+            my ($build) = @_;
+            $run_cargo_build->($build, $resolve_ext->());
+        },
+        sub {
+            my ($build) = @_;
+            my $ext   = $resolve_ext->();
+            my $stage = path($build->install_prop->{stage});
+
+            my ($cdylib) = grep { $_->is_file }
+                map { $ext->child('target', 'release', $_) }
+                ("lib$lib_stem.so", "lib$lib_stem.dylib", "$lib_stem.dll");
+            die "cargo build succeeded but no $crate cdylib found under "
+              . $ext->child('target', 'release') . "\n"
+                unless $cdylib;
+
+            # build.rs runs cbindgen and writes the header into the crate tree.
+            my $header = $ext->child('include', $header_name);
+            die "expected generated header not found: $header\n"
+                unless $header->is_file;
+
+            $stage->child('dynamic')->mkdir;
+            $cdylib->copy($stage->child('dynamic', $cdylib->basename));
+
+            $stage->child('include')->mkdir;
+            $header->copy($stage->child('include', $header_name));
+        },
+    ];
+
+    gather sub {
+        my ($build) = @_;
+        # Version-locked with the SDK distribution (spec section 2.1).
+        $build->runtime_prop->{version}  = '0.1.0';
+        $build->runtime_prop->{ffi_name} = $lib_stem;
+    };
+};

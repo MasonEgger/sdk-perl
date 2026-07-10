@@ -1,0 +1,118 @@
+# ABOUTME: Alien::Build recipe for the temporal-sdk-core C bridge: fetches the
+# ABOUTME: pinned sdk-rust tag (or a local checkout override) and cargo-builds it.
+use alienfile;
+
+use Path::Tiny qw(path);
+
+# Spec section 2: pinned sdk-rust release. Bumping this pin requires
+# re-running the WorkerOptions echo test (plan P0.10).
+my $pinned_tag     = 'v0.4.0';
+my $pinned_version = $pinned_tag =~ s/^v//r;
+my $pinned_sha256  = '2b4b72df8c1468d472fa5ac22a864ba27c28fb57e955fd49fa114c693bf3dbd5';
+
+my $crate       = 'temporalio-sdk-core-c-bridge';
+my $header_name = 'temporal-sdk-core-c-bridge.h';
+
+# The .so is sdk-core-version-specific and never expected on the host:
+# always a share install (spec section 2 probe step).
+probe sub { 'share' };
+
+share {
+    # Override hook (spec section 2): build a local sdk-rust tree in place
+    # instead of fetching the pinned tarball.
+    my $override = $ENV{ALIEN_TEMPORALIO_CORE_SDK_RUST_PATH};
+
+    if (defined $override && length $override) {
+        download sub {
+            my ($build) = @_;
+            die "ALIEN_TEMPORALIO_CORE_SDK_RUST_PATH path does not exist: $override\n"
+                unless -d $override;
+            $build->log("building local sdk-rust tree in place: $override");
+            # The real source stays where it is; satisfy the download/extract
+            # pipeline with a stub directory (non-empty, or Extract::Directory
+            # reports "no files extracted").
+            my $stub = path('sdk-rust-local-override');
+            $stub->mkdir;
+            $stub->child('OVERRIDE')->spew("local sdk-rust tree: $override\n");
+            # A local-path override is a trusted local fetch; record it so the
+            # extract stage does not flag a missing digest (protocol 'file' is
+            # on Alien::Build's secure list).
+            $build->install_prop->{download_detail}{ $stub->absolute->stringify }
+                = { protocol => 'file' };
+        };
+        plugin 'Extract::Directory';
+    }
+    else {
+        start_url "https://github.com/temporalio/sdk-rust/archive/refs/tags/$pinned_tag.tar.gz";
+        plugin 'Download';
+        plugin 'Digest' => [ SHA256 => $pinned_sha256 ];
+        plugin 'Extract' => 'tar.gz';
+    }
+
+    # In override mode the source root is the user's checkout; in tarball mode
+    # it is the extracted tree we are standing in.
+    my $source_root = sub { defined $override && length $override ? $override : '.' };
+
+    # Spec section 2 failure modes, in one place: cargo missing -> rustup URL;
+    # cargo build failure -> die with the cargo output captured verbatim.
+    my $run_cargo_build = sub {
+        my ($build, $root) = @_;
+
+        require File::Which;
+        File::Which::which('cargo')
+            or die "cargo not found on PATH. Building $crate requires a Rust"
+                 . " toolchain: install one via rustup (https://rustup.rs/)\n";
+
+        my @cmd = (
+            qw(cargo build --release -p), $crate,
+            '--manifest-path', path($root, 'Cargo.toml')->stringify,
+        );
+        $build->log("+ @cmd");
+
+        require Capture::Tiny;
+        my ($output, $exit) = Capture::Tiny::capture_merged(sub {
+            system @cmd;
+            $?;
+        });
+        $build->log($output) if length $output;
+        die "cargo build failed (exit @{[ $exit >> 8 ]}). Cargo output:\n$output" if $exit;
+    };
+
+    build [
+        sub {
+            my ($build) = @_;
+            $run_cargo_build->($build, $source_root->());
+        },
+        sub {
+            my ($build) = @_;
+            my $root  = path($source_root->());
+            my $stage = path($build->install_prop->{stage});
+
+            my ($cdylib) = grep { $_->is_file }
+                map { $root->child('target', 'release', $_) }
+                qw(
+                    libtemporalio_sdk_core_c_bridge.so
+                    libtemporalio_sdk_core_c_bridge.dylib
+                    temporalio_sdk_core_c_bridge.dll
+                );
+            die "cargo build succeeded but no $crate cdylib found under "
+              . $root->child('target', 'release') . "\n"
+                unless $cdylib;
+
+            my $header = $root->child('crates', 'sdk-core-c-bridge', 'include', $header_name);
+            die "expected C header not found: $header\n" unless $header->is_file;
+
+            $stage->child('dynamic')->mkdir;
+            $cdylib->copy($stage->child('dynamic', $cdylib->basename));
+
+            $stage->child('include')->mkdir;
+            $header->copy($stage->child('include', $header_name));
+        },
+    ];
+
+    gather sub {
+        my ($build) = @_;
+        $build->runtime_prop->{version}  = $pinned_version;
+        $build->runtime_prop->{ffi_name} = 'temporalio_sdk_core_c_bridge';
+    };
+};

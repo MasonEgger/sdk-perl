@@ -1,0 +1,14 @@
+--recurse
+# Integration tests each boot their own ephemeral dev server and drive real
+# RPCs against it. Running them concurrently with the parallel unit/replay
+# phase starves the worker on a small box, so a dev-server RPC, connect, or
+# shutdown intermittently trips a deadline (the P10.0 flakes). Fix: split the
+# run into two phases. Unit, replay, and the load test are matched to `par`
+# rules and run in parallel. The integration tests are matched by NO rule, so
+# per prove's resolution ("any test which does not match a rule will be run in
+# sequence at the end of the run") they run one at a time AFTER the parallel
+# phase drains -- on an otherwise-idle box, with full CPU for the dev server
+# and worker. The command stays `prove -lj4 t`; only the schedule changes.
+--rules=par=t/unit/*.t
+--rules=par=t/replay/*.t
+--rules=par=t/00-load.t

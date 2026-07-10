@@ -13,8 +13,9 @@ cover_db/
 # Devel::NYTProf
 nytprof.out
 
-# Dist::Zilla
+# Dist::Zilla (root and per-distribution build dirs, e.g. sdk/.build/)
 /.build/
+.build/
 
 # Module::Build
 _build/
@@ -37,5 +38,21 @@ inc/
 # Carton/Carmel
 /local/
 /.carmel/
+
+# BPE workflow (never commit)
+commit-msg.md
+goal.md
+
+# Test scratch space (dev server logs etc.)
+sdk/t/tmp/
+
+# Test::Alien::Build scratch dirs (alien-core/.tmp/ etc.)
+.tmp/
+
+# Rust build output
+target/
 # cpanfile.snapshot should generally be ignored for library code, otherwise included
 # cpanfile.snapshot
+
+# v0.2 spec research drafts (scratch, not committed)
+.v0.2-drafts/

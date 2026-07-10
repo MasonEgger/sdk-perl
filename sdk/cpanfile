@@ -1,0 +1,62 @@
+# ABOUTME: Dependency declarations for the Temporalio-SDK distribution.
+# ABOUTME: Runtime deps per spec section 16; test deps per spec section 12.1.
+requires 'perl', '5.038000';
+
+# Core layer: FFI over the sdk-core C bridge (api => 2 per spec section 4)
+requires 'FFI::Platypus', '2.00';
+requires 'Alien::Temporalio::Core';
+requires 'Alien::Temporalio::PerlBridge';
+
+# Async surface (spec section 16.1); Future is used directly (e.g. the
+# Temporalio::Cancellation cancelled-Future, spec section 4.4)
+requires 'Future';
+requires 'Future::AsyncAwait', '0.66';
+requires 'IO::Async';
+requires 'Syntax::Keyword::Dynamically';
+
+# Wakeup eventfd on Linux (spec section 4.2); Temporalio::Core::Callback
+# falls back to a nonblocking pipe when unavailable or on non-Linux.
+recommends 'Linux::FD';
+
+# Exceptions (spec section 16.1)
+requires 'Devel::StackTrace';
+
+# Deterministic workflow clock: Temporalio::Workflow::now returns a DateTime at
+# the activation timestamp, never the OS clock (spec section 10.4).
+requires 'DateTime';
+
+# Deterministic workflow RNG: Temporalio::Workflow::random returns a
+# Math::Random::ISAAC::XS instance seeded from the activation's randomness_seed
+# (spec section 10.4 / T-wf-10).
+requires 'Math::Random::ISAAC::XS';
+
+# Logging interop (spec section 16.4)
+requires 'Log::Any';
+
+# OpenTelemetry tracing interceptor (spec section 27.4) is a SOFT dependency:
+# Temporalio::Contrib::OpenTelemetry::TracingInterceptor loads and propagates
+# headers via a built-in W3C carrier shim without these; span creation needs
+# them. t/unit/tracing.t skips the span-tree scenarios when they are absent.
+recommends 'OpenTelemetry';
+recommends 'OpenTelemetry::SDK';
+
+# Protobuf: pure-Perl parser-direct distribution (spec section 4.6)
+requires 'Protobuf',
+    git => 'https://github.com/MasonEgger/protobuf-perl.git';
+
+# Locates the vendored proto share dir (and Protobuf's bundled WKTs) when
+# running from an installed distribution (spec section 4.6).
+requires 'File::ShareDir';
+
+on 'test' => sub {
+    requires 'Test2::V1';
+    requires 'Test::Future::AsyncAwait';
+};
+
+on 'develop' => sub {
+    requires 'Test2::Plugin::DieOnFail';
+    # Author POD tests (xt/pod-syntax.t, xt/pod-coverage.t) — spec section 16.7.
+    requires 'Test::Pod', '1.41';
+    requires 'Test::Pod::Coverage', '1.08';
+    requires 'Pod::Coverage';
+};
