@@ -549,13 +549,43 @@ class Temporalio::Client::WorkflowHandle {
             last if $stage >= $WAIT_STAGE{accepted};
         }
 
+        return $self->_update_handle($update_id,
+            known_outcome => $response->outcome);
+    }
+
+    # get_update_handle($update_id, run_id => ..., result_type => ...) — build
+    # a WorkflowUpdateHandle for a known update WITHOUT issuing any RPC (spec
+    # R92 / parity audit client finding 2; sdk-python _workflow.py:978-1006,
+    # with get_update_handle_for at :1008 as the typed sugar over the same
+    # constructor). run_id defaults to this handle's own run id (Python :1001
+    # "workflow_run_id or self._run_id"); result_type is the optional decode
+    # hint the handle threads to payload decoding.
+    method get_update_handle ($update_id, %opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->get_update_handle', \%opts,
+            { run_id => 1, result_type => 1 });
+        Temporalio::Exception::Argument->throw(
+            message => 'get_update_handle requires an update id (string)')
+            unless defined $update_id && !ref $update_id && length $update_id;
+        return $self->_update_handle($update_id,
+            run_id      => $opts{run_id},
+            result_type => $opts{result_type},
+        );
+    }
+
+    # The ONE construction point for update handles (spec R92 / parity audit
+    # client finding 2): the owning client and workflow id always come from
+    # this handle, and run_id defaults to the handle's own run when the caller
+    # passes none (or undef). Both start_update's post-RPC handle and the
+    # RPC-free get_update_handle route through here.
+    method _update_handle ($update_id, %fields) {
         require Temporalio::Client::WorkflowUpdateHandle;
         return Temporalio::Client::WorkflowUpdateHandle->new(
-            client        => $client,
-            workflow_id   => $workflow_id,
-            run_id        => $run_id,
-            update_id     => $update_id,
-            known_outcome => $response->outcome,
+            client      => $client,
+            workflow_id => $workflow_id,
+            update_id   => $update_id,
+            %fields,
+            run_id      => $fields{run_id} // $run_id,
         );
     }
 
@@ -744,6 +774,24 @@ accepted) and returns a L<Temporalio::Client::WorkflowUpdateHandle>. The
 C<wait_for_stage> option maps C<'accepted'> and C<'completed'> to the update
 lifecycle stages; C<'admitted'> raises L<Temporalio::Exception::Argument> before
 any RPC. C<%opts> also accepts an explicit C<update_id> (default: a fresh UUID).
+
+=head2 get_update_handle
+
+    my $uh = $handle->get_update_handle(
+        $update_id,
+        run_id      => $rid,      # default: this handle's run id
+        result_type => $type,     # optional decode hint
+    );
+    my $r = await $uh->result;
+
+Builds a L<Temporalio::Client::WorkflowUpdateHandle> for a known update id
+without issuing any RPC (spec R92, sdk-python
+C<WorkflowHandle.get_update_handle>). C<run_id> defaults to this handle's own
+run id; C<result_type> is stored on the update handle and passed as the type
+hint when the result payload is decoded. C<< $uh->result >> then polls
+C<PollWorkflowExecutionUpdate> for the update's outcome. A missing update id
+or an unknown option key raises L<Temporalio::Exception::Argument> before any
+RPC.
 
 =head1 METHODS
 

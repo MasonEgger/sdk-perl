@@ -454,10 +454,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R91.4 Verify: operator RPC forms/sends, workflow raw RPC round-trips; prove -lj4 t green under memory guard (t: 191 files/844 tests PASS incl. the live add/list/remove; xt: 432 PASS)
 
 ### Step R92: Add WorkflowHandle get_update_handle
-- [ ] R92.1 RED: subprocess-guarded integration test: get_update_handle result polls PollWorkflowExecutionUpdate with the given update id + handle's run id; omitted run_id binds the handle's run
-- [ ] R92.2 GREEN: add get_update_handle(update_id, run_id, result_type) to Client/WorkflowHandle.pm via the public update-handle constructor, to _workflow.py:978,1008 parity
-- [ ] R92.3 REFACTOR: default run/workflow id from the handle in one place; comment cites finding 2
-- [ ] R92.4 Verify: polls with correct update + run id; prove -lj4 t green under memory guard
+- [x] R92.1 RED: subprocess-guarded integration test: get_update_handle result polls PollWorkflowExecutionUpdate with the given update id + handle's run id; omitted run_id binds the handle's run (t/integration/get_update_handle.t, one guarded dev-server scenario: an UpdatableCounter update with a known id is driven to completion, then a handle rebuilt via get_update_handle(update_id, run_id, result_type) resolves result()==5 with the poll request captured around Client::_rpc_call carrying the given update id + run id; edge: omitted run_id binds the handle's own run; R44 strictness pinned (unknown key / missing update id raise Argument pre-RPC); honest RED on the missing method)
+- [x] R92.2 GREEN: add get_update_handle(update_id, run_id, result_type) to Client/WorkflowHandle.pm via the public update-handle constructor, to _workflow.py:978,1008 parity (run_id defaults to the handle's own run per _workflow.py:1001 "workflow_run_id or self._run_id"; WorkflowUpdateHandle gains a result_type :param + accessor threaded as the first-payload type hint to from_payloads, matching Python's [self._result_type]; stock converters self-describe and ignore hints, a custom converter can honor it)
+- [x] R92.3 REFACTOR: default run/workflow id from the handle in one place; comment cites finding 2 (WorkflowHandle::_update_handle is the ONE construction point: client + workflow_id always from the handle, run_id defaulting to the handle's run; both _root_start_update's post-RPC handle and the RPC-free get_update_handle route through it; POD added on both classes)
+- [x] R92.4 Verify: polls with correct update + run id; prove -lj4 t green under memory guard (t: 192 files/845 tests PASS incl. the live captured-poll scenario; xt: 433 PASS)
 
 ### Step R93: Honor a Client-Level Default Query Reject Condition
 - [ ] R93.1 RED: subprocess-guarded integration test: connect default rides the outbound QueryWorkflow when per-call omitted; per-call value overrides; neither leaves it unset

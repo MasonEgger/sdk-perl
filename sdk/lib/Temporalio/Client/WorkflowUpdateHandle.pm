@@ -28,10 +28,18 @@ class Temporalio::Client::WorkflowUpdateHandle {
     # in the same call), else undef. result() returns it directly when present.
     field $known_outcome :param = undef;
 
+    # Optional decode hint for the update result (R92, Python parity: the
+    # WorkflowUpdateHandle stores result_type and passes it to payload
+    # decoding). Threaded to from_payloads for the first (result) payload;
+    # the stock converters self-describe and ignore it, but a custom payload
+    # converter can honor it.
+    field $result_type :param = undef;
+
     method client      { $client }
     method workflow_id { $workflow_id }
     method run_id      { $run_id }
     method update_id   { $update_id }
+    method result_type { $result_type }
 
     # result() — async (spec section 19.2). Returns the decoded update result, or
     # throws Temporalio::Exception::WorkflowUpdateFailed (cause = decoded failure)
@@ -120,7 +128,10 @@ class Temporalio::Client::WorkflowUpdateHandle {
         return () unless defined $payloads_msg;
         my $payloads = $payloads_msg->payloads;
         return () unless defined $payloads && @$payloads;
-        return await $client->data_converter->from_payloads($payloads);
+        # The result_type hint applies to the first payload — the single value
+        # result() returns (R92, matching Python's [self._result_type]).
+        return await $client->data_converter->from_payloads(
+            $payloads, defined $result_type ? [$result_type] : undef);
     }
 
     sub _resolve ($name) { Temporalio::Core::Proto::resolve($name) }
@@ -164,6 +175,14 @@ validator/handler failure.
 
 Accessor returning the owning L<Temporalio::Client>.
 
+=head2 result_type
+
+Accessor returning the optional decode hint for the update result (set by
+C<< $workflow_handle->get_update_handle(..., result_type => $t) >>, spec R92).
+When present it is passed as the type hint for the result payload through
+C<< $client->data_converter->from_payloads >>; the stock payload converters
+self-describe and ignore hints, but a custom converter can honor it.
+
 =head2 run_id
 
 Accessor returning the workflow run id.
@@ -182,9 +201,11 @@ Accessor returning the workflow id.
 
     my $uh = Temporalio::Client::WorkflowUpdateHandle->new(
         client => $client, workflow_id => $id, run_id => $rid,
-        update_id => $uid, known_outcome => $outcome);
+        update_id => $uid, known_outcome => $outcome,
+        result_type => $type_hint);
 
 Constructs a Temporalio::Client::WorkflowUpdateHandle. Normally created by
-C<< $workflow_handle->start_update >> rather than directly.
+C<< $workflow_handle->start_update >> or
+C<< $workflow_handle->get_update_handle >> rather than directly.
 
 =cut
