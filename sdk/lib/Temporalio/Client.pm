@@ -801,6 +801,12 @@ class Temporalio::Client {
             unless $response_class ne ref($request)
                 && $response_class->can('decode');
 
+        # Resolve the live connection pointer first: a lazy client performs
+        # its deferred core connect here, on the first RPC, and concurrent
+        # first RPCs share the single in-flight connect through Connection's
+        # once-init guard (spec R90; parity audit client finding 3).
+        my $connection_ptr = await $connection->connected_ptr;
+
         # Build the TemporalCoreRpcCallOptions record. @keep and the record
         # itself are lexicals held across the await — per the header, the
         # options must live through the callback.
@@ -830,7 +836,7 @@ class Temporalio::Client {
         my $completion = await Temporalio::Core::Callback->issue_async(
             $runtime, rpc => sub ($user_data, $trampoline) {
                 Temporalio::Core::FFI::client_rpc_call(
-                    $connection->ptr, $options, $user_data, $trampoline);
+                    $connection_ptr, $options, $user_data, $trampoline);
             });
 
         if (defined $completion->{failure_message}) {
@@ -900,9 +906,6 @@ class Temporalio::Client {
             message => 'Temporalio::Client->connect requires a target'
                      . ' host:port')
             unless defined $target && length $target;
-        Temporalio::Exception::Argument->throw(
-            message => 'lazy client connections are not supported in v0.1')
-            if $lazy;
 
         $runtime //= Temporalio::Runtime->default;
         my $tls_config =
@@ -986,33 +989,64 @@ class Temporalio::Client {
             dns_load_balancing_options       => undef,
         );
 
-        # Spec section 7.3 step 5: a non-null fail byte array (surfaced by
-        # the callback layer as Exception::Bridge) becomes RpcError with
-        # the decoded message.
-        my $connection_ptr;
-        try {
-            $connection_ptr = await Temporalio::Core::Callback->issue_async(
-                $runtime, connect => sub ($user_data, $trampoline) {
-                    Temporalio::Core::FFI::client_connect(
-                        $runtime->core_ptr, $options_record,
-                        $user_data, $trampoline);
-                });
-        }
-        catch ($error) {
-            if (Scalar::Util::blessed($error)
-                && $error->isa('Temporalio::Exception::Bridge'))
-            {
-                Temporalio::Exception::RpcError->throw(
-                    message => $error->message);
+        # The core connect, wrapped in a closure so a lazy client can defer
+        # it to the first RPC (spec R90; parity audit client finding 3,
+        # matching sdk-python _client.py:151,205-207 / service.py
+        # _BridgeServiceClient). The closure keeps $options_record and @keep
+        # alive until the connect callback fires. Spec section 7.3 step 5: a
+        # non-null fail byte array (surfaced by the callback layer as
+        # Exception::Bridge) becomes RpcError with the decoded message —
+        # from connect() itself on the eager path, from the first RPC on
+        # the lazy path.
+        my $do_connect = async sub {
+            # Anchor the kept buffers: a closure only captures what it
+            # references, and $options_record points INTO @keep, so without
+            # this the buffers are freed when connect() returns on the lazy
+            # path and the deferred connect reads dangling memory (observed
+            # as "Invalid options: relative URL without a base").
+            my $keep_anchor = \@keep;
+            my $connection_ptr;
+            try {
+                $connection_ptr = await Temporalio::Core::Callback->issue_async(
+                    $runtime, connect => sub ($user_data, $trampoline) {
+                        Temporalio::Core::FFI::client_connect(
+                            $runtime->core_ptr, $options_record,
+                            $user_data, $trampoline);
+                    });
             }
-            die $error;
+            catch ($error) {
+                if (Scalar::Util::blessed($error)
+                    && $error->isa('Temporalio::Exception::Bridge'))
+                {
+                    Temporalio::Exception::RpcError->throw(
+                        message => $error->message);
+                }
+                die $error;
+            }
+            return $connection_ptr;
+        };
+
+        my $connection;
+        if ($lazy) {
+            # Deferred: no connect attempt here. Connection->connected_ptr
+            # runs $do_connect on the first RPC, behind a once-init guard
+            # shared by concurrent first RPCs.
+            $connection = Temporalio::Client::Connection->new(
+                runtime => $runtime,
+                connect => $do_connect,
+            );
+        }
+        else {
+            # Eager (the default): connect now, fail now.
+            my $connection_ptr = await $do_connect->();
+            $connection = Temporalio::Client::Connection->new(
+                runtime => $runtime,
+                ptr     => $connection_ptr,
+            );
         }
 
         return $class->new(
-            connection => Temporalio::Client::Connection->new(
-                runtime => $runtime,
-                ptr     => $connection_ptr,
-            ),
+            connection     => $connection,
             namespace      => $namespace,
             identity       => $identity,
             data_converter => $data_converter,
@@ -1072,9 +1106,9 @@ Retry defaults match sdk-core exactly and retries run inside sdk-core, not
 the Perl layer. Keep-alive defaults on (30s/15s); disable with
 C<< keep_alive => 0 >>. C<update_api_key> rotates the bearer token on the
 live connection synchronously; rotation is always manual (spec section
-7.3). Connections are always established eagerly: the C<lazy> option is
-accepted for reference-SDK parity but any true value raises
-L<Temporalio::Exception::Argument> (see L</connect>).
+7.3). Connections are established eagerly by default, inside C<connect>
+itself; C<< lazy => 1 >> defers the core connection to the first RPC
+(spec R90, see L</connect>).
 
 Every client RPC funnels through the private C<_rpc_call> helper: it
 encodes the request proto, calls C<temporal_core_client_rpc_call> over the
@@ -1201,9 +1235,16 @@ client inherits the list and appends its own.
 
 =item C<lazy>
 
-(boolean; default 0) Accepted for reference-SDK parity but not implemented:
-any true value raises L<Temporalio::Exception::Argument>. Connections are
-always established eagerly, inside C<connect> itself.
+(boolean; default 0) When true, C<connect> validates its options and
+returns the client without connecting: the core gRPC connection is
+deferred to the first RPC, and concurrent first RPCs share the single
+in-flight connect (spec R90; Python SDK parity, C<_client.py>). A connect
+failure then surfaces from that first call as
+L<Temporalio::Exception::RpcError>, and the next RPC retries the connect.
+Until the client has connected, building a worker on it and
+C<update_api_key> both raise L<Temporalio::Exception::Runtime>. When
+false (the default) the connection is established eagerly, inside
+C<connect> itself.
 
 =item C<http_connect_proxy>
 
