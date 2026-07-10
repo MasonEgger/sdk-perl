@@ -70,6 +70,12 @@ class Temporalio::Client {
     # list folded over a root impl that performs the real RPC.
     field $interceptors   :param = [];
     field $_outbound_chain;
+    # The connect-level default query reject condition (spec R93; parity audit
+    # client finding 4, Python _client.py:144-145,184-187): applied by
+    # WorkflowHandle::query when the per-call reject_condition is omitted; a
+    # per-call value wins. Stored as given (a Python-parity name or a raw proto
+    # number); the R67 name-to-enum map validates it at query time, pre-RPC.
+    field $default_workflow_query_reject_condition :param = undef;
 
     method connection     { $connection }
     method namespace      { $namespace }
@@ -77,6 +83,8 @@ class Temporalio::Client {
     method data_converter { $data_converter }
     method runtime        { $runtime }
     method interceptors   { $interceptors }
+    method default_workflow_query_reject_condition
+        { $default_workflow_query_reject_condition }
 
     # The raw gRPC service handles (spec R91; Python _client.py:307-322):
     # the low-level escape hatch for RPCs the high-level client does not
@@ -802,7 +810,8 @@ class Temporalio::Client {
             { runtime => 1, namespace => 1, api_key => 1, tls => 1,
               identity => 1, rpc_metadata => 1, retry => 1, keep_alive => 1,
               data_converter => 1, interceptors => 1, lazy => 1,
-              http_connect_proxy => 1 });
+              http_connect_proxy => 1,
+              default_workflow_query_reject_condition => 1 });
         my $runtime        = delete $options{runtime};
         my $namespace      = delete $options{namespace} // 'default';
         my $api_key        = delete $options{api_key};
@@ -821,6 +830,12 @@ class Temporalio::Client {
         my $interceptors   = delete $options{interceptors} // [];
         my $lazy           = delete $options{lazy} // 0;
         my $http_proxy     = delete $options{http_connect_proxy};
+        # Spec R93 (parity audit client finding 4): the query-time fallback
+        # reject condition, matching Python's connect kwarg
+        # (_client.py:144-145,184-187). Stored on the client; resolved and
+        # validated by the R67 map when a query omits reject_condition.
+        my $default_query_reject =
+            delete $options{default_workflow_query_reject_condition};
 
         Temporalio::Exception::Argument->throw(
             message => 'Temporalio::Client->connect requires a target'
@@ -972,6 +987,7 @@ class Temporalio::Client {
             data_converter => $data_converter,
             runtime        => $runtime,
             interceptors   => $interceptors,
+            default_workflow_query_reject_condition => $default_query_reject,
         );
     }
 }
@@ -1092,6 +1108,11 @@ Constructs a Temporalio::Client. Named parameters:
 
 (required)
 
+=item C<default_workflow_query_reject_condition>
+
+(optional; default none) The query-time fallback reject condition; see
+L</connect>.
+
 =back
 
 =head1 METHODS
@@ -1153,6 +1174,17 @@ C<< keep_alive => 0 >> to disable.
 (L<Temporalio::Converter::Data>; default
 C<< Temporalio::Converter::Data->new >>) The payload, failure, and codec
 conversion pipeline.
+
+=item C<default_workflow_query_reject_condition>
+
+(string or proto enum number; default none) The default rejection condition
+for workflow queries when the per-call C<reject_condition> is not given to
+C<< WorkflowHandle->query >> (spec R93; Python SDK parity, C<_client.py>).
+Accepts the same values as the per-call option: C<'none'>, C<'not_open'>,
+C<'not_completed_cleanly'>, or a raw
+C<temporal.api.enums.v1.QueryRejectCondition> number. A per-call value
+overrides it; an unknown name raises L<Temporalio::Exception::Argument> from
+the query, before any RPC.
 
 =item C<interceptors>
 
@@ -1228,6 +1260,12 @@ Accessor returning the C<data_converter> value.
 =head2 default_identity
 
 Class method returning the default client identity string (C<pid@hostname>) used when none is supplied.
+
+=head2 default_workflow_query_reject_condition
+
+Accessor returning the connect-level default query reject condition (or
+C<undef> when none was given). Applied by C<< WorkflowHandle->query >> when
+the per-call C<reject_condition> is omitted (spec R93).
 
 =head2 execute_workflow
 

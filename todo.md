@@ -460,10 +460,10 @@ Per-sub-step tracker for `plan.md`. Spec: `spec.md`. Each fix step is one green 
 - [x] R92.4 Verify: polls with correct update + run id; prove -lj4 t green under memory guard (t: 192 files/845 tests PASS incl. the live captured-poll scenario; xt: 433 PASS)
 
 ### Step R93: Honor a Client-Level Default Query Reject Condition
-- [ ] R93.1 RED: subprocess-guarded integration test: connect default rides the outbound QueryWorkflow when per-call omitted; per-call value overrides; neither leaves it unset
-- [ ] R93.2 GREEN: accept/store default_workflow_query_reject_condition at Client.pm:800-824; apply it in Client/WorkflowHandle.pm:379-380 when per-call absent, to _client.py:144-145,184-187 parity
-- [ ] R93.3 REFACTOR: resolve the effective condition in one shared helper; comment cites finding 4
-- [ ] R93.4 Verify: default applied, per-call overrides, unset stays unset; prove -lj4 t green under memory guard
+- [x] R93.1 RED: subprocess-guarded integration test: connect default rides the outbound QueryWorkflow when per-call omitted; per-call value overrides; neither leaves it unset (t/integration/default_query_reject_condition.t, one guarded dev-server scenario: a client connected with default_workflow_query_reject_condition => 'not_open' queries the open QueryGreeter with no per-call condition and the QueryWorkflow request captured around Client::_rpc_call carries enum 2; a per-call 'none' overrides to 1; a second client with no default leaves the field at proto default 0; honest RED on connect rejecting the unknown key)
+- [x] R93.2 GREEN: accept/store default_workflow_query_reject_condition at Client.pm:800-824; apply it in Client/WorkflowHandle.pm:379-380 when per-call absent, to _client.py:144-145,184-187 parity (connect accepts + stores it on a new Client field with accessor; _root_query falls back per-call // client default, matching Python's `reject_condition or client default` at _workflow.py:600-601; stored as given, validated by the R67 map at query time pre-RPC)
+- [x] R93.3 REFACTOR: resolve the effective condition in one shared helper; comment cites finding 4 (WorkflowHandle::_effective_query_reject_condition is the ONE resolution point: per-call wins, else the client default, winner mapped through the R67 _named_enum table; _root_query routes through it; POD on connect, the accessor, and query)
+- [x] R93.4 Verify: default applied, per-call overrides, unset stays unset; prove -lj4 t green under memory guard (t: 193 files/846 tests PASS incl. the live captured-request scenario; xt: 434 PASS)
 
 ### Step R94: Add an on_fatal_error Worker Hook
 - [ ] R94.1 RED: subprocess-guarded integration test: fatal poll-loop death invokes on_fatal_error with the error before run() returns; a throwing hook is swallowed and does not mask the original failure

@@ -375,6 +375,21 @@ class Temporalio::Client::WorkflowHandle {
         not_completed_cleanly => 3,    # ..._NOT_COMPLETED_CLEANLY
     );
 
+    # _effective_query_reject_condition($per_call) — the single resolution
+    # point for every query path (spec R93 / parity audit client finding 4):
+    # a defined per-call value wins, else the connect-level default stored on
+    # the client (Python _client.py:144-145,184-187 / _workflow.py:600-601).
+    # The winner maps through the R67 name-to-enum table above (finding A13),
+    # so a raw proto number passes through and an unknown name raises the
+    # typed Argument error pre-RPC. Returns undef when neither is set,
+    # leaving the proto field unset.
+    method _effective_query_reject_condition ($per_call) {
+        my $rc = $per_call // $client->default_workflow_query_reject_condition;
+        return undef unless defined $rc;
+        return _named_enum('reject_condition', $rc,
+            \%QUERY_REJECT_CONDITION);
+    }
+
     # query($name, \@args, reject_condition => ..., ...) — async (spec section
     # 7.6 / sdk-python _impl.py query_workflow 411-472). Returns the decoded
     # single query result; a server-rejected query raises QueryRejected.
@@ -415,12 +430,11 @@ class Temporalio::Client::WorkflowHandle {
             execution => $self->_execution_message,
             query     => $WorkflowQuery->new(\%query_fields),
         );
-        if (defined(my $rc = $opts{reject_condition})) {
-            # Spec R67 (finding A13): map the named value; a raw proto number
-            # still passes through; an unknown name raises Argument pre-RPC.
-            $fields{query_reject_condition} =
-                _named_enum('reject_condition', $rc,
-                    \%QUERY_REJECT_CONDITION);
+        # Per-call-or-client-default resolution, all in the shared helper
+        # (spec R93 / parity audit client finding 4).
+        if (defined(my $rc = $self->_effective_query_reject_condition(
+                $opts{reject_condition}))) {
+            $fields{query_reject_condition} = $rc;
         }
         my $request = _resolve(
             'temporal.api.workflowservice.v1.QueryWorkflowRequest')
@@ -733,7 +747,11 @@ C<temporal.api.enums.v1.QueryRejectCondition> value: C<'none'>,
 C<'not_open'>, or C<'not_completed_cleanly'> (the same names as sdk-python's
 C<QueryRejectCondition>); a raw proto enum number is passed through
 unchanged, and any other value raises L<Temporalio::Exception::Argument>
-before any RPC. C<fetch_history_events>
+before any RPC. When the per-call C<reject_condition> is omitted, the
+client-level C<default_workflow_query_reject_condition> given to
+C<< Temporalio::Client->connect >> applies instead (spec R93); a per-call
+value always wins, and with neither set the request field stays unset.
+C<fetch_history_events>
 returns an async iterator over the workflow's history events.
 
 =head2 reset
