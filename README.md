@@ -1,6 +1,6 @@
 # Temporal SDK for Perl
 
-[![CI](https://github.com/temporalio/sdk-perl/actions/workflows/ci.yml/badge.svg)](https://github.com/temporalio/sdk-perl/actions/workflows/ci.yml)
+[![CI](https://github.com/MasonEgger/sdk-perl/actions/workflows/ci.yml/badge.svg)](https://github.com/MasonEgger/sdk-perl/actions/workflows/ci.yml)
 
 > Larry wept.
 
@@ -60,9 +60,9 @@ There is no CPAN release yet. Install the three distributions from git, in
 dependency order, with [`cpanm`](https://metacpan.org/pod/App::cpanminus):
 
 ```bash
-cpanm git+https://github.com/temporalio/sdk-perl.git#main/alien-core
-cpanm git+https://github.com/temporalio/sdk-perl.git#main/alien-perl-bridge
-cpanm git+https://github.com/temporalio/sdk-perl.git#main/sdk
+cpanm git+https://github.com/MasonEgger/sdk-perl.git#main/alien-core
+cpanm git+https://github.com/MasonEgger/sdk-perl.git#main/alien-perl-bridge
+cpanm git+https://github.com/MasonEgger/sdk-perl.git#main/sdk
 ```
 
 The first command builds `sdk-core` from a pinned `sdk-rust` tag and takes a few
