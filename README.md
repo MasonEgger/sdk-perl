@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/temporalio/sdk-perl/actions/workflows/ci.yml/badge.svg)](https://github.com/temporalio/sdk-perl/actions/workflows/ci.yml)
 
+> Larry wept.
+
 A [Temporal](https://temporal.io) SDK for Perl. [Temporal](https://docs.temporal.io)
 is a durable execution platform that lets you write applications that recover from
 failure by default: your workflow code is plain Perl, but its state and progress are
