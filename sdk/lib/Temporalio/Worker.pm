@@ -782,10 +782,15 @@ class Temporalio::Worker {
         return undef unless $activity_registry->has_sync_activities;
         my $runtime = $self->_runtime;
         return Temporalio::Activity::Pool->new(
-            loop          => $runtime->loop,
-            max_workers   => $sync_activity_workers,
-            registry      => $activity_registry,
-            inherited_fhs => [ $runtime->read_handle ],
+            loop            => $runtime->loop,
+            max_workers     => $sync_activity_workers,
+            registry        => $activity_registry,
+            inherited_fhs   => [ $runtime->read_handle ],
+            # spec I7 REFACTOR sub-step 6 (closes GitHub #7): lets the pool's
+            # parent-side ActivityOutbound chain root re-encode a rewritten
+            # heartbeat with the SAME converter the async path uses, instead
+            # of relaying a pooled child's pre-rewrite bytes unchanged.
+            data_converter  => $client->data_converter,
             heartbeat_relay => sub ($task_token, $heartbeat_bytes) {
                 return $self->_record_heartbeat($heartbeat_bytes);
             },

@@ -112,14 +112,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 ## Section 4: Larger Parity Features
 
 ### Step I7: Fork-Pool cancellation_details in Children, Then the Heartbeat Interceptor Chain
-- [ ] 1. RED (dir A): fixture ActDef/PoolCancelDetails.pm + pool_cancellation_details.t; cancellation_details is undef in the child today
-- [ ] 2. Verify Python cancellation-details delivery + worker-shutdown event; record file:line
-- [ ] 3. GREEN (dir A): forward cancel reason/details parent-to-child (Pool.pm + Context.pm); parity with the async path
-- [ ] 4. RED (dir B): fixture ActDef/PoolHeartbeatIntercepted.pm + pool_heartbeat_interceptor.t; interceptor sees only bytes / nothing today
-- [ ] 5. GREEN (dir B): relay structured heartbeat details child-to-parent so the parent runs the ActivityOutbound chain (Pool.pm + ActivityDispatcher.pm); ext: only if pure-Perl framing cannot (Directive 7)
-- [ ] 6. REFACTOR: one parent-side heartbeat-chain entry point for async and pooled
-- [ ] 7. Docs: remove the §0-deviation notes in Pool.pm/Context.pm
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; if ext: changed, cargo test + Alien rebuild under the guard; commit "Closes #7"
+- [x] 1. RED (dir A): fixture ActDef/PoolCancelDetails.pm + pool_cancellation_details.t; cancellation_details is undef in the child today
+- [x] 2. Verify Python cancellation-details delivery + worker-shutdown event; record file:line
+- [x] 3. GREEN (dir A): forward cancel reason/details parent-to-child (Pool.pm + Context.pm); parity with the async path
+- [x] 4. RED (dir B): fixture ActDef/PoolHeartbeatIntercepted.pm + pool_heartbeat_interceptor.t; interceptor sees only bytes / nothing today
+- [x] 5. GREEN (dir B): relay structured heartbeat details child-to-parent so the parent runs the ActivityOutbound chain (Pool.pm + ActivityDispatcher.pm); ext: only if pure-Perl framing cannot (Directive 7)
+- [x] 6. REFACTOR: one parent-side heartbeat-chain entry point for async and pooled
+- [x] 7. Docs: remove the §0-deviation notes in Pool.pm/Context.pm
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; if ext: changed, cargo test + Alien rebuild under the guard; commit "Closes #7"
 
 ### Step I6: OpenTelemetry Workflow-Outbound Spans on the Interceptor Chain
 - [ ] 1. RED: extend unit/tracing.t (FakeOTel): per-op spans (%OUT_SPAN_VERB) + header injection for the five outbound ops; span no-ops on replay; fails today
