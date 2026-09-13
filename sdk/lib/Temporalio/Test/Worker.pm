@@ -202,13 +202,23 @@ class Temporalio::Test::Worker {
         );
     }
 
-    # shutdown($timeout=60): initiate worker shutdown so the poll loops drain on
+    # shutdown($timeout=120): initiate worker shutdown so the poll loops drain on
     # the ShutDown sentinel, then await the run future so finalize + free + fork
-    # pool teardown all complete (no orphaned processes). Idempotent.
+    # pool teardown all complete (no orphaned processes). Idempotent. Raises if
+    # the drain wedges: the run future is shielded from wait_any's loser-cancel
+    # (finding I5/spec R47 shape, same as await_result above) so a timed-out
+    # drain is diagnosed as a genuine hang, not misreported as a clean exit.
     method shutdown ($timeout = 120) {
         $worker->shutdown;
         $loop->await(Future->wait_any(
-            $run_future, $loop->timeout_future(after => $timeout)));
+            $run_future->without_cancel, $loop->timeout_future(after => $timeout)));
+        # Future 0.52 loser state (see await_result above): wait_any would
+        # CANCEL $run_future on timeout if it were unshielded, leaving it
+        # READY-but-neither-done-nor-failed, so a guard keyed on
+        # `!$run_future->is_ready` would never fire and a wedged drain would
+        # look like success. without_cancel keeps it PENDING on the timeout
+        # arm instead, so this branches on the run future's ACTUAL state:
+        # not ready -> timeout won, genuinely stalled; else check is_failed.
         die "worker run did not drain within ${timeout}s\n"
             unless $run_future->is_ready;
         # Retrieve the run future's outcome so it is never abandoned: an
@@ -337,7 +347,14 @@ integration start sites need no bespoke callback.
 
 =head2 shutdown
 
-Initiates worker shutdown and returns a L<Future> that completes once the poll loops drain.
+    $tw->shutdown;
+    $tw->shutdown(30);   # custom drain timeout in seconds
+
+Initiates worker shutdown and blocks until the poll loops drain. Raises if the
+drain wedges: a run future that has not settled by C<$timeout> (default 120)
+seconds dies with C<"worker run did not drain within ${timeout}s">, and a run
+loop that failed during shutdown re-raises with C<"worker run loop failed
+during shutdown: ...">. Returns normally only on a clean drain. Idempotent.
 
 =head2 worker
 

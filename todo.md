@@ -36,14 +36,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: prove -lj4 t green; commit "Closes #1"
 
 ### Step I5: Make Test::Worker shutdown() Raise on a Wedged Drain
-- [ ] 1. RED: unit/test_worker_shutdown.t: wedged drain must die with the drain-timeout diagnostic; add clean-return and failed-run cases
-- [ ] 2. Verify loser-state semantics (wait_any cancels loser; cancelled = ready-not-done-not-failed); record in comments
-- [ ] 3. GREEN: await $run_future->without_cancel in the race (Test/Worker.pm:208) and branch on real loser state (match :36-51)
-- [ ] 4. RED: assert the wedge case's message is the drain-timeout diagnostic (branch reachable, not dead code)
-- [ ] 5. GREEN: distinct messages for timeout vs failure
-- [ ] 6. REFACTOR: share the without_cancel-race-then-branch helper with run() (:24)
-- [ ] 7. Docs: update the shutdown() contract comment (:205-207)
-- [ ] 8. Verify: prove -lj4 t green; commit "Closes #5"
+- [x] 1. RED: unit/test_worker_shutdown.t: wedged drain must die with the drain-timeout diagnostic; add clean-return and failed-run cases
+- [x] 2. Verify loser-state semantics (wait_any cancels loser; cancelled = ready-not-done-not-failed); record in comments
+- [x] 3. GREEN: await $run_future->without_cancel in the race (Test/Worker.pm:208) and branch on real loser state (match :36-51)
+- [x] 4. RED: assert the wedge case's message is the drain-timeout diagnostic (branch reachable, not dead code)
+- [x] 5. GREEN: distinct messages for timeout vs failure
+- [x] 6. REFACTOR: share the without_cancel-race-then-branch helper with run() (:24) (skipped: the two races differ enough, one arm each vs. two, that a shared helper would not genuinely simplify either call site)
+- [x] 7. Docs: update the shutdown() contract comment (:205-207)
+- [x] 8. Verify: prove -lj4 t green; commit "Closes #5"
 
 ## Section 2: Schedule Round-Trip Data Loss
 
