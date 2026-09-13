@@ -156,3 +156,149 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 3. Do: add a Test2 todo block eval-compiling two attributed :isa classes in one unit with F::AA loaded (the #18 minimal repro); comment links lessons.md + #18
 - [x] 4. Verify: prove -lv t/unit/attribute_handlers.t exits 0 with the test reported TODO; prove -lj4 t green overall
 - [x] 5. Document: leave the upstream-report draft (repro + environment) in the commit body; commit "Closes #18"
+
+## Section 6: Frontier Review Remediation
+
+### Step F1: Make OTel Outbound Headers Real Payloads End to End
+- [ ] 1. RED: replay-harness end-to-end traceparent, blessed-Payload extract, per-op own-span round trip, header replacement, parent-missing gate; fails today
+- [ ] 2. Verify Python _context_carrier_to_headers contract; cite
+- [ ] 3. GREEN: blessed Payload from _carrier_to_payload; duck-typed _payload_to_carrier
+- [ ] 4. RED: to_payload_map pass-through regression test
+- [ ] 5. GREEN: pass-through holds
+- [ ] 6. REFACTOR: one header-payload helper for client and workflow outbound
+- [ ] 7. Docs: POD on Payload headers and outbound parent-missing gate
+- [ ] 8. Verify: both suites green; commit "Refs #6"
+
+### Step F2: Route Signal-Handler Failures Through the Body's Full Classification
+- [ ] 1. RED: cancel with parked async signal, continue-as-new from handler, Temporal failure from async handler, Nondeterminism, eviction drop, workflow_failure_exception_types; fails today
+- [ ] 2. Verify _workflow_instance.py:2518-2565; cite
+- [ ] 3. GREEN: _classify_failure shared by _outcome_for_failure and _settle_signal; $evicting guard
+- [ ] 4. RED: handler-emitted terminal partition test
+- [ ] 5. GREEN: re-partition in _build_completion
+- [ ] 6. REFACTOR: replace I2 em-dashes; method-name anchors; $_[0] closure
+- [ ] 7. Docs: Runner comments on classifier and evicting guard
+- [ ] 8. Verify: both suites green; commit "Refs #2"
+
+### Step F3: Drain a Dead Poll Loop Until Core Shuts Down
+- [ ] 1. RED: cached-run workflow-poll failure, in-flight activity-poll failure, post-run state; fails today
+- [ ] 2. Verify _worker.py:841-875 drain contract; cite
+- [ ] 3. GREEN: per-kind drain with failed completions until shutdown; await in-flight; original error raised
+- [ ] 4. RED: two loops fail in one tick
+- [ ] 5. GREEN: guard double-drain
+- [ ] 6. REFACTOR: fix comment anchors; scrub rotated lessons em-dashes
+- [ ] 7. Docs: Worker POD on fatal poll-loop behavior
+- [ ] 8. Verify: both suites green; commit "Refs #3"
+
+### Step F4: Make the Two-Classes Canary Able to Flip and Its Claims True
+- [ ] 1. RED: TODO scoped to inner assertions; non-TODO like on error text; no "TODO passed" today
+- [ ] 2. Verify no-SDK probe: perl -c passes, -MFuture::AsyncAwait -c dies
+- [ ] 3. GREEN: correct lessons entry (fold into 2026-07-10); corrected upstream draft in session summary
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: none
+- [ ] 7. Docs: canary comment cites corrected entry and #18; flip signal stated
+- [ ] 8. Verify: both suites green; commit "Refs #18"
+
+### Step F5: Re-vendor Cloud, Test, and Health Protos From the Pinned Tag (task)
+- [ ] 1. Scope: byte-identical to v0.4.0 crates/common/protos; provenance corrected; codes pinned; lazy load if feasible
+- [ ] 2. Tooling: git, cmp, diff -rq
+- [ ] 3. Do: re-vendor; _service_code accessor and 3/4/5 test; response_class assertion; lazy-load probe and implementation or POD cost note; lessons and ABOUTME rewrite
+- [ ] 4. Verify: diff -rq identical; both suites green
+- [ ] 5. Document: session summary with corrected provenance; commit "Refs #12"
+
+### Step F6: Make Fork-Pool Frame Pairing Token-Exact
+- [ ] 1. RED: late cancel for finished token, orphan hbd after failed encode, chain dies records nothing, hold-at-accept race, is_worker_shutdown parity; fails today
+- [ ] 2. Verify _activity.py contract; fix citation
+- [ ] 3. GREEN: holder_token guard; hbd after successful encode; drop on chain failure
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: reword hold field comment; drop stale citation
+- [ ] 7. Docs: Pool POD on pairing guarantees and chain-failure rule
+- [ ] 8. Verify: both suites green; commit "Refs #7"
+
+### Step F7: Honor Dynamic Update Validators on Every Path
+- [ ] 1. RED: attribute validator on dynamic update, no-fallback, rejection message and type, install/uninstall symmetry, interceptor validate_update observed, pending-Future validator; fails today
+- [ ] 2. Verify _workflow_instance.py:650, 1245-1250, 2938-2941; cite
+- [ ] 3. GREEN: _handlers wiring; route through validate_update; pending-Future guard
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: Workflow.pm POD reword
+- [ ] 7. Docs: validators synchronous; both registrations honored
+- [ ] 8. Verify: both suites green; commit "Refs #9"
+
+### Step F8: Settle Handlers Silently During Eviction
+- [ ] 1. RED: condition-parked signal under evict, Cancelled counter, weakened runner freed, converter dies inside evict; fails today
+- [ ] 2. Verify _workflow_instance.py:485-490, 799-808; cite
+- [ ] 3. GREEN: _settle_update early return under $evicting; R17 comment updated
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: sweep-order invariant comment; AWAIT_CLONE wording
+- [ ] 7. Docs: tasks-remain tripwire noted as follow-up
+- [ ] 8. Verify: both suites green; commit "Refs #1"
+
+### Step F9: Keep Untyped Search Attributes Through Schedule Action Decode
+- [ ] 1. RED: untyped residual survives, byte-identity round trip, wire-crossing all value types, undef metadata, skip on bad encoding, RetryPolicy defaults, priority undef; fails today
+- [ ] 2. Verify _schedule.py and _search_attributes.py contracts; cite
+- [ ] 3. GREEN: residual or documented limitation; metadata guard; decode_value skip; proto3 defaults
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: shared decode-or-skip helper
+- [ ] 7. Docs: Action POD on untyped handling
+- [ ] 8. Verify: both suites green; commit "Refs #4"
+
+### Step F10: Round the Shared Duration Pair Correctly
+- [ ] 1. RED: negative fractions, carry at 1e9, string input, NaN and Inf policy, jitter zero fold; fails today
+- [ ] 2. Verify protobuf _NormalizeDuration semantics; cite
+- [ ] 3. GREEN: sign-aware rounding with carry
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: fix Spec.pm dangling comment pointer
+- [ ] 7. Docs: POD on rounding and carry
+- [ ] 8. Verify: both suites green; commit "Refs #14"
+
+### Step F11: Prove fetch_history Pages
+- [ ] 1. RED: two-page responder with token and order assertions; options pass-through with non-default filter; proven RED by local short-circuit
+- [ ] 2. Verify _workflow.py:391-415; cite
+- [ ] 3. GREEN: fix anything exposed
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: none
+- [ ] 7. Docs: run_id pinning sentence in fetch_history POD
+- [ ] 8. Verify: both suites green; commit "Refs #11"
+
+### Step F12: Keep the Real Run Future Alive and Observed on a Wedged Shutdown
+- [ ] 1. RED: run future survives uncancelled; failure during race re-raised; late failure retrieved without warning; fails today
+- [ ] 2. Verify: harness comparison note
+- [ ] 3. GREEN: on_ready retention with diag; contract comment qualified
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: await_result POD; todo line 45 wording
+- [ ] 7. Docs: shutdown POD timeout-branch guarantees
+- [ ] 8. Verify: both suites green; commit "Refs #5"
+
+### Step F13: Prove result_type Reaches the Converter
+- [ ] 1. RED: recording converter asserts the hint on start_update result, execute_update, and the polling branch; proven RED by local break
+- [ ] 2. Verify client.py and _impl.py anchors; cite
+- [ ] 3. GREEN: fix anything exposed
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: method-name anchors in WorkflowHandle comments
+- [ ] 7. Docs: handle POD names both constructors; Interceptor POD documents opts keys
+- [ ] 8. Verify: both suites green; commit "Refs #8"
+
+### Step F14: Bound Priority to What the Wire Carries
+- [ ] 1. RED: 2**31 and 3e9 rejected, 2**31-1 accepted, overloaded object rejected, "3" round-trips; fails today
+- [ ] 2. Verify common.py:1222-1228; cite
+- [ ] 3. GREEN: ref and int32 upper-bound clauses
+- [ ] 4. RED: none
+- [ ] 5. GREEN: none
+- [ ] 6. REFACTOR: widen guard comment
+- [ ] 7. Docs: Priority POD states int32 bound
+- [ ] 8. Verify: both suites green; commit "Refs #10"
+
+### Step F15: Pin the count_workflows Group Shape (task)
+- [ ] 1. Scope: group_values asserted; POD names public decode accessor; $query optional
+- [ ] 2. Tooling: podchecker
+- [ ] 3. Do: Payload in one mocked group with isa assertion; POD rewrite
+- [ ] 4. Verify: single file, both suites, podchecker clean
+- [ ] 5. Document: commit "Refs #13"

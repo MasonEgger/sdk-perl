@@ -235,3 +235,98 @@ The full 15-issue closeout is done when all steps are checked in `todo.md`, the 
 Spec written 2026-09-11 from the 15 open issues (#1-#14, #18) after archiving the R1-R97 cycle to `.ai-sessions/r1-r97-remediation/`.
 Source detail confirmed by inspecting each cited file at current `main` (commit 55816a1).
 One issue premise corrected during inspection: I14's "unused POSIX import" is stale (`POSIX::close` is live at `Pool.pm:499`); the step re-verifies before removing.
+
+## Frontier Review Remediation (F1-F15)
+
+**Origin.** After all fifteen issue-closeout steps landed (I1-I14, I18, one commit each on `issue-closeout`), fifteen independent read-only reviews on Fable 5.1, one per commit, returned four NEEDS FIX and eleven SHIP WITH NITS verdicts.
+The orchestrator verified every block against the code before writing this section.
+This section turns those reports into fifteen remediation steps, blocks first.
+The bar is unchanged: Temporal-spec semantics first, Python parity (`../sdk-python`) as ground truth, reproduce-first tests, one green commit per step.
+
+**Verification command:** `( cd sdk && PERL5LIB=$HOME/perl5/lib/perl5 PATH=$HOME/.local/bin:$PATH prove -lj4 t )` plus `( cd sdk && PERL5LIB=$HOME/perl5/lib/perl5 prove -lj4 xt )`.
+
+### F1: OTel workflow-outbound headers must be real Payloads end to end (block, from I6)
+
+`_carrier_to_payload` in `Contrib/OpenTelemetry/TracingInterceptor.pm` returns an unblessed `{metadata, data}` hashref.
+Every Runner root passes outbound headers through `Temporalio::Interceptor::Headers::to_payload_map`, whose `is_payload` requires a blessed Payload, so the hashref is JSON-encoded as a payload body (double wrap).
+On the inbound side the dispatcher threads blessed wire Payloads into the input and `_payload_to_carrier` requires `ref eq 'HASH'`, so it extracts nothing.
+The I6 linkage test passes only because it hands the raw hashref from outbound straight to inbound.
+Required: build the header as a blessed `Temporalio::Payload`; duck-type the extractor on `metadata`/`data`; prove the round trip through a real Runner via the replay harness by decoding the emitted `ScheduleActivity.headers` once and recovering `traceparent`; assert each traced op injects its own span's context, not the parent's; cover the parent-missing gate and `always_create_workflow_spans` on the outbound side.
+
+### F2: Signal-handler failures must share the body's full classification (block, from I2)
+
+`Runner::_settle_signal` implements only the last two branches of `_outcome_for_failure`.
+On workflow cancel the Runner fails parked futures with `Temporalio::Exception::Cancelled`, which is a Temporal exception, so a parked async `:Signal` handler now claims the one-shot terminal slot with FailWorkflowExecution before the body can emit CancelWorkflowExecution: a regression against the pre-I2 tree.
+Continue-as-new raised from a handler and Nondeterminism are misrouted the same way.
+Required: one ordered classifier (evicting, continue-as-new, cancel-requested plus Cancelled, Nondeterminism, workflow failure, task failure) consumed by both the body path and handler settlement (Python `_run_top_level_workflow_function`, `_workflow_instance.py:2518-2565`); an evicting guard so settlement during `evict` emits nothing (Python `_deleting`); re-partition state-mutating commands when a handler emitted the terminal command; replace the thirteen em-dashes I2 added.
+
+### F3: A dead poll loop must keep draining until core shuts down (block, from I3)
+
+`Worker::run` now races loops to first failure, initiates shutdown, and finalizes, but the failed loop stops polling.
+Core's shutdown waits for pending evictions and in-flight activity cancels to be polled and replied to, so a dead workflow loop with cached runs, or a dead activity loop with an in-flight body, wedges `_finalize_and_free` (lessons.md line 14 records this deadlock).
+Python replaces the failed poller with `drain_poll_queue` on that kind (`_worker.py:846`, `_activity.py:190`, `_workflow.py:231`).
+Required: per-kind drain of the dead loop's queue, completing each task with a failed "Worker shutting down" completion until the poll returns shutdown; await the dead loop's in-flight dispatches before finalize; a reproduction that caches a run before injecting the workflow-poll failure; integration assertions on post-run state and on the absence of a secondary error.
+
+### F4: The two-classes canary must be able to flip, and its claims must be true (block, from I18)
+
+The canary wraps a `T2->subtest` inside `T2->todo`, so the top-level line is `ok 5 # TODO` today and after an upstream fix alike; the harness cannot distinguish them.
+The commit body, the upstream-report draft, and a new lessons.md entry claim the shape reproduces without Future::AsyncAwait; it does not (the probe loaded `Temporalio::Workflow`, which uses Future::AsyncAwait at line 8), and the eval-string form does reproduce.
+Required: TODO scoped to the inner assertions only; a non-TODO `like` on the exact error text so a wrong-reason failure cannot mask a flip; the lessons entry corrected (fold into the 2026-07-10 entry); a corrected, self-contained upstream-report draft (no SDK dependency, Future::AsyncAwait required, expected versus actual, negative controls) recorded in the session summary since the earlier commit body is immutable.
+
+### F5: Vendored cloud, test, and health protos must come from the pinned tag (block, from I12)
+
+The v0.4.0 tag holds all four trees under `crates/common/protos/`; the orchestrator checked the post-tag `crates/protos/protos/` path and concluded wrongly that the tag predates them.
+Eighteen of nineteen vendored files are byte-identical to the tag; `connectivityrule/v1/message.proto` carries a post-tag field the installed 0.4.0 bridge silently drops.
+Eager parsing of the cloud tree adds roughly a third to every client's proto load time.
+Required: re-vendor from the tag path (byte-identical, connectivityrule reverted); correct the lessons entry, the test header, and the session record; a test that pins the service codes 3, 4, 5 and one response class; lazy loading of the cloud and test trees if `Protobuf::Schema` accepts files after the first resolve, otherwise the cost documented in POD.
+
+### F6: Fork-pool frame pairing must be token-exact (warn, from I7)
+
+A late cancel frame for a finished token writes its details into the next invocation's holder on the same child; an `hbd` sent before a failed encode can pair with a later `hb`; a chain that dies still records the heartbeat where the async path records nothing; the race test cannot distinguish the final fix from the rejected `%token_conn` guard.
+Required: guard the holder write by token; send `hbd` only after the encode succeeds or tag both frames with a sequence; drop the heartbeat on chain failure and fix the Python citation; a hold-at-accept race variant; a parity assertion on `is_worker_shutdown`.
+
+### F7: Dynamic update validators must be honored on every path (warn, from I9)
+
+An `:UpdateValidator` declared by attribute for a dynamic `:Update` method is never wired into `{dynamic}{update_validator}`; the Runner never invokes the inbound chain's `validate_update`; the no-fallback rule and install/uninstall symmetry are untested; a validator returning a pending Future is silently accepted.
+Required: attribute wiring, chain routing under the same read-only depth (Python `_workflow_instance.py:650`), a pending-Future guard, and the missing tests; POD reword away from "fallback".
+
+### F8: Eviction must settle handlers silently (warn, from I1)
+
+A condition-parked update or signal resumes with Cancelled during `evict` and runs the failure converter and terminal-command path on a runner being torn down; a converter that dies would escape `evict`.
+Required: the evicting guard from F2 applied to update settlement too; a test for a wait_condition-parked `:Signal` under evict; a cancel counter and a weakened runner reference in the existing test; the sweep-order invariant stated in the comment; a "tasks remain" tripwire noted as a follow-up issue.
+
+### F9: Schedule Action decode must not drop what it cannot type (warn, from I4)
+
+Search attributes without recognized type metadata are dropped on decode, so describe-modify-update strips them; Python keeps an untyped residual and re-sends it.
+Required: carry an untyped residual on the action and re-encode it on update, or document the limitation in POD if spec section 7.4 forbids it; `metadata // {}` guard; `decode_value` skips on decode failure; RetryPolicy proto3 defaults on hand-built protos; a `_to_proto(_from_proto(x))` byte-identity test and a wire-crossing round trip covering every indexed value type.
+
+### F10: The shared Duration pair must round correctly (warn, from I14)
+
+Negative fractional seconds lose one nanosecond; a fraction within half a nanosecond of the next second yields nanos of one billion.
+Both are inherited from the eight old copies.
+Required: sign-aware rounding with carry, tests for negative, overflow, string input, NaN and Inf, and the jitter zero-to-undef fold; fix the Spec.pm comment that points at a deleted scratch file.
+
+### F11: fetch_history must be proven to page (warn, from I11)
+
+No test anywhere exercises multi-page history paging, and the option pass-through subtest discards the captured calls.
+Required: a two-page responder asserting the second request carries the first token and all events arrive in order; assertions on page_size, a non-default event_filter_type, and skip_archival; a POD sentence on run_id pinning after continue-as-new.
+
+### F12: Test::Worker shutdown must leave the real run future alive and observed (warn, from I5)
+
+The wedge test never asserts the real run future survives the timeout uncancelled, so a cancel-detecting non-shield would pass; the abandoned run future has no continuation, so a late failure is lost.
+Required: the missing assertion; an `on_ready` retention with diag; the contract comment qualified; the stale `await_result` POD fixed; the todo wording aligned.
+
+### F13: result_type must be proven to reach the converter (warn, from I8)
+
+No test hands a hint-sensitive converter to the client, so a handle that stores the type but never applies it passes.
+Required: a recording payload converter asserting the hint on both `start_update ... ->result` and `execute_update`, including the polling branch; POD on the handle naming both constructors; stale line anchors removed; interceptor `opts` keys documented.
+
+### F14: Priority must reject what the wire cannot carry (warn, from I10)
+
+The guard has no upper bound, so values above int32 pass construction and die later with the codec's OutOfRange class; overloaded objects pass every clause.
+Required: an int32 upper bound and a `ref` rejection in the guard, the comment widened to what the guard actually accepts, and tests for 2**31, an overloaded object, and the string form round trip.
+
+### F15: count_workflows POD must be pinned by its test (nit, from I13)
+
+The test's aggregation groups carry empty group_values, so the documented raw-Payload shape is asserted nowhere.
+Required: one group with a Payload and an isa assertion; POD naming the public single-payload decode accessor and stating that `$query` may be omitted.
