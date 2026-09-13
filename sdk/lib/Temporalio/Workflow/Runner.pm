@@ -2166,6 +2166,12 @@ class Temporalio::Workflow::Runner {
     # empty successful completion is returned (the §8.3 eviction fast path).
     # MUST-match sdk-python _handle_cache_eviction (deletes the run from
     # _running_workflows after cancelling its tasks).
+    # A condition-parked handler future (wait_condition; spec I1) settles via
+    # its UNDERLYING @conditions entry, not a separate clone cancel: it is a
+    # Future::AsyncAwait AWAIT_CLONE of the tracked _ConditionFuture, so
+    # cancelling the clone directly (rather than the real condition first)
+    # double-settles it once the frame resumes. See the @pending_futures
+    # sweep order below.
     method evict () {
         # Iterate COPIED snapshots of the pending tables, never the aliased
         # `values` lists (finding L6 / spec R16). Cancel continuations run
@@ -2195,14 +2201,34 @@ class Temporalio::Workflow::Runner {
         for my $future (@pending_activity_futures) {
             $future->_force_cancel unless $future->is_ready;
         }
+        # @conditions is swept BEFORE %in_progress_handlers (spec I1, closes
+        # GitHub #1): a wait_condition-parked :Update/:Signal handler's
+        # tracked future is a Future::AsyncAwait AWAIT_CLONE of its
+        # underlying _ConditionFuture (still an entry here), so failing the
+        # REAL condition future first resumes the suspended handler frame and
+        # lets Future::AsyncAwait settle the clone AS PART OF THAT SAME
+        # CANCEL. The later %in_progress_handlers pass then finds the clone
+        # already ->is_ready and the `unless $future->is_ready` guard below
+        # skips it, landing exactly ONE settle on the method future. Pre-fix,
+        # sweeping handlers first meant the clone's OWN _ConditionFuture-
+        # inherited cancel override (->fail(Cancelled)) settled it, and the
+        # conditions pass then resumed the frame and made Future::AsyncAwait
+        # try to ->fail the already-failed clone a second time ("... is
+        # already failed and cannot be ->fail'ed"), killing evict() before
+        # the eviction completion was ever sent
+        # (t/replay/evict_pending_update_wait_condition.t). This mirrors the
+        # sweep-then-guard discrimination _apply_cancel_workflow already
+        # uses for the main run future's cancel fallback (R8-R10). A plain-
+        # future-parked handler (R17) has no @conditions entry at all, so it
+        # is unaffected and still natively cancelled by the handler pass.
         my @pending_futures = (
             values %pending_timers,
+            (map { $_->{future} } @conditions),
             # %in_progress_handlers entries are { future, kind, name,
             # unfinished_policy } records (spec R87); sweep their futures.
             (map { $_->{future} } values %in_progress_handlers),
             values %pending_external_signals,
             values %pending_external_cancels,
-            map { $_->{future} } @conditions,
         );
         for my $future (@pending_futures) {
             $future->cancel unless $future->is_ready;

@@ -26,14 +26,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: prove -lj4 t green; commit "Closes #3"
 
 ### Step I1: Settle an Evicted Async :Update Parked on wait_condition Without Croaking
-- [ ] 1. RED: fixture WfDef/UpdateParker.pm + replay/evict_pending_update_wait_condition.t; the "already failed" croak fires, no eviction completion today
-- [ ] 2. Verify the mechanism against the R8-R10 fix + session-20260708-1748 notes; record which sweep double-settles
-- [ ] 3. GREEN: discriminate the AWAIT_CLONEd handler future in evict()/conditions sweep (Runner.pm:2169/2020/3023) so one settle reaches the method future
-- [ ] 4. RED: mixed plain-future + wait_condition parked updates, then evict; both settle, one eviction completion
-- [ ] 5. GREEN: discrimination handles both arms without double-settling
-- [ ] 6. REFACTOR: shared "AWAIT_CLONE of a tracked condition?" helper with the R8-R10 site
-- [ ] 7. Docs: correct the evict-path contract comment
-- [ ] 8. Verify: prove -lj4 t green; commit "Closes #1"
+- [x] 1. RED: fixture WfDef/UpdateParker.pm + replay/evict_pending_update_wait_condition.t; the "already failed" croak fires, no eviction completion today
+- [x] 2. Verify the mechanism against the R8-R10 fix + session-20260708-1748 notes; record which sweep double-settles
+- [x] 3. GREEN: discriminate the AWAIT_CLONEd handler future in evict()/conditions sweep (Runner.pm:2169/2020/3023) so one settle reaches the method future
+- [x] 4. RED: mixed plain-future + wait_condition parked updates, then evict; both settle, one eviction completion
+- [x] 5. GREEN: discrimination handles both arms without double-settling
+- [x] 6. REFACTOR: shared "AWAIT_CLONE of a tracked condition?" helper with the R8-R10 site (no new helper needed: reordering the @conditions sweep before %in_progress_handlers reuses the loop's existing `unless $future->is_ready` guard, the same sweep-then-guard discrimination the R8-R10 site already uses)
+- [x] 7. Docs: correct the evict-path contract comment
+- [x] 8. Verify: prove -lj4 t green; commit "Closes #1"
 
 ### Step I5: Make Test::Worker shutdown() Raise on a Wedged Drain
 - [ ] 1. RED: unit/test_worker_shutdown.t: wedged drain must die with the drain-timeout diagnostic; add clean-return and failed-run cases
