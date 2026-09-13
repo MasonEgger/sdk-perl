@@ -122,14 +122,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; if ext: changed, cargo test + Alien rebuild under the guard; commit "Closes #7"
 
 ### Step I6: OpenTelemetry Workflow-Outbound Spans on the Interceptor Chain
-- [ ] 1. RED: extend unit/tracing.t (FakeOTel): per-op spans (%OUT_SPAN_VERB) + header injection for the five outbound ops; span no-ops on replay; fails today
-- [ ] 2. Verify Python contrib/opentelemetry.py _TracingWorkflowOutboundInterceptor (~:751-831); record span names + injection
-- [ ] 3. GREEN: implement the outbound tracing wrapper at the R71 seam; inject trace context via Interceptor::Headers; replay no-op
-- [ ] 4. RED: injected header round-trips to a downstream inbound interceptor (parent/child linkage)
-- [ ] 5. GREEN: injected context uses the header key the inbound side reads
-- [ ] 6. REFACTOR: one span+inject helper keyed by %OUT_SPAN_VERB
-- [ ] 7. Docs: drop the pending note; document outbound tracing is replay-safe
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #6"
+- [x] 1. RED: extend unit/tracing.t (FakeOTel): per-op spans (%OUT_SPAN_VERB) + header injection for the five outbound ops; span no-ops on replay; fails today
+- [x] 2. Verify Python contrib/opentelemetry.py _TracingWorkflowOutboundInterceptor (~:751-831); record span names + injection
+- [x] 3. GREEN: implement the outbound tracing wrapper at the R71 seam; inject trace context via Interceptor::Headers; replay no-op
+- [x] 4. RED: injected header round-trips to a downstream inbound interceptor (parent/child linkage)
+- [x] 5. GREEN: injected context uses the header key the inbound side reads
+- [x] 6. REFACTOR: one span+inject helper keyed by %OUT_SPAN_VERB
+- [x] 7. Docs: drop the pending note; document outbound tracing is replay-safe
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #6"
 
 ### Step I12: Expose cloud, test, and health Raw Service Handles
 - [ ] 1. RED: unit/raw_service_extra.t: cloud_service/test_service/health_service return handles exposing a known snake_case rpc each; fails today

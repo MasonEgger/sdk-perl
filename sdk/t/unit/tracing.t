@@ -107,6 +107,11 @@ class RecActivityNext :isa(Temporalio::Worker::ActivityInbound) {
 class RecWorkflowNext :isa(Temporalio::Worker::WorkflowInbound) {
     field $seen :param;
     field $fail :param = undef;
+    # init capture (I6): records whatever outbound the OTel interceptor's
+    # init() delegates down-chain, so the test can read $seen->{init_outbound}
+    # to reach the WRAPPED tracing outbound (the OUTBOUND-SPAN SEAM contract:
+    # init wraps $args[0] and delegates the wrapped instance).
+    method init { my ($outbound) = @_; $seen->{init_outbound} = $outbound; return }
     method execute_workflow {
         my ($in) = @_;
         $seen->{execute_workflow} = $in;
@@ -117,6 +122,46 @@ class RecWorkflowNext :isa(Temporalio::Worker::WorkflowInbound) {
     method validate_update { my ($in) = @_; $seen->{validate_update} = $in; return 'v-done' }
     method handle_update   { my ($in) = @_; $seen->{handle_update}   = $in; return 'u-done' }
 }
+
+# I6: workflow-outbound chain root fixture: records the Input each traced op
+# receives (after any span+inject wrapping) and returns a delegation marker,
+# mirroring RecClientNext/RecActivityNext for the outbound surface.
+class RecOutboundNext :isa(Temporalio::Worker::WorkflowOutbound) {
+    field $seen :param;
+    method execute_activity {
+        my ($in) = @_; $seen->{execute_activity} = $in; return 'res-execute_activity' }
+    method execute_local_activity {
+        my ($in) = @_; $seen->{execute_local_activity} = $in;
+        return 'res-execute_local_activity' }
+    method start_child_workflow {
+        my ($in) = @_; $seen->{start_child_workflow} = $in;
+        return 'res-start_child_workflow' }
+    method signal_child_workflow {
+        my ($in) = @_; $seen->{signal_child_workflow} = $in;
+        return 'res-signal_child_workflow' }
+    method signal_external_workflow {
+        my ($in) = @_; $seen->{signal_external_workflow} = $in;
+        return 'res-signal_external_workflow' }
+    method continue_as_new {
+        my ($in) = @_; $seen->{continue_as_new} = $in;
+        die "continue_as_new reached the chain root\n" }
+    method start_nexus_operation {
+        my ($in) = @_; $seen->{start_nexus_operation} = $in;
+        return 'res-start_nexus_operation' }
+    method info { my ($in) = @_; $seen->{info} = $in; return 'res-info' }
+}
+
+# I6 replay fixture: a minimal $Temporalio::Workflow::Runner::CURRENT stand-in
+# so _wf_replaying (which reads Temporalio::Workflow::is_replaying, which
+# reads $Runner::CURRENT) reports "replaying" without a real Runner. Every
+# other headless subtest in this file runs with no $CURRENT set, which raises
+# NoRunner inside the eval and so defaults _wf_replaying to false.
+package FakeReplayRunner;
+sub new ($class) { bless {}, $class }
+sub is_replaying    ($self) { 1 }
+sub activation_time ($self) { 1700000000 }
+sub info             ($self) { {} }
+package main;
 
 # --------------------------------------------------------------------------
 # R22 + R41: client outbound surface — a span per call, context injected into
@@ -424,6 +469,190 @@ T2->subtest('R22 CompleteWorkflow on failure' => sub {
 });
 
 # --------------------------------------------------------------------------
+# I6 (closes GitHub #6): workflow-outbound surface: a completed span per
+# traced op (the %OUT_SPAN_VERB table), the NEW span's context injected into
+# the op's outbound headers, parented on the run's cached inbound context.
+# MUST-match sdk-python _TracingWorkflowOutboundInterceptor
+# (contrib/opentelemetry/_interceptor.py:751-831): start_activity /
+# start_local_activity -> StartActivity:{activity} CLIENT (both reuse the
+# same verb, :789-820); start_child_workflow -> StartChildWorkflow:{workflow}
+# CLIENT (:800-809); signal_child_workflow -> SignalChildWorkflow:{signal}
+# SERVER (:767-776); signal_external_workflow ->
+# SignalExternalWorkflow:{signal} CLIENT (:778-787); start_nexus_operation ->
+# StartNexusOperation:{service}/{operation} CLIENT with PLAIN STRING headers
+# (add_to_outbound_str / _carrier_to_nexus_headers:834-843, NOT a
+# _tracer-data Payload, spec section 26.1); continue_as_new injects the run's
+# context into headers with NO span at all (_context_to_headers:762-765).
+# --------------------------------------------------------------------------
+T2->subtest('I6 workflow outbound: spans + header inject per op' => sub {
+    my $tracer = FakeOTel::Tracer->new;
+    my $i = $TI->new(tracer => $tracer, propagator => FakeOTel::Propagator->new);
+    my %seen;
+    my $wi = $i->intercept_workflow(RecWorkflowNext->new(seen => \%seen));
+
+    # Cache the run's inbound context (execute_workflow with a start header,
+    # same scaffolding as the R22 workflow-inbound subtest above): every
+    # outbound span below parents on $TP1.
+    $wi->execute_workflow(
+        Temporalio::Worker::Interceptor::Input::ExecuteWorkflow->new(
+            type    => 'Greet',
+            args    => [],
+            headers => { '_tracer-data' => carrier_payload({ traceparent => $TP1 }) },
+        ))->get;
+
+    # init() wraps the received outbound (the OUTBOUND-SPAN SEAM contract)
+    # and delegates the WRAPPED instance down-chain; RecWorkflowNext's init
+    # captures it in $seen->{init_outbound}.
+    my %ob_seen;
+    $wi->init(RecOutboundNext->new(seen => \%ob_seen));
+    my $ob = $seen{init_outbound};
+    T2->ok(Scalar::Util::blessed($ob), 'init delegated a wrapped outbound down-chain');
+    T2->isa_ok($ob, ['Temporalio::Worker::WorkflowOutbound'],
+        'the wrapped outbound is still a WorkflowOutbound');
+
+    # execute_activity -> StartActivity:{activity}, CLIENT.
+    my $act_res = $ob->execute_activity(
+        Temporalio::Worker::Interceptor::Input::StartActivity->new(
+            activity => 'Charge', args => [], headers => {}, kwargs => {}));
+    T2->is($act_res, 'res-execute_activity', 'delegation result preserved');
+    my $act_spans = $tracer->spans_named('StartActivity:Charge');
+    T2->is(scalar @$act_spans, 1, 'StartActivity:{activity} span');
+    T2->is($act_spans->[0]->kind, 'client', 'client span kind');
+    T2->is($act_spans->[0]->parent->carrier->{traceparent}, $TP1,
+        'parented on the cached workflow context');
+    my $act_hdr = $ob_seen{execute_activity}->headers->{'_tracer-data'};
+    T2->ok(defined $act_hdr, '_tracer-data injected into the activity headers');
+    T2->is($i->_payload_to_carrier($act_hdr)->{traceparent},
+        $act_spans->[0]->traceparent,
+        'injected carrier round-trips the NEW span context');
+
+    # execute_local_activity reuses the StartActivity verb (Python :811-820).
+    $ob->execute_local_activity(
+        Temporalio::Worker::Interceptor::Input::StartLocalActivity->new(
+            activity => 'LocalCharge', args => [], headers => {}, kwargs => {}));
+    T2->is(scalar @{ $tracer->spans_named('StartActivity:LocalCharge') }, 1,
+        'execute_local_activity reuses the StartActivity:{activity} verb');
+    T2->ok(defined $ob_seen{execute_local_activity}->headers->{'_tracer-data'},
+        'local-activity header injected');
+
+    # start_child_workflow -> StartChildWorkflow:{workflow}, CLIENT.
+    $ob->start_child_workflow(
+        Temporalio::Worker::Interceptor::Input::StartChildWorkflow->new(
+            workflow => 'Child', args => [], headers => {}, kwargs => {}));
+    my $child_spans = $tracer->spans_named('StartChildWorkflow:Child');
+    T2->is(scalar @$child_spans, 1, 'StartChildWorkflow:{workflow} span');
+    T2->is($child_spans->[0]->kind, 'client', 'client span kind');
+    T2->ok(defined $ob_seen{start_child_workflow}->headers->{'_tracer-data'},
+        'start_child_workflow header injected');
+
+    # signal_child_workflow -> SignalChildWorkflow:{signal}, SERVER.
+    $ob->signal_child_workflow(
+        Temporalio::Worker::Interceptor::Input::SignalChildWorkflow->new(
+            signal => 'go', child_workflow_id => 'child-1',
+            args => [], headers => {}));
+    my $sig_child = $tracer->spans_named('SignalChildWorkflow:go');
+    T2->is(scalar @$sig_child, 1, 'SignalChildWorkflow:{signal} span');
+    T2->is($sig_child->[0]->kind, 'server', 'server span kind (Python parity)');
+    my $sig_child_hdr = $ob_seen{signal_child_workflow}->headers->{'_tracer-data'};
+    T2->ok(defined $sig_child_hdr, 'signal_child_workflow header injected');
+
+    # signal_external_workflow -> SignalExternalWorkflow:{signal}, CLIENT.
+    $ob->signal_external_workflow(
+        Temporalio::Worker::Interceptor::Input::SignalExternalWorkflow->new(
+            signal => 'go', namespace => 'ns', workflow_id => 'ext-1',
+            workflow_run_id => undef, args => [], headers => {}));
+    my $sig_ext = $tracer->spans_named('SignalExternalWorkflow:go');
+    T2->is(scalar @$sig_ext, 1, 'SignalExternalWorkflow:{signal} span');
+    T2->is($sig_ext->[0]->kind, 'client', 'client span kind (Python parity)');
+    T2->ok(defined $ob_seen{signal_external_workflow}->headers->{'_tracer-data'},
+        'signal_external_workflow header injected');
+
+    # start_nexus_operation -> StartNexusOperation:{service}/{operation},
+    # CLIENT, PLAIN STRING headers (spec section 26.1: nexus_header is a Str
+    # => Str map, never a _tracer-data Payload).
+    $ob->start_nexus_operation(
+        Temporalio::Worker::Interceptor::Input::StartNexusOperation->new(
+            endpoint => 'ep', service => 'svc', operation => 'op',
+            input => undef, headers => {}, kwargs => {}));
+    my $nexus_spans = $tracer->spans_named('StartNexusOperation:svc/op');
+    T2->is(scalar @$nexus_spans, 1,
+        'StartNexusOperation:{service}/{operation} span');
+    T2->is($nexus_spans->[0]->kind, 'client', 'client span kind');
+    my $nexus_hdr = $ob_seen{start_nexus_operation}->headers;
+    T2->ok(!exists $nexus_hdr->{'_tracer-data'},
+        'nexus headers carry the carrier keys directly, not a _tracer-data Payload');
+    T2->is($nexus_hdr->{traceparent}, $nexus_spans->[0]->traceparent,
+        'the carrier traceparent key is merged straight into the string header map');
+
+    # continue_as_new: NO span, header injection ONLY, using the run's cached
+    # context (Python :762-765 has no replay gate either).
+    my $before_span_count = scalar @{ $tracer->spans };
+    my $can_input = Temporalio::Worker::Interceptor::Input::ContinueAsNew->new(
+        workflow => 'Greet', args => [], headers => {}, kwargs => {});
+    my $ok = eval { $ob->continue_as_new($can_input); 1 };
+    T2->ok(!$ok && $@ =~ /continue_as_new reached the chain root/,
+        'continue_as_new still unwinds to the chain root (headers were injected first)');
+    T2->is(scalar @{ $tracer->spans }, $before_span_count,
+        'continue_as_new creates NO span');
+    my $can_hdr = $ob_seen{continue_as_new}->headers->{'_tracer-data'};
+    T2->ok(defined $can_hdr, 'continue_as_new injects the header anyway');
+    T2->is($i->_payload_to_carrier($can_hdr)->{traceparent}, $TP1,
+        'continue_as_new injects the cached run context (no new span to derive one from)');
+
+    # sub-step 4/5: round-trip check: a downstream ActivityInbound
+    # interceptor reading the injected _tracer-data header (same header_key
+    # on both sides) sees the OUTBOUND span as its parent.
+    my $ai = $i->intercept_activity(RecActivityNext->new(seen => \%seen));
+    $ai->execute_activity(
+        Temporalio::Worker::Interceptor::Input::ExecuteActivity->new(
+            args    => [],
+            headers => { '_tracer-data' => $act_hdr },
+            info    => { activity_type => 'Downstream' }))->get;
+    my $down = $tracer->spans_named('RunActivity:Downstream')->[0];
+    T2->is($down->parent->carrier->{traceparent}, $act_spans->[0]->traceparent,
+        'a downstream inbound interceptor parents on the outbound span context');
+});
+
+# --------------------------------------------------------------------------
+# I6: workflow-outbound spans no-op while replaying: no span AND no header
+# injection (Python _completed_span:699-701 returns before either happens).
+# --------------------------------------------------------------------------
+T2->subtest('I6 workflow outbound: no-op while replaying' => sub {
+    my $tracer = FakeOTel::Tracer->new;
+    my $i = $TI->new(tracer => $tracer, propagator => FakeOTel::Propagator->new);
+    my %seen;
+    my $wi = $i->intercept_workflow(RecWorkflowNext->new(seen => \%seen));
+    $wi->execute_workflow(
+        Temporalio::Worker::Interceptor::Input::ExecuteWorkflow->new(
+            type    => 'Greet',
+            args    => [],
+            headers => { '_tracer-data' => carrier_payload({ traceparent => $TP1 }) },
+        ))->get;
+
+    my %ob_seen;
+    $wi->init(RecOutboundNext->new(seen => \%ob_seen));
+    my $ob = $seen{init_outbound};
+
+    local $Temporalio::Workflow::Runner::CURRENT = FakeReplayRunner->new;
+    $ob->execute_activity(
+        Temporalio::Worker::Interceptor::Input::StartActivity->new(
+            activity => 'Charge', args => [], headers => {}, kwargs => {}));
+    T2->is(scalar @{ $tracer->spans_named('StartActivity:Charge') }, 0,
+        'no span created while replaying');
+    T2->ok(!exists $ob_seen{execute_activity}->headers->{'_tracer-data'},
+        'no header injected while replaying either');
+
+    $ob->start_nexus_operation(
+        Temporalio::Worker::Interceptor::Input::StartNexusOperation->new(
+            endpoint => 'ep', service => 'svc', operation => 'op',
+            input => undef, headers => {}, kwargs => {}));
+    T2->is(scalar @{ $tracer->spans_named('StartNexusOperation:svc/op') }, 0,
+        'no nexus span while replaying');
+    T2->ok(!exists $ob_seen{start_nexus_operation}->headers->{traceparent},
+        'no nexus string-header injection while replaying');
+});
+
+# --------------------------------------------------------------------------
 # R22: no tracer configured — every wrapper delegates unchanged (headless
 # no-op), no header is added, nothing dies.
 # --------------------------------------------------------------------------
@@ -524,6 +753,8 @@ T2->subtest('T-trace-4 span-name table' => sub {
         'SignalChildWorkflow:go', 'SignalChildWorkflow:{signal}');
     T2->is($i->_outbound_span_name('signal_external_workflow', { name => 'go' }),
         'SignalExternalWorkflow:go', 'SignalExternalWorkflow:{signal}');
+    T2->is($i->_outbound_span_name('start_nexus_operation', { name => 'svc/op' }),
+        'StartNexusOperation:svc/op', 'StartNexusOperation:{service}/{operation}');
 });
 
 # --------------------------------------------------------------------------

@@ -151,20 +151,18 @@ sub _workflow_span_name ($self, $kind, $info) {
 }
 
 # Workflow-outbound completed span names whose context is injected into the
-# outbound headers (_interceptor.py:767-831). $kind is start_activity/
-# start_child_workflow/signal_child_workflow/signal_external_workflow.
-# OUTBOUND-SPAN SEAM: the workflow-OUTBOUND interceptor chain is wired (spec
-# R71: the Runner builds it and routes the eight outbound operations through
-# it), but this module does not yet install a tracing wrapper on it, so these
-# names still have no caller here. To finish: hang a _WorkflowOutbound wrapper
-# off init() below that creates a completed span per call (this table) and
-# injects the updated context into the outbound input headers, mirroring
-# Python's _TracingWorkflowOutboundInterceptor.
+# outbound headers (_interceptor.py:767-831; spec I6, closes GitHub #6).
+# $kind is start_activity/start_child_workflow/signal_child_workflow/
+# signal_external_workflow/start_nexus_operation. execute_local_activity
+# reuses the start_activity verb (Python start_local_activity:811-820); the
+# wrapper is Temporalio::Contrib::OpenTelemetry::_WorkflowOutbound below,
+# installed by _WorkflowInbound::init on the R71 chain.
 my %OUT_SPAN_VERB = (
-    start_activity          => 'StartActivity',
-    start_child_workflow    => 'StartChildWorkflow',
-    signal_child_workflow   => 'SignalChildWorkflow',
+    start_activity           => 'StartActivity',
+    start_child_workflow     => 'StartChildWorkflow',
+    signal_child_workflow    => 'SignalChildWorkflow',
     signal_external_workflow => 'SignalExternalWorkflow',
+    start_nexus_operation    => 'StartNexusOperation',
 );
 
 sub _outbound_span_name ($self, $kind, $info) {
@@ -513,16 +511,23 @@ our @ISA = ('Temporalio::Worker::WorkflowInbound');
 sub new ($class, %a) { bless { next => $a{next}, root => $a{root} }, $class }
 sub next ($self) { $self->{next} }
 
-# OUTBOUND-SPAN SEAM: init now RECEIVES the real workflow outbound (spec R71
-# wired the chain: the Runner calls inbound->init(outbound) and routes the
-# outbound operations through whatever reaches the chain root). To add
-# outbound spans, wrap $args[0] here with a tracing outbound that creates a
-# completed span per execute_activity / start_child_workflow /
-# signal_child_workflow / signal_external_workflow (the %OUT_SPAN_VERB table
-# above) and injects the updated context into the outbound input headers,
-# mirroring Python's _TracingWorkflowOutboundInterceptor:751-831; then
-# delegate the WRAPPED outbound down-chain.
-sub init ($self, @args) { $self->{next} ? $self->{next}->init(@args) : () }
+# init RECEIVES the real workflow outbound (spec R71 wired the chain: the
+# Runner calls inbound->init(outbound) and routes the outbound operations
+# through whatever reaches the chain root). I6 (closes GitHub #6): wrap
+# $args[0] in a _WorkflowOutbound that creates a completed span per
+# execute_activity / execute_local_activity / start_child_workflow /
+# signal_child_workflow / signal_external_workflow / start_nexus_operation
+# (the %OUT_SPAN_VERB table above), injects the new context into the outbound
+# input headers, and delegates the WRAPPED outbound down-chain, mirroring
+# Python's _TracingWorkflowOutboundInterceptor:751-831. The wrapper holds a
+# back-reference to $self (not just $root) so it can read the run's cached
+# wf_carrier at call time (set by execute_workflow below, BEFORE the workflow
+# body, and so any outbound call, runs).
+sub init ($self, @args) {
+    my $wrapped = Temporalio::Contrib::OpenTelemetry::_WorkflowOutbound->new(
+        next => $args[0], root => $self->{root}, inbound => $self);
+    return $self->{next} ? $self->{next}->init($wrapped) : ();
+}
 
 sub execute_workflow ($self, $input) {
     my $root = $self->{root};
@@ -673,6 +678,158 @@ sub _completed_span ($self, $name, %opt) {
     return;
 }
 
+# Workflow outbound (spec I6, closes GitHub #6): a completed span per traced
+# op (%OUT_SPAN_VERB above) with the NEW span's context injected into the
+# op's outbound headers, mirroring Python's
+# _TracingWorkflowOutboundInterceptor (contrib/opentelemetry/_interceptor.py
+# :751-831). Installed by _WorkflowInbound::init above, which passes the
+# inbound instance so this wrapper can read the run's cached wf_carrier at
+# call time (the same parent every handler span above uses). Every traced op
+# reuses the _WorkflowInbound::_completed_span replay/parent gate (skipped
+# while replaying, gated on parent presence via _should_create_workflow_span)
+# via the shared helper below; continue_as_new is the one exception (Python
+# :762-765: header injection only, no span, no replay gate).
+package Temporalio::Contrib::OpenTelemetry::_WorkflowOutbound;
+our @ISA = ('Temporalio::Worker::WorkflowOutbound');
+sub new ($class, %a) {
+    bless { next => $a{next}, root => $a{root}, inbound => $a{inbound} }, $class;
+}
+sub next ($self) { $self->{next} }
+
+# _traced_call($method, $input, $kind, $name, %opt): the REFACTOR sub-step 6
+# helper: one span+inject call site per outbound op, keyed by the caller's
+# $name (built from %OUT_SPAN_VERB). $opt{str_headers} routes the injection
+# through the nexus_header Str=>Str shape (spec section 26.1) instead of a
+# _tracer-data Payload.
+sub _traced_call ($self, $method, $input, $kind, $name, %opt) {
+    my $root = $self->{root};
+    my $next = $self->{next};
+    return $next->$method($input) unless $root->tracer;
+
+    my $inbound = $self->{inbound};
+    my $carrier = $inbound ? $inbound->{wf_carrier} : undef;
+    if (!$root->_wf_replaying
+        && $root->_should_create_workflow_span($carrier ? 1 : 0))
+    {
+        my $parent = defined $carrier
+            ? $root->_carrier_to_context($carrier) : undef;
+        my $time  = $root->_wf_time;
+        my %attrs = $root->_wf_attributes;
+        my $context;
+
+        Temporalio::Workflow::Unsafe::durable_scheduler_disabled(sub {
+            my $span = $root->tracer->create_span(
+                name            => $name,
+                kind            => $root->_span_kind($kind),
+                attributes      => \%attrs,
+                start_timestamp => $time,
+                (defined $parent ? (parent => $parent) : ()),
+            );
+            $span->end($time);
+            $context = $root->_context_for_span($span);
+            return $span;
+        });
+
+        $input->headers(
+            $opt{str_headers}
+                ? $self->_inject_str_headers($input->headers, $context)
+                : $root->_inject_headers($input->headers, $context));
+    }
+    return $next->$method($input);
+}
+
+# _inject_str_headers(\%headers, $context): the Nexus-header analogue of
+# root's _inject_headers: merge the propagator carrier's keys DIRECTLY into a
+# plain Str=>Str map (Python _carrier_to_nexus_headers:834-843), never under
+# header_key as a Payload (start_nexus_operation's headers travel to a
+# possibly-external Nexus handler as nexus_header, spec section 26.1).
+sub _inject_str_headers ($self, $headers, $context) {
+    my $root = $self->{root};
+    my $prop = $root->_effective_propagator or return $headers // {};
+    my %carrier;
+    eval {
+        defined $context
+            ? $prop->inject(\%carrier, $context)
+            : $prop->inject(\%carrier);
+        1;
+    } or return $headers // {};
+    return $headers // {} unless %carrier;
+    my %out = %{ $headers // {} };
+    for my $k (keys %carrier) {
+        my $v = $carrier{$k};
+        $out{$k} = ref $v eq 'ARRAY' ? join(',', @$v) : $v;
+    }
+    return \%out;
+}
+
+sub execute_activity ($self, $input) {
+    my $root = $self->{root};
+    return $self->_traced_call('execute_activity', $input, 'client',
+        $root->_outbound_span_name(
+            start_activity => { name => $input->get('activity') }));
+}
+
+# execute_local_activity reuses the start_activity verb (Python
+# start_local_activity:811-820: "StartActivity:{activity}", same as a normal
+# activity).
+sub execute_local_activity ($self, $input) {
+    my $root = $self->{root};
+    return $self->_traced_call('execute_local_activity', $input, 'client',
+        $root->_outbound_span_name(
+            start_activity => { name => $input->get('activity') }));
+}
+
+sub start_child_workflow ($self, $input) {
+    my $root = $self->{root};
+    return $self->_traced_call('start_child_workflow', $input, 'client',
+        $root->_outbound_span_name(
+            start_child_workflow => { name => $input->get('workflow') }));
+}
+
+# SERVER kind (Python :767-776), unlike the other outbound spans.
+sub signal_child_workflow ($self, $input) {
+    my $root = $self->{root};
+    return $self->_traced_call('signal_child_workflow', $input, 'server',
+        $root->_outbound_span_name(
+            signal_child_workflow => { name => $input->get('signal') }));
+}
+
+sub signal_external_workflow ($self, $input) {
+    my $root = $self->{root};
+    return $self->_traced_call('signal_external_workflow', $input, 'client',
+        $root->_outbound_span_name(
+            signal_external_workflow => { name => $input->get('signal') }));
+}
+
+# StartNexusOperation:{service}/{operation} (Python :822-831); plain-string
+# nexus header injection (str_headers => 1), never a _tracer-data Payload.
+sub start_nexus_operation ($self, $input) {
+    my $root = $self->{root};
+    my $name = ($input->get('service') // '') . '/'
+        . ($input->get('operation') // '');
+    return $self->_traced_call('start_nexus_operation', $input, 'client',
+        $root->_outbound_span_name(start_nexus_operation => { name => $name }),
+        str_headers => 1);
+}
+
+# continue_as_new: NO span at all (Python _context_to_headers:762-765), just
+# inject the run's cached context into the outbound headers, unconditionally
+# (Python has no replay gate here either; the control signal dies out through
+# $next regardless).
+sub continue_as_new ($self, $input) {
+    my $root = $self->{root};
+    my $next = $self->{next};
+    return $next->continue_as_new($input) unless $root->tracer;
+
+    my $inbound = $self->{inbound};
+    my $carrier = $inbound ? $inbound->{wf_carrier} : undef;
+    my $context = defined $carrier ? $root->_carrier_to_context($carrier) : undef;
+    $input->headers($root->_inject_headers($input->headers, $context));
+    return $next->continue_as_new($input);
+}
+
+sub info ($self, $input) { $self->{next}->info($input) }
+
 1;
 
 __END__
@@ -736,17 +893,22 @@ query header context and are not created without one. Workflow spans are
 created only when an inbound parent context is present unless
 C<always_create_workflow_spans> is set (no orphans for CLI/schedule starts).
 
-=item * B<Not yet wired>: workflow-B<outbound> spans
-(C<StartActivity:{type}>, C<StartChildWorkflow:{wf}>,
-C<SignalChildWorkflow:{signal}>, C<SignalExternalWorkflow:{signal}>). The
-workflow-outbound interceptor chain itself exists (remediation spec R71: the
-Runner builds it and C<init($outbound)> reaches this module's workflow
-inbound), but this interceptor does not yet install a tracing outbound
-wrapper there, so trace context is not yet injected into activity /
-child-workflow / external-signal headers originating B<inside> a workflow.
-The span-name table ships here; the wrapper (spans plus header injection,
-mirroring Python's C<_TracingWorkflowOutboundInterceptor>) is the remaining
-piece.
+=item * B<Workflow-outbound operations> (C<execute_activity> /
+C<execute_local_activity>, both named C<StartActivity:{activity}>;
+C<start_child_workflow>, C<StartChildWorkflow:{workflow}>;
+C<signal_child_workflow>, C<SignalChildWorkflow:{signal}> (server-kind);
+C<signal_external_workflow>, C<SignalExternalWorkflow:{signal}>;
+C<start_nexus_operation>, C<StartNexusOperation:{service}/{operation}>): a
+zero-duration completed span per call, parented on the run's inbound context,
+with the B<new> span's context B<injected> into that op's outbound headers so
+a downstream inbound interceptor sees it as its parent. Skipped entirely
+while replaying (no span, no header injection), the same gate the workflow
+task and handler spans use. C<continue_as_new> is the one exception: it
+creates B<no> span at all and only injects the run's context into its
+outbound headers. C<start_nexus_operation>'s injection writes the carrier's
+keys directly into the plain C<Str> to C<Str> C<nexus_header> map (never a
+C<_tracer-data> Payload); every other op uses the same C<_tracer-data>
+Payload header as the inbound side.
 
 =back
 
