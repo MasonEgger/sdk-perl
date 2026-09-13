@@ -147,4 +147,43 @@ T2->subtest('resolve maps protobuf full names to Perl classes (T-proto-5)' => su
     T2->like($@, qr/no\.such\.Message/, 'diagnostic names the unknown full name');
 });
 
+# T-proto-6: duration_from_seconds/seconds_from_duration (I14 shared pair):
+# whole seconds, fractional split with the +0.5 rounding, zero, undef
+# passthrough on the read side, and a round-trip.
+T2->subtest('duration_from_seconds/seconds_from_duration round-trip (T-proto-6)' => sub {
+    T2->is(
+        Temporalio::Core::Proto::seconds_from_duration(undef),
+        undef,
+        'seconds_from_duration(undef) passes through as undef',
+    );
+
+    my $whole = Temporalio::Core::Proto::duration_from_seconds(5);
+    T2->is($whole->seconds, 5, 'whole seconds -> Duration.seconds');
+    T2->is($whole->nanos,   0, 'whole seconds -> Duration.nanos is 0');
+
+    my $frac = Temporalio::Core::Proto::duration_from_seconds(1.5);
+    T2->is($frac->seconds, 1,           'fractional seconds -> Duration.seconds truncates');
+    T2->is($frac->nanos,   500_000_000, 'fractional seconds -> Duration.nanos, +0.5 rounded');
+
+    my $zero = Temporalio::Core::Proto::duration_from_seconds(0);
+    T2->is($zero->seconds, 0, 'zero seconds -> Duration.seconds 0');
+    T2->is($zero->nanos,   0, 'zero seconds -> Duration.nanos 0');
+
+    T2->is(
+        Temporalio::Core::Proto::seconds_from_duration($whole),
+        5,
+        'whole-seconds Duration round-trips back to 5',
+    );
+    T2->is(
+        Temporalio::Core::Proto::seconds_from_duration($frac),
+        1.5,
+        'fractional Duration round-trips back to 1.5',
+    );
+    T2->is(
+        Temporalio::Core::Proto::seconds_from_duration($zero),
+        0,
+        'zero Duration round-trips back to 0 (not undef; unset-vs-zero is a call-site concern)',
+    );
+});
+
 T2->done_testing;

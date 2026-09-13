@@ -88,6 +88,32 @@ sub resolve ($full_name) {
     return $pkg;
 }
 
+# duration_from_seconds($seconds) -> google.protobuf.Duration instance.
+# Perl-side seconds (possibly fractional) split into Duration { seconds,
+# nanos }. No undef handling here: every call site already guards for
+# definedness before calling (I14; formerly duplicated as
+# Converter/Failure.pm's _duration_from_seconds, Common/RetryPolicy.pm's,
+# Client.pm's, Workflow/Runner.pm's, and Schedule::{Policy,Interval,Action,
+# Spec}'s local _duration).
+sub duration_from_seconds ($seconds) {
+    my $Duration = resolve('google.protobuf.Duration');
+    my $whole = int($seconds);
+    my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
+    return $Duration->new({ seconds => $whole, nanos => $nanos });
+}
+
+# seconds_from_duration($duration) -> Perl-side seconds (possibly fractional),
+# or undef when $duration is unset. The inverse of duration_from_seconds
+# (I14; formerly duplicated as Converter/Failure.pm's _seconds_from_duration
+# and the local _duration_to_seconds in Common/RetryPolicy.pm and
+# Schedule::{Policy,Interval,Action}; Schedule::Spec keeps its own
+# unset-Duration-reads-as-undef check at the call site since that behavior
+# is not shared by the other copies).
+sub seconds_from_duration ($duration) {
+    return undef unless defined $duration;
+    return ($duration->seconds // 0) + ($duration->nanos // 0) / 1_000_000_000;
+}
+
 # The vendored proto root: the checkout's sdk/share/proto when running from
 # the source tree (prove -l), else the installed distribution share dir.
 sub _proto_root {
@@ -255,6 +281,10 @@ protos on first use.
 
 =head1 METHODS
 
+=head2 duration_from_seconds
+
+Converts Perl-side (possibly fractional) seconds to a C<google.protobuf.Duration> instance. The shared home (I14) for the seconds-to-Duration conversion formerly duplicated in C<Converter::Failure>, C<Common::RetryPolicy>, C<Client>, C<Workflow::Runner>, and the C<Schedule::*> modules.
+
 =head2 json
 
 Returns the JSON descriptor / mapping used when resolving messages.
@@ -270,5 +300,9 @@ Resolves a fully-qualified proto message name (e.g. C<temporal.api.common.v1.Pay
 =head2 schema
 
 Returns the parsed proto schema object backing message resolution.
+
+=head2 seconds_from_duration
+
+Converts a C<google.protobuf.Duration> instance back to Perl-side (possibly fractional) seconds, or C<undef> when the Duration is unset. The inverse of C<duration_from_seconds>; the shared home (I14) for the Duration-to-seconds conversion formerly duplicated across the same call sites.
 
 =cut

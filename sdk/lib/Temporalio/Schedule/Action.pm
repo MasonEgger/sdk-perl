@@ -119,7 +119,9 @@ class Temporalio::Schedule::Action::StartWorkflow
         for my $pair (@DURATION_FIELDS) {
             my ($field, $proto_field) = @$pair;
             my $seconds = $timeout_field_value{$field};
-            $info{$proto_field} = _duration($seconds) if defined $seconds;
+            $info{$proto_field} =
+                Temporalio::Core::Proto::duration_from_seconds($seconds)
+                if defined $seconds;
         }
         $info{retry_policy} = $retry_policy->to_proto if defined $retry_policy;
         $info{priority}     = $priority->to_proto if defined $priority;
@@ -175,7 +177,9 @@ class Temporalio::Schedule::Action::StartWorkflow
         for my $pair (@DURATION_FIELDS) {
             my ($field, $proto_field) = @$pair;
             my $duration = $info->$proto_field;
-            $args{$field} = _duration_to_seconds($duration) if defined $duration;
+            $args{$field} =
+                Temporalio::Core::Proto::seconds_from_duration($duration)
+                if defined $duration;
         }
 
         if (defined(my $retry_policy = $info->retry_policy)) {
@@ -213,17 +217,9 @@ class Temporalio::Schedule::Action::StartWorkflow
         return $class->new(%args);
     }
 
-    sub _duration ($seconds) {
-        my $Duration = Temporalio::Core::Proto::resolve('google.protobuf.Duration');
-        my $whole = int($seconds);
-        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-        return $Duration->new({ seconds => $whole, nanos => $nanos });
-    }
-
-    sub _duration_to_seconds ($duration) {
-        return undef unless defined $duration;
-        return ($duration->seconds // 0) + ($duration->nanos // 0) / 1_000_000_000;
-    }
+    # The seconds<->google.protobuf.Duration conversion pair lives in
+    # Temporalio::Core::Proto (I14; formerly local _duration/
+    # _duration_to_seconds helpers here).
 }
 
 1;

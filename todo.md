@@ -144,11 +144,11 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 ## Section 5: Cleanup and Upstream Canary
 
 ### Step I14: Deduplicate Duration Conversion; Re-Verify the POSIX Import (task)
-- [ ] 1. Scope: one shared seconds<->Duration pair; all call sites point at it; POSIX import confirmed live and kept
-- [ ] 2. Tooling: grep before/after; no skills/MCPs
-- [ ] 3. Do: verify POSIX::close at Pool.pm:499 (keep import); add shared pair to Core/Proto.pm; repoint Converter/Failure.pm, RetryPolicy.pm, Workflow/Commands.pm, Schedule/*; no signature changes
-- [ ] 4. Verify: prove -lj4 t + prove -lj4 xt green; grep shows the conversion defined once
-- [ ] 5. Document: one-line POD on the shared helpers; commit "Closes #14" noting the POSIX half not-applicable
+- [x] 1. Scope: one shared seconds<->Duration pair; all call sites point at it; POSIX import confirmed live and kept
+- [x] 2. Tooling: grep before/after; no skills/MCPs
+- [x] 3. Do: verify POSIX::close at Pool.pm:751 (line moved since I7; keep import); add shared pair to Core/Proto.pm; repoint Converter/Failure.pm, RetryPolicy.pm, Client.pm, Workflow/Runner.pm, Schedule/{Policy,Interval,Action,Spec}.pm (Workflow/Commands.pm holds no conversion code); no signature changes
+- [x] 4. Verify: prove -lj4 t + prove -lj4 xt green; grep shows the conversion defined once
+- [x] 5. Document: one-line POD on the shared helpers; commit "Closes #14" noting the POSIX half not-applicable
 
 ### Step I18: Add the Two-Attributed-Classes-Per-File Compile Canary (task)
 - [ ] 1. Scope: TODO canary in attribute_handlers.t + an upstream-report note draft

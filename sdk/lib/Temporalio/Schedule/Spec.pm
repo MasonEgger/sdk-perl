@@ -47,7 +47,8 @@ class Temporalio::Schedule::Spec {
         );
         $f{start_time} = _timestamp($start_at) if defined $start_at;
         $f{end_time}   = _timestamp($end_at)   if defined $end_at;
-        $f{jitter}     = _duration($jitter)    if defined $jitter;
+        $f{jitter}     = Temporalio::Core::Proto::duration_from_seconds($jitter)
+            if defined $jitter;
         return $Spec->new(\%f);
     }
 
@@ -69,7 +70,17 @@ class Temporalio::Schedule::Spec {
                 map { Temporalio::Schedule::Calendar->_from_proto($_) } @$ex ],
             start_at => _timestamp_to_seconds($spec->start_time),
             end_at   => _timestamp_to_seconds($spec->end_time),
-            jitter   => _duration_to_seconds($spec->jitter),
+            # An unset jitter Duration decodes as an all-zero message rather
+            # than undef (like start_time/end_time above); the shared reader
+            # returns 0 (not undef) for that shape, so fold zero to undef
+            # here, at the call site, to keep this one reader's semantics
+            # rather than changing Temporalio::Core::Proto::seconds_from_duration
+            # for every other call site (I14).
+            jitter   => do {
+                my $secs =
+                    Temporalio::Core::Proto::seconds_from_duration($spec->jitter);
+                (defined $secs && $secs == 0) ? undef : $secs;
+            },
             time_zone_name => (defined $tz && length $tz) ? $tz : undef,
         );
     }
@@ -89,20 +100,11 @@ class Temporalio::Schedule::Spec {
         return $secs + $nanos / 1_000_000_000;
     }
 
-    sub _duration ($seconds) {
-        my $Duration = Temporalio::Core::Proto::resolve('google.protobuf.Duration');
-        my $whole = int($seconds);
-        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-        return $Duration->new({ seconds => $whole, nanos => $nanos });
-    }
-
-    sub _duration_to_seconds ($duration) {
-        return undef unless defined $duration;
-        my $secs  = $duration->seconds // 0;
-        my $nanos = $duration->nanos // 0;
-        return undef if $secs == 0 && $nanos == 0;
-        return $secs + $nanos / 1_000_000_000;
-    }
+    # The seconds<->google.protobuf.Duration conversion pair lives in
+    # Temporalio::Core::Proto (I14; formerly local _duration/
+    # _duration_to_seconds helpers here). The Timestamp pair above is a
+    # sibling duplication, not a Duration, and is left alone (out of scope
+    # for I14; see .ai-sessions/implementation-notes.md Step I14).
 }
 
 1;

@@ -558,7 +558,9 @@ class Temporalio::Client {
         ) {
             my ($kw, $proto_field) = @$pair;
             my $seconds = delete $k{$kw};
-            $fields{$proto_field} = _duration($seconds) if defined $seconds;
+            $fields{$proto_field} =
+                Temporalio::Core::Proto::duration_from_seconds($seconds)
+                if defined $seconds;
         }
 
         if (my $args_ref = $args) {
@@ -719,13 +721,8 @@ class Temporalio::Client {
         return $num;
     }
 
-    sub _duration ($seconds) {
-        my $Duration = Temporalio::Core::Proto::resolve(
-            'google.protobuf.Duration');
-        my $whole = int($seconds);
-        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-        return $Duration->new({ seconds => $whole, nanos => $nanos });
-    }
+    # The seconds<->google.protobuf.Duration conversion pair lives in
+    # Temporalio::Core::Proto (I14; formerly a local _duration helper here).
 
     # True when the error is a server ALREADY_EXISTS (gRPC code 6). On
     # CreateSchedule the section 7.5 table maps this to a generic RpcError

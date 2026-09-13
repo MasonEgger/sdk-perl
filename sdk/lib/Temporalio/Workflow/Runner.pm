@@ -794,7 +794,8 @@ class Temporalio::Workflow::Runner {
             start_to_close_timeout heartbeat_timeout))
         {
             next unless defined $opts{$t};
-            $fields{$t} = _duration($opts{$t});
+            $fields{$t} =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$t});
         }
 
         # Retry policy -> temporal.api.common.v1.RetryPolicy proto when given.
@@ -933,7 +934,8 @@ class Temporalio::Workflow::Runner {
             (@args ? (arguments => [@args]) : ()),
             cancellation_type =>
                 _cancellation_type_number($opts{cancellation_type}),
-            local_retry_threshold => _duration($threshold),
+            local_retry_threshold =>
+                Temporalio::Core::Proto::duration_from_seconds($threshold),
         );
 
         # The three LA timeouts (NO heartbeat_timeout — LAs do not heartbeat at
@@ -942,7 +944,8 @@ class Temporalio::Workflow::Runner {
             start_to_close_timeout))
         {
             next unless defined $opts{$t};
-            $base{$t} = _duration($opts{$t});
+            $base{$t} =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$t});
         }
 
         if (defined(my $rp = $opts{retry_policy})) {
@@ -1233,7 +1236,8 @@ class Temporalio::Workflow::Runner {
         );
         for my $opt (keys %timeout_field) {
             next unless defined $opts{$opt};
-            $fields{ $timeout_field{$opt} } = _duration($opts{$opt});
+            $fields{ $timeout_field{$opt} } =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$opt});
         }
 
         # cron_schedule is a plain string field when given.
@@ -1639,7 +1643,8 @@ class Temporalio::Workflow::Runner {
         );
         for my $opt (keys %timeout_field) {
             next unless defined $opts{$opt};
-            $fields{ $timeout_field{$opt} } = _duration($opts{$opt});
+            $fields{ $timeout_field{$opt} } =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$opt});
         }
 
         # headers -> nexus_header: a PLAIN string -> string map transmitted to
@@ -1823,7 +1828,8 @@ class Temporalio::Workflow::Runner {
 
         push @commands, Temporalio::Workflow::Commands::start_timer({
             seq                   => $seq,
-            start_to_fire_timeout => _duration($seconds),
+            start_to_fire_timeout =>
+                Temporalio::Core::Proto::duration_from_seconds($seconds),
         }, $summary);
 
         # A timer future whose ->cancel FAILS the future with a
@@ -4231,7 +4237,8 @@ class Temporalio::Workflow::Runner {
         ) {
             my ($opt, $field) = @$pair;
             next unless defined $opts{$opt};
-            $fields{$field} = _duration($opts{$opt});
+            $fields{$field} =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$opt});
         }
 
         if (defined(my $rp = $opts{retry_policy})) {
@@ -4510,16 +4517,9 @@ class Temporalio::Workflow::Runner {
                  . "'$name'";
     }
 
-    # Seconds (float) -> google.protobuf.Duration { seconds, nanos }. Mirrors
-    # Temporalio::Common::RetryPolicy::_duration; the activity timeouts cross
-    # the wire as Durations.
-    sub _duration ($seconds) {
-        my $Duration = Temporalio::Core::Proto::resolve(
-            'google.protobuf.Duration');
-        my $whole = int($seconds);
-        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-        return $Duration->new({ seconds => $whole, nanos => $nanos });
-    }
+    # The seconds<->google.protobuf.Duration conversion pair lives in
+    # Temporalio::Core::Proto (I14; formerly a local _duration helper here);
+    # the activity timeouts cross the wire as Durations.
 }
 
 # A Workflow::Future for timers whose ->cancel maps to a Temporalio::Exception::

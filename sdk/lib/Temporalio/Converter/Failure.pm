@@ -65,7 +65,6 @@ my %INFO    = map {
     NexusHandlerFailureInfo NexusOperationFailureInfo
 );
 my $PAYLOADS      = Temporalio::Core::Proto::resolve('temporal.api.common.v1.Payloads');
-my $DURATION      = Temporalio::Core::Proto::resolve('google.protobuf.Duration');
 my $ACTIVITY_TYPE = Temporalio::Core::Proto::resolve('temporal.api.common.v1.ActivityType');
 my $WF_EXECUTION  = Temporalio::Core::Proto::resolve('temporal.api.common.v1.WorkflowExecution');
 my $WF_TYPE       = Temporalio::Core::Proto::resolve('temporal.api.common.v1.WorkflowType');
@@ -94,17 +93,11 @@ class Temporalio::Converter::Failure {
     # parity audit, activity/conversion finding 1). Matches sdk-python
     # _failure_converter.py:160-162 (write, only when truthy) and :340 (read).
     # An absent proto Duration reads back as undef, the Perl-side "not set".
-    sub _duration_from_seconds ($seconds) {
-        my $whole = int($seconds);
-        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-        return $DURATION->new({ seconds => $whole, nanos => $nanos });
-    }
-
-    sub _seconds_from_duration ($duration) {
-        return undef unless defined $duration;
-        return ($duration->seconds // 0)
-            + (($duration->nanos // 0) / 1_000_000_000);
-    }
+    # The conversion pair itself lives in Temporalio::Core::Proto (I14): this
+    # was the R74 executor's original definition (formerly
+    # _duration_from_seconds/_seconds_from_duration here); call sites below
+    # now call Temporalio::Core::Proto::duration_from_seconds and
+    # ::seconds_from_duration directly.
 
     # to_failure($exception, $payload_converter) -> Failure proto instance.
     # Non-Temporalio values (plain string deaths, foreign objects) are wrapped
@@ -303,7 +296,7 @@ class Temporalio::Converter::Failure {
                     $self->_maybe_payloads(details => $exception->details, $pc),
                     ($exception->next_retry_delay
                         ? (next_retry_delay =>
-                            _duration_from_seconds($exception->next_retry_delay))
+                            Temporalio::Core::Proto::duration_from_seconds($exception->next_retry_delay))
                         : ()),
                     category => _category_number($exception->category),
                 }));
@@ -325,7 +318,7 @@ class Temporalio::Converter::Failure {
             type          => $info->type,
             non_retryable => $info->non_retryable ? 1 : 0,
             details       => $self->_from_payloads($info->details, $pc),
-            next_retry_delay => _seconds_from_duration($info->next_retry_delay),
+            next_retry_delay => Temporalio::Core::Proto::seconds_from_duration($info->next_retry_delay),
             category      => _category_name($info->category),
             %common,
         );
