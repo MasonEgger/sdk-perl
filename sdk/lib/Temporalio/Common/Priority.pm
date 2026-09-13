@@ -12,7 +12,8 @@ use Temporalio::Exception::Argument ();
 
 class Temporalio::Common::Priority {
     # priority_key: lower number = higher priority. undef leaves it unset
-    # (proto default 0 = "use the queue default").
+    # (proto default 0 = "use the queue default"). When defined, ADJUST
+    # requires a positive integer (>= 1); see the guard below.
     field $priority_key :param = undef;
 
     # fairness_key/fairness_weight (spec R81, parity schedule/runtime
@@ -34,6 +35,30 @@ class Temporalio::Common::Priority {
             message => 'fairness_weight must be a number')
             if defined $fairness_weight
             && !Scalar::Util::looks_like_number($fairness_weight);
+
+        # priority_key guard (spec I10, GitHub issue #10), mirroring
+        # Python's __post_init__ (common.py:1222-1228): when defined,
+        # priority_key must be an integer >= 1. Python's `isinstance(int)`
+        # rejects a float like 2.5 outright; the faithful Perl equivalent
+        # accepts only values that look_like_number AND are numerically
+        # equal to their own int() (so "3" and 3 both pass, 2.5 does not).
+        # `$priority_key - $priority_key != 0` is the standard finite check:
+        # for any finite number x - x is exactly 0, while Inf - Inf and
+        # NaN - NaN both evaluate to NaN, which is != 0. This closes the
+        # +Infinity hole ('inf'/'Inf'/'Infinity'/9**9**9 satisfied the
+        # int()-equality and >= 1 checks above without it); NaN and -Inf
+        # were already rejected by the != int() and < 1 checks respectively.
+        # _from_proto (:82-90, zero-to-undef map at :84) already maps a wire
+        # priority_key of 0 to undef before reaching here, so a decoded
+        # proto never trips this.
+        if (defined $priority_key) {
+            Temporalio::Exception::Argument->throw(
+                message => 'priority_key must be a positive integer')
+                if !Scalar::Util::looks_like_number($priority_key)
+                || $priority_key != int($priority_key)
+                || $priority_key - $priority_key != 0
+                || $priority_key < 1;
+        }
     }
 
     method priority_key    { $priority_key }
@@ -112,7 +137,9 @@ Constructs a Temporalio::Common::Priority. Named parameters:
 
 =item C<priority_key>
 
-(optional, default C<undef>)
+(optional, default C<undef>) When defined, must be a positive integer
+(C<< >= 1 >>); a non-integer or sub-1 value raises
+L<Temporalio::Exception::Argument> at construction.
 
 =item C<fairness_key>
 

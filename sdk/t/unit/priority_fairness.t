@@ -59,4 +59,48 @@ T2->subtest('non-numeric fairness_weight rejected at construction' => sub {
     T2->isa_ok($err, 'Temporalio::Exception::Argument');
 });
 
+# ---------------------------------------------------------------------------
+# Construction-time priority_key validation (spec I10, GitHub issue #10).
+# Python enforces this in Priority.__post_init__
+# (../sdk-python temporalio/common.py:1222-1228): when priority_key is not
+# None, it must be an int and must be >= 1.
+# ---------------------------------------------------------------------------
+T2->subtest('priority_key rejection matrix' => sub {
+    for my $bad (0, -1, 2.5, 'high', 'inf', 9**9**9, 'nan', '-inf') {
+        my $err = T2->dies(sub {
+            Temporalio::Common::Priority->new(priority_key => $bad);
+        });
+        T2->ok($err, "priority_key => '$bad' throws");
+        T2->like($err, qr/priority_key/, "error names priority_key ('$bad')");
+        T2->isa_ok($err, 'Temporalio::Exception::Argument');
+    }
+});
+
+T2->subtest('priority_key accepted values' => sub {
+    my $with_key = Temporalio::Common::Priority->new(priority_key => 3);
+    T2->is($with_key->priority_key, 3, 'positive integer accepted');
+
+    my $without_key = Temporalio::Common::Priority->new(priority_key => undef);
+    T2->is($without_key->priority_key, undef, 'undef accepted');
+});
+
+# ---------------------------------------------------------------------------
+# _from_proto (landed in I4, fe185c0) maps a wire priority_key of 0 (proto3
+# default = unset) to undef before construction, so the >= 1 guard above
+# must not fire on a decoded proto. Guard the interplay explicitly.
+# ---------------------------------------------------------------------------
+T2->subtest('_from_proto priority_key 0 decodes to undef without throwing' => sub {
+    my $proto = Temporalio::Core::Proto::resolve(
+        'temporal.api.common.v1.Priority')->new({ priority_key => 0 });
+    my $pri = Temporalio::Common::Priority->_from_proto($proto);
+    T2->is($pri->priority_key, undef, 'wire 0 decodes to undef');
+});
+
+T2->subtest('_from_proto priority_key 3 decodes to 3' => sub {
+    my $proto = Temporalio::Core::Proto::resolve(
+        'temporal.api.common.v1.Priority')->new({ priority_key => 3 });
+    my $pri = Temporalio::Common::Priority->_from_proto($proto);
+    T2->is($pri->priority_key, 3, 'wire 3 decodes to 3');
+});
+
 T2->done_testing;

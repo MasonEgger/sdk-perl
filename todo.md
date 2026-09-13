@@ -70,14 +70,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #8"
 
 ### Step I10: Validate Priority.priority_key at Construction
-- [ ] 1. RED: extend unit/priority_fairness.t: priority_key 0/-1/2.5/"high" throw Exception::Argument; 3 and undef accepted; rejections fail today
-- [ ] 2. Verify Python common.py Priority __post_init__ (~:1222-1228); record in comments
-- [ ] 3. GREEN: add ADJUST guard (Priority.pm:26): priority_key defined -> positive integer >= 1 else throw
-- [ ] 4. RED: covered by step 1 accept/reject matrix
-- [ ] 5. GREEN: n/a
-- [ ] 6. REFACTOR: inline or small local sub
-- [ ] 7. Docs: priority_key POD/field comment (:14-16) states the >=1-integer constraint
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #10"
+- [x] 1. RED: extend unit/priority_fairness.t: priority_key 0/-1/2.5/"high" throw Exception::Argument; 3 and undef accepted; rejections fail today
+- [x] 2. Verify Python common.py Priority __post_init__ (~:1222-1228); record in comments
+- [x] 3. GREEN: add ADJUST guard (Priority.pm:26): priority_key defined -> positive integer >= 1 else throw
+- [x] 4. RED: covered by step 1 accept/reject matrix
+- [x] 5. GREEN: n/a
+- [x] 6. REFACTOR: inline or small local sub
+- [x] 7. Docs: priority_key POD/field comment (:14-16) states the >=1-integer constraint
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #10"
 
 ### Step I13: Correct the count_workflows Return-Shape POD
 - [ ] 1. Pin shape: unit/count_workflows_shape.t asserts count_workflows resolves to { count, groups } (fake the RPC); green against code, guards the shape (R64 pattern, not RED-first)
