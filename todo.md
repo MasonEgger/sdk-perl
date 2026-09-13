@@ -180,14 +180,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #2"
 
 ### Step F3: Drain a Dead Poll Loop Until Core Shuts Down
-- [ ] 1. RED: cached-run workflow-poll failure, in-flight activity-poll failure, post-run state; fails today
-- [ ] 2. Verify _worker.py:841-875 drain contract; cite
-- [ ] 3. GREEN: per-kind drain with failed completions until shutdown; await in-flight; original error raised
-- [ ] 4. RED: two loops fail in one tick
-- [ ] 5. GREEN: guard double-drain
-- [ ] 6. REFACTOR: fix comment anchors; scrub rotated lessons em-dashes
-- [ ] 7. Docs: Worker POD on fatal poll-loop behavior
-- [ ] 8. Verify: both suites green; commit "Refs #3"
+- [x] 1. RED: cached-run workflow-poll failure, in-flight activity-poll failure, post-run state; fails today
+- [x] 2. Verify _worker.py:841-875 drain contract; cite
+- [x] 3. GREEN: per-kind drain with failed completions until shutdown; await in-flight; original error raised
+- [x] 4. RED: two loops fail in one tick
+- [x] 5. GREEN: guard double-drain
+- [x] 6. REFACTOR: fix comment anchors; scrub rotated lessons em-dashes
+- [x] 7. Docs: Worker POD on fatal poll-loop behavior
+- [x] 8. Verify: both suites green; commit "Refs #3"
 
 ### Step F4: Make the Two-Classes Canary Able to Flip and Its Claims True
 - [ ] 1. RED: TODO scoped to inner assertions; non-TODO like on error text; no "TODO passed" today
