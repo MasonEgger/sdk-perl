@@ -132,14 +132,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #6"
 
 ### Step I12: Expose cloud, test, and health Raw Service Handles
-- [ ] 1. RED: unit/raw_service_extra.t: cloud_service/test_service/health_service return handles exposing a known snake_case rpc each; fails today
-- [ ] 2. Verify Python service accessors + each c-bridge discriminator against the pinned header; record both
-- [ ] 3. GREEN: vendor cloud/test/health protos at the pinned tag; register descriptor roots (Core/Proto.pm); add accessors (Client.pm) with correct discriminators
-- [ ] 4. RED: each generated handle's method map is non-empty snake_case
-- [ ] 5. GREEN: fix descriptor root paths so method maps generate
-- [ ] 6. REFACTOR: shared builder keyed by service name/discriminator if identical
-- [ ] 7. Docs: list the three new services in the raw-service POD (Client.pm:1058,1347-1390)
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #12"
+- [x] 1. RED: unit/raw_service_extra.t: cloud_service/test_service/health_service return handles exposing a known snake_case rpc each; fails today
+- [x] 2. Verify Python service accessors + each c-bridge discriminator against the pinned header; record both
+- [x] 3. GREEN: vendor cloud/test/health protos at the pinned tag; register descriptor roots (Core/Proto.pm); add accessors (Client.pm) with correct discriminators
+- [x] 4. RED: each generated handle's method map is non-empty snake_case
+- [x] 5. GREEN: fix descriptor root paths so method maps generate
+- [x] 6. REFACTOR: shared builder keyed by service name/discriminator if identical
+- [x] 7. Docs: list the three new services in the raw-service POD (Client.pm:1058,1347-1390)
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #12"
 
 ## Section 5: Cleanup and Upstream Canary
 

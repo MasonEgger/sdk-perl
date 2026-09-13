@@ -93,6 +93,9 @@ class Temporalio::Client {
     # delegate to the service client.
     method workflow_service { $connection->workflow_service }
     method operator_service { $connection->operator_service }
+    method cloud_service    { $connection->cloud_service }
+    method test_service     { $connection->test_service }
+    method health_service   { $connection->health_service }
 
     # _outbound — the client outbound interceptor chain head (spec section 27.2).
     # Built once: a root OutboundInterceptor whose methods perform the real
@@ -1058,7 +1061,10 @@ RPCs the high-level client does not wrap remain reachable through the raw
 service handles (spec R91): C<workflow_service> and C<operator_service>
 return L<Temporalio::Client::WorkflowService> and
 L<Temporalio::Client::OperatorService> handles whose per-rpc methods are
-generated from the vendored proto service descriptors.
+generated from the vendored proto service descriptors. C<cloud_service>,
+C<test_service>, and C<health_service> (spec I12) return the same kind of
+generated handle over the Temporal Cloud, time-skipping test server, and
+gRPC health-check RPC surfaces respectively.
 
 Workflow operations (C<start_workflow> and friends, spec section 7.4) are
 documented under L</METHODS>.
@@ -1373,6 +1379,26 @@ and converters.
 Returns a L<Temporalio::Client::OperatorService> raw service handle over the
 OperatorService RPC surface, e.g. search-attribute management (spec R91;
 Python C<_client.py:316-318> parity). Same raw-call semantics as
+L</workflow_service>.
+
+=head2 cloud_service
+
+Returns a L<Temporalio::Client::CloudService> raw service handle over the
+Temporal Cloud CloudService RPC surface, e.g. user, namespace, and billing
+management (spec I12; Python C<service.py:255,326> parity). Same raw-call
+semantics as L</workflow_service>.
+
+=head2 test_service
+
+Returns a L<Temporalio::Client::TestService> raw service handle over the
+time-skipping test server's TestService RPC surface (spec I12; Python
+C<service.py:256,329> parity). Same raw-call semantics as L</workflow_service>.
+
+=head2 health_service
+
+Returns a L<Temporalio::Client::HealthService> raw service handle over the
+standard gRPC health-checking protocol (spec I12; Python
+C<service.py:257,332> parity). Same raw-call semantics as
 L</workflow_service>.
 
 =head1 OMITTED LEGACY BUILD-ID APIS

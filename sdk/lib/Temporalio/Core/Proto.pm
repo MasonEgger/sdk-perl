@@ -121,9 +121,12 @@ sub _wkt_root {
 }
 
 # The root .proto files to parse (spec section 4.6): every
-# temporal/api/workflowservice/v1/*.proto and (spec R91, for the raw
-# operator-service client) temporal/api/operatorservice/v1/*.proto, plus
-# every coresdk root under temporal/sdk/core/. The *_fq.proto variant is EXCLUDED: it redefines the
+# temporal/api/workflowservice/v1/*.proto, (spec R91, for the raw
+# operator-service client) temporal/api/operatorservice/v1/*.proto, and (I12,
+# for the raw cloud/test/health service clients)
+# temporal/api/cloud/cloudservice/v1/*.proto and
+# temporal/api/testservice/v1/*.proto, plus every coresdk root under
+# temporal/sdk/core/. The *_fq.proto variant is EXCLUDED: it redefines the
 # coresdk.workflow_activation package with fully-qualified type names (a
 # codegen aid sdk-core itself does not compile), so parsing it would collide
 # with workflow_activation.proto in the schema index. Paths are relative to
@@ -131,7 +134,12 @@ sub _wkt_root {
 sub _root_files ($root) {
     my @roots;
 
-    for my $service_dir ([qw(workflowservice v1)], [qw(operatorservice v1)]) {
+    for my $service_dir (
+        [qw(workflowservice v1)],
+        [qw(operatorservice v1)],
+        [qw(cloud cloudservice v1)],
+        [qw(testservice v1)],
+    ) {
         my $svc = File::Spec->catdir($root, 'temporal', 'api', @$service_dir);
         push @roots, glob File::Spec->catfile($svc, '*.proto');
     }
@@ -154,6 +162,11 @@ sub _root_files ($root) {
     push @roots,
         File::Spec->catfile($root, qw(google rpc status.proto)),
         File::Spec->catfile($root, qw(temporal api errordetails v1 message.proto));
+
+    # grpc.health.v1.Health (I12, for the raw health-service client): it
+    # lives outside temporal/api/, so add it explicitly the same way as the
+    # google/rpc/status.proto root above.
+    push @roots, File::Spec->catfile($root, qw(grpc health v1 health.proto));
 
     return sort map { File::Spec->abs2rel($_, $root) } @roots;
 }

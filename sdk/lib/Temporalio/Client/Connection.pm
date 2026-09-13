@@ -10,7 +10,10 @@ no warnings 'experimental::class';
 use Future ();
 use Future::AsyncAwait;
 use Scalar::Util ();
+use Temporalio::Client::CloudService ();
+use Temporalio::Client::HealthService ();
 use Temporalio::Client::OperatorService ();
+use Temporalio::Client::TestService ();
 use Temporalio::Client::WorkflowService ();
 use Temporalio::Common::Options ();
 use Temporalio::Core::Callback ();
@@ -225,6 +228,23 @@ class Temporalio::Client::Connection {
         return Temporalio::Client::OperatorService->new(connection => $self);
     }
 
+    # I12: cloud/test/health raw service handles, the same fresh-handle-per-
+    # call shape as workflow_service/operator_service above.
+    method cloud_service () {
+        $self->_assert_open;
+        return Temporalio::Client::CloudService->new(connection => $self);
+    }
+
+    method test_service () {
+        $self->_assert_open;
+        return Temporalio::Client::TestService->new(connection => $self);
+    }
+
+    method health_service () {
+        $self->_assert_open;
+        return Temporalio::Client::HealthService->new(connection => $self);
+    }
+
     # Rotate the bearer token on the live connection (spec section 7.3):
     # synchronous, no RPC, manual and explicit — there is no automatic
     # refresh timer and no refresh-on-UNAUTHENTICATED.
@@ -341,7 +361,8 @@ encodes a request proto, issues C<temporal_core_client_rpc_call> over the
 callback bridge, decodes the typed response, and maps failures onto the
 exception hierarchy. The high-level client's C<_rpc_call> delegates here
 with C<< retry => 1 >>; the raw service handles returned by
-C<workflow_service> and C<operator_service> call it single-shot.
+C<workflow_service>, C<operator_service>, C<cloud_service>, C<test_service>,
+and C<health_service> (spec I12) call it single-shot.
 
 Both C<close> and C<DESTROY> guard the FFI free with a runtime-liveness
 check: C<temporal_core_client_free> drops the core connection on the
@@ -436,6 +457,21 @@ connection (spec R91).
 
 Returns a fresh L<Temporalio::Client::OperatorService> raw handle over this
 connection (spec R91).
+
+=head2 cloud_service
+
+Returns a fresh L<Temporalio::Client::CloudService> raw handle over this
+connection (spec I12).
+
+=head2 test_service
+
+Returns a fresh L<Temporalio::Client::TestService> raw handle over this
+connection (spec I12).
+
+=head2 health_service
+
+Returns a fresh L<Temporalio::Client::HealthService> raw handle over this
+connection (spec I12).
 
 =head2 update_api_key
 
