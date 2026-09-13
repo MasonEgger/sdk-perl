@@ -160,14 +160,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 ## Section 6: Frontier Review Remediation
 
 ### Step F1: Make OTel Outbound Headers Real Payloads End to End
-- [ ] 1. RED: replay-harness end-to-end traceparent, blessed-Payload extract, per-op own-span round trip, header replacement, parent-missing gate; fails today
-- [ ] 2. Verify Python _context_carrier_to_headers contract; cite
-- [ ] 3. GREEN: blessed Payload from _carrier_to_payload; duck-typed _payload_to_carrier
-- [ ] 4. RED: to_payload_map pass-through regression test
-- [ ] 5. GREEN: pass-through holds
-- [ ] 6. REFACTOR: one header-payload helper for client and workflow outbound
-- [ ] 7. Docs: POD on Payload headers and outbound parent-missing gate
-- [ ] 8. Verify: both suites green; commit "Refs #6"
+- [x] 1. RED: replay-harness end-to-end traceparent, blessed-Payload extract, per-op own-span round trip, header replacement, parent-missing gate; fails today
+- [x] 2. Verify Python _context_carrier_to_headers contract; cite
+- [x] 3. GREEN: blessed Payload from _carrier_to_payload; duck-typed _payload_to_carrier
+- [x] 4. RED: to_payload_map pass-through regression test
+- [x] 5. GREEN: pass-through holds
+- [x] 6. REFACTOR: one header-payload helper for client and workflow outbound
+- [x] 7. Docs: POD on Payload headers and outbound parent-missing gate
+- [x] 8. Verify: both suites green; commit "Refs #6"
 
 ### Step F2: Route Signal-Handler Failures Through the Body's Full Classification
 - [ ] 1. RED: cancel with parked async signal, continue-as-new from handler, Temporal failure from async handler, Nondeterminism, eviction drop, workflow_failure_exception_types; fails today

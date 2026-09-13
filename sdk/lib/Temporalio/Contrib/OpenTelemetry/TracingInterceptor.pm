@@ -80,23 +80,60 @@ sub always_create_workflow_spans ($self) { $self->{always_create_workflow_spans}
 # back — the same json/plain shape sdk-python writes via
 # PayloadConverter.to_payloads([carrier]) (_interceptor.py:147-172).
 
-# _carrier_to_payload(\%carrier) -> a header payload (a hashref Payload), or
-# undef when the carrier is empty (nothing to propagate).
+# _carrier_to_payload(\%carrier) -> a BLESSED header Payload, or undef when
+# the carrier is empty (nothing to propagate). This is the ONE header-payload
+# builder: the client outbound side and the workflow outbound side both reach
+# it through _inject_headers below, so there is a single answer to "what shape
+# is a _tracer-data header value".
+#
+# The blessing is load-bearing (spec F1, GitHub #6). Every
+# outbound header map is encoded to the wire by
+# Temporalio::Interceptor::Headers::to_payload_map, whose is_payload test is
+# `blessed && isa(temporal.api.common.v1.Payload)`. An unblessed
+# { metadata, data } hashref fails that test, so the JSON converter encodes
+# the WHOLE hashref as a payload body and the receiver needs two decodes to
+# reach the carrier (the double-encode class lessons.md 2026-06-26 records).
+# Temporalio::Payload IS the generated Payload class under a stable name, so a
+# value built here passes is_payload and rides through untouched. sdk-python
+# builds the same thing with payload_converter.to_payloads([carrier])[0]
+# (contrib/opentelemetry/_interceptor.py:675-682), and its header type is
+# Mapping[str, Payload] on both the inbound and outbound sides.
+#
+# The require is lazy on purpose: loading Temporalio::Payload triggers the
+# one-time vendored-proto parse, and this module is otherwise cheap to load.
 sub _carrier_to_payload ($self, $carrier) {
     return undef unless ref $carrier eq 'HASH' && %$carrier;
     require JSON::PP;
+    require Temporalio::Payload;
     my $json = JSON::PP->new->canonical->utf8;
-    return {
+    return Temporalio::Payload->new({
         metadata => { encoding => 'json/plain' },
         data     => $json->encode($carrier),
-    };
+    });
 }
 
 # _payload_to_carrier($payload) -> the decoded \%carrier, or undef when the
 # payload is missing/empty/unparseable.
+#
+# DUCK-TYPED on the metadata/data accessors rather than matched against one
+# representation (spec F1). Payloads reaching the inbound side come off the
+# wire inside other messages (the activity Start task's header_fields, threaded
+# by Worker/ActivityDispatcher.pm; the InitializeWorkflow job's headers,
+# threaded by Workflow/Runner.pm _apply_initialize), and those are instances of
+# the GENERATED parent class, not of Temporalio::Payload. Payload.pm's POD
+# states the rule: consumers duck-type. The unblessed { metadata, data }
+# hashref is still accepted so a hand-built test fixture or an older
+# interceptor's header value keeps decoding.
 sub _payload_to_carrier ($self, $payload) {
-    return undef unless defined $payload && ref $payload eq 'HASH';
-    my $data = $payload->{data};
+    return undef unless defined $payload;
+    my $data;
+    if (Scalar::Util::blessed($payload)) {
+        return undef unless $payload->can('metadata') && $payload->can('data');
+        $data = $payload->data;
+    }
+    elsif (ref $payload eq 'HASH') {
+        $data = $payload->{data};
+    }
     return undef unless defined $data && length $data;
     require JSON::PP;
     my $carrier = eval { JSON::PP->new->utf8->decode($data) };
@@ -271,21 +308,35 @@ sub _effective_propagator ($self) {
     return $self->{_default_propagator} = $prop;
 }
 
-# _inject_headers(\%headers, $context) -> a NEW header map with the context
-# rendered into a carrier Payload under header_key, or the input map unchanged
-# when there is no propagator / nothing to inject (a non-recording span
-# renders an empty carrier). Injection failures degrade to no header rather
-# than failing the intercepted call.
-sub _inject_headers ($self, $headers, $context) {
-    my $prop = $self->_effective_propagator or return $headers // {};
+# _carrier_from_context($context) -> the rendered \%carrier, or undef when
+# there is no propagator, the injection dies, or the context renders nothing
+# (a non-recording span, or an absent context with a propagator that needs
+# one). The single rendering step behind BOTH injection shapes: the
+# _tracer-data Payload header (_inject_headers below, used by the client
+# outbound and workflow outbound sides alike) and the plain Str => Str nexus
+# header map (_WorkflowOutbound::_inject_str_headers). Injection failures
+# degrade to no header rather than failing the intercepted call.
+sub _carrier_from_context ($self, $context) {
+    my $prop = $self->_effective_propagator or return undef;
     my %carrier;
     eval {
         defined $context
             ? $prop->inject(\%carrier, $context)
             : $prop->inject(\%carrier);
         1;
-    } or return $headers // {};
-    my $payload = $self->_carrier_to_payload(\%carrier)
+    } or return undef;
+    return %carrier ? \%carrier : undef;
+}
+
+# _inject_headers(\%headers, $context) -> a NEW header map with the context
+# rendered into a carrier Payload under header_key, or the input map unchanged
+# when there is nothing to inject. A header already sitting under header_key is
+# REPLACED, never duplicated or merged: the value must describe the span this
+# call created, not whatever context arrived from somewhere above.
+sub _inject_headers ($self, $headers, $context) {
+    my $carrier = $self->_carrier_from_context($context)
+        or return $headers // {};
+    my $payload = $self->_carrier_to_payload($carrier)
         or return $headers // {};
     return { %{ $headers // {} }, $self->{header_key} => $payload };
 }
@@ -739,24 +790,18 @@ sub _traced_call ($self, $method, $input, $kind, $name, %opt) {
 }
 
 # _inject_str_headers(\%headers, $context): the Nexus-header analogue of
-# root's _inject_headers: merge the propagator carrier's keys DIRECTLY into a
-# plain Str=>Str map (Python _carrier_to_nexus_headers:834-843), never under
-# header_key as a Payload (start_nexus_operation's headers travel to a
-# possibly-external Nexus handler as nexus_header, spec section 26.1).
+# root's _inject_headers. Both render the context through the root's single
+# _carrier_from_context helper; only the WRITE differs. This one merges the
+# carrier's keys DIRECTLY into a plain Str=>Str map (Python
+# _carrier_to_nexus_headers:834-843), never under header_key as a Payload
+# (start_nexus_operation's headers travel to a possibly-external Nexus handler
+# as nexus_header, spec section 26.1).
 sub _inject_str_headers ($self, $headers, $context) {
-    my $root = $self->{root};
-    my $prop = $root->_effective_propagator or return $headers // {};
-    my %carrier;
-    eval {
-        defined $context
-            ? $prop->inject(\%carrier, $context)
-            : $prop->inject(\%carrier);
-        1;
-    } or return $headers // {};
-    return $headers // {} unless %carrier;
+    my $carrier = $self->{root}->_carrier_from_context($context)
+        or return $headers // {};
     my %out = %{ $headers // {} };
-    for my $k (keys %carrier) {
-        my $v = $carrier{$k};
+    for my $k (keys %$carrier) {
+        my $v = $carrier->{$k};
         $out{$k} = ref $v eq 'ARRAY' ? join(',', @$v) : $v;
     }
     return \%out;
@@ -866,6 +911,18 @@ map of W3C C<traceparent> / C<tracestate> / C<baggage>). Span names, kinds,
 attributes, and the error-status rule match the sdk-python OpenTelemetry
 contrib interceptor.
 
+The injected header value is a real L<Temporalio::Payload> (the generated
+C<temporal.api.common.v1.Payload> class), not a payload-shaped hashref, so
+every outbound path carries it to the wire unchanged: the shared header
+contract in L<Temporalio::Interceptor::Headers> passes an already-Payload
+value through rather than encoding it a second time. A receiver therefore
+recovers the carrier with a B<single> decode, which is what sdk-python does
+(C<from_payloads([header_payload])[0]>; its header type is
+C<Mapping[str, Payload]> in both directions). On the way back in, the payload
+is read by duck-typing its C<metadata>/C<data> accessors, because payloads
+materialized from the wire inside another message are instances of the
+generated parent class rather than of L<Temporalio::Payload>.
+
 =over 4
 
 =item * B<Client calls> (C<start_workflow>, C<signal_with_start_workflow>,
@@ -901,14 +958,21 @@ C<signal_external_workflow>, C<SignalExternalWorkflow:{signal}>;
 C<start_nexus_operation>, C<StartNexusOperation:{service}/{operation}>): a
 zero-duration completed span per call, parented on the run's inbound context,
 with the B<new> span's context B<injected> into that op's outbound headers so
-a downstream inbound interceptor sees it as its parent. Skipped entirely
-while replaying (no span, no header injection), the same gate the workflow
-task and handler spans use. C<continue_as_new> is the one exception: it
-creates B<no> span at all and only injects the run's context into its
-outbound headers. C<start_nexus_operation>'s injection writes the carrier's
-keys directly into the plain C<Str> to C<Str> C<nexus_header> map (never a
-C<_tracer-data> Payload); every other op uses the same C<_tracer-data>
-Payload header as the inbound side.
+a downstream inbound interceptor sees it as its parent. Each op injects its
+B<own> span's context, not the run's; an inbound C<_tracer-data> header
+already on the op is replaced, not duplicated, and unrelated header keys are
+left alone. Skipped entirely while replaying (no span, no header injection),
+the same gate the workflow task and handler spans use, and subject to the
+same parent-missing gate: with C<always_create_workflow_spans> off (the
+default) a run that started without a C<_tracer-data> header has no context
+to parent on, so an outbound op creates no span B<and> injects no header;
+turning the option on gives it both, with the new span parentless.
+C<continue_as_new> is the one exception: it creates B<no> span at all and
+only injects the run's context into its outbound headers, which means it
+injects nothing when that context is absent. C<start_nexus_operation>'s
+injection writes the carrier's keys directly into the plain C<Str> to C<Str>
+C<nexus_header> map (never a C<_tracer-data> Payload); every other op uses
+the same C<_tracer-data> Payload header as the inbound side.
 
 =back
 
