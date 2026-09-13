@@ -1,5 +1,5 @@
-# ABOUTME: Fixture workflow whose async :Signal handler awaits then dies —
-# ABOUTME: drives the async-signal coverage case (I2, spec §I2) in
+# ABOUTME: Fixture workflow whose async :Signal handler awaits then dies.
+# ABOUTME: Drives the async-signal coverage case (I2, spec §I2) in
 # ABOUTME: signal_handler_die.t, proving the tracked (in_progress_handlers)
 # ABOUTME: arm also fails the workflow task.
 use v5.38;

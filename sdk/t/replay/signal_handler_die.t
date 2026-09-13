@@ -1,6 +1,6 @@
 # ABOUTME: A die inside a :Signal handler (sync or async) must fail the
-# ABOUTME: workflow TASK (spec §I2, GitHub issue #2) — never a silent normal
-# ABOUTME: completion — UNLESS the exception is a Temporal failure type (or a
+# ABOUTME: workflow TASK (spec §I2, GitHub issue #2), never a silent normal
+# ABOUTME: completion, UNLESS the exception is a Temporal failure type (or a
 # ABOUTME: configured workflow_failure_exception_types class), which fails the
 # ABOUTME: workflow EXECUTION instead. MUST-match sdk-python: a signal handler
 # ABOUTME: exception runs through _run_top_level_workflow_function
@@ -65,7 +65,7 @@ T2->subtest('a dying sync :Signal handler fails the workflow task' => sub {
 
 # ---------------------------------------------------------------------------
 # An async :Signal handler that dies (its Future settles LATER, once tracked
-# in %in_progress_handlers) must ALSO fail the workflow task — the tracked arm
+# in %in_progress_handlers) must ALSO fail the workflow task: the tracked arm
 # is a separate code path from the sync arm and needs its own coverage.
 # ---------------------------------------------------------------------------
 T2->subtest('a dying async :Signal handler fails the workflow task' => sub {
@@ -114,7 +114,7 @@ T2->subtest('a dying async :Signal handler fails the workflow task' => sub {
 # ---------------------------------------------------------------------------
 # A synchronous :Signal handler that throws a Temporal failure-type exception
 # (Temporalio::Exception::Application) must fail the workflow EXECUTION
-# (FailWorkflowExecution), not the workflow task — MUST-match sdk-python
+# (FailWorkflowExecution), not the workflow task. MUST-match sdk-python
 # workflow_is_failure_exception classifying the same exception the same way
 # whether it escapes the main :Run body or a signal handler.
 # ---------------------------------------------------------------------------

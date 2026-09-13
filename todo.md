@@ -170,14 +170,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #6"
 
 ### Step F2: Route Signal-Handler Failures Through the Body's Full Classification
-- [ ] 1. RED: cancel with parked async signal, continue-as-new from handler, Temporal failure from async handler, Nondeterminism, eviction drop, workflow_failure_exception_types; fails today
-- [ ] 2. Verify _workflow_instance.py:2518-2565; cite
-- [ ] 3. GREEN: _classify_failure shared by _outcome_for_failure and _settle_signal; $evicting guard
-- [ ] 4. RED: handler-emitted terminal partition test
-- [ ] 5. GREEN: re-partition in _build_completion
-- [ ] 6. REFACTOR: replace I2 em-dashes; method-name anchors; $_[0] closure
-- [ ] 7. Docs: Runner comments on classifier and evicting guard
-- [ ] 8. Verify: both suites green; commit "Refs #2"
+- [x] 1. RED: cancel with parked async signal, continue-as-new from handler, Temporal failure from async handler, Nondeterminism, eviction drop, workflow_failure_exception_types; fails today
+- [x] 2. Verify _workflow_instance.py:2518-2565; cite
+- [x] 3. GREEN: _classify_failure shared by _outcome_for_failure and _settle_signal; $evicting guard
+- [x] 4. RED: handler-emitted terminal partition test
+- [x] 5. GREEN: re-partition in _build_completion
+- [x] 6. REFACTOR: replace I2 em-dashes; method-name anchors; $_[0] closure
+- [x] 7. Docs: Runner comments on classifier and evicting guard
+- [x] 8. Verify: both suites green; commit "Refs #2"
 
 ### Step F3: Drain a Dead Poll Loop Until Core Shuts Down
 - [ ] 1. RED: cached-run workflow-poll failure, in-flight activity-poll failure, post-run state; fails today
