@@ -1225,7 +1225,23 @@ Accessor returning the C<connection> value.
 
 =head2 count_workflows
 
-Async. Returns a L<Future> resolving to the count of executions matching the given visibility query.
+Async. Returns a L<Future> resolving to a hashref C<< { count => $n, groups => \@groups } >> for the given visibility query. C<count> is the approximate number of matching executions; C<groups> is empty unless the query has a C<GROUP BY> clause, in which case it holds one C<CountWorkflowExecutionsResponse::AggregationGroup> per bucket (each with its own C<count> and C<group_values>).
+
+Plain form:
+
+    my $result = await $client->count_workflows('WorkflowType="MyWorkflow"');
+    say $result->{count};
+
+Group-by form:
+
+    my $result = await $client->count_workflows('WorkflowType="MyWorkflow" GROUP BY ExecutionStatus');
+    for my $group (@{ $result->{groups} }) {
+        say $group->count;
+    }
+
+C<< $group->group_values >> holds raw C<temporal.api.common.v1.Payload>
+proto objects, not decoded search-attribute values; decode them with the
+client's data converter before printing.
 
 =head2 create_schedule
 

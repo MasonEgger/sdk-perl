@@ -80,14 +80,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #10"
 
 ### Step I13: Correct the count_workflows Return-Shape POD
-- [ ] 1. Pin shape: unit/count_workflows_shape.t asserts count_workflows resolves to { count, groups } (fake the RPC); green against code, guards the shape (R64 pattern, not RED-first)
-- [ ] 2. Verify Python CountWorkflowsResponse handling; record file:line
-- [ ] 3. Correct =head2 count_workflows POD (Client.pm:1226) with plain and group-by examples
-- [ ] 4. n/a (shape assertion is the exercising test)
-- [ ] 5. n/a
-- [ ] 6. REFACTOR: none
-- [ ] 7. Docs: this step is the doc fix; keep prove -lj4 xt green
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #13"
+- [x] 1. Pin shape: unit/count_workflows_shape.t asserts count_workflows resolves to { count, groups } (fake the RPC); green against code, guards the shape (R64 pattern, not RED-first)
+- [x] 2. Verify Python CountWorkflowsResponse handling; record file:line
+- [x] 3. Correct =head2 count_workflows POD (Client.pm:1226) with plain and group-by examples
+- [x] 4. n/a (shape assertion is the exercising test)
+- [x] 5. n/a
+- [x] 6. REFACTOR: none
+- [x] 7. Docs: this step is the doc fix; keep prove -lj4 xt green
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #13"
 
 ### Step I11: Add WorkflowHandle fetch_history
 - [ ] 1. RED: unit/fetch_history.t: fetch_history returns a WorkflowHistory whose events replay identically to a from_json load; fails today
