@@ -484,12 +484,17 @@ class Temporalio::Client::WorkflowHandle {
     # is at least ACCEPTED (durability), then returns a
     # Temporalio::Client::WorkflowUpdateHandle seeded with the ref and any
     # returned outcome. 'admitted' is rejected with Argument before any RPC.
-    # %opts: update_id (default a fresh UUID), wait_for_stage.
+    # %opts: update_id (default a fresh UUID), wait_for_stage, result_type (I8 /
+    # GitHub issue #8: optional decode hint for the eventual result, threaded to
+    # _update_handle exactly as get_update_handle's already does at :584-586;
+    # Python parity: WorkflowHandle.start_update result_type,
+    # ../sdk-python temporalio/client/_workflow.py:903).
     async method start_update ($name, $args = [], %opts) {
         # Also guards execute_update, which funnels its caller options here.
         Temporalio::Common::Options::assert_known_keys(
             'WorkflowHandle->start_update', \%opts,
-            { headers => 1, wait_for_stage => 1, update_id => 1 });
+            { headers => 1, wait_for_stage => 1, update_id => 1,
+              result_type => 1 });
         Temporalio::Exception::Argument->throw(
             message => 'start_update requires an update name (string)')
             unless defined $name && !ref $name && length $name;
@@ -524,6 +529,7 @@ class Temporalio::Client::WorkflowHandle {
                          . "'accepted' or 'completed')");
 
         my $update_id = delete $opts{update_id} // Temporalio::Client::_new_uuid();
+        my $result_type = delete $opts{result_type};
 
         my $WaitPolicy = _resolve('temporal.api.update.v1.WaitPolicy');
         my $Meta       = _resolve('temporal.api.update.v1.Meta');
@@ -564,7 +570,8 @@ class Temporalio::Client::WorkflowHandle {
         }
 
         return $self->_update_handle($update_id,
-            known_outcome => $response->outcome);
+            known_outcome => $response->outcome,
+            result_type   => $result_type);
     }
 
     # get_update_handle($update_id, run_id => ..., result_type => ...) — build
@@ -791,7 +798,10 @@ sends C<UpdateWorkflowExecution> (retrying until the update is at least
 accepted) and returns a L<Temporalio::Client::WorkflowUpdateHandle>. The
 C<wait_for_stage> option maps C<'accepted'> and C<'completed'> to the update
 lifecycle stages; C<'admitted'> raises L<Temporalio::Exception::Argument> before
-any RPC. C<%opts> also accepts an explicit C<update_id> (default: a fresh UUID).
+any RPC. C<%opts> also accepts an explicit C<update_id> (default: a fresh UUID)
+and C<result_type>, an optional decode hint for the update result, stored on
+the returned (or, for C<execute_update>, internally awaited) update handle the
+same way C<get_update_handle>'s does.
 
 =head2 get_update_handle
 

@@ -60,14 +60,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 ## Section 3: Small Parity Gaps
 
 ### Step I8: Accept result_type in start_update / execute_update
-- [ ] 1. RED: unit/start_update_result_type.t (fake the update RPC): start_update/execute_update(..., result_type => ...) sets the first-payload decode hint (WorkflowHandle.pm:475/488); fails today
-- [ ] 2. Verify Python start_update result_type; record file:line
-- [ ] 3. GREEN: add result_type to known-options + pass to _update_handle (:595), mirroring get_update_handle (:584-586)
-- [ ] 4. RED: an unknown option still raises the R44 typed argument error
-- [ ] 5. GREEN: only result_type added to the known set
-- [ ] 6. REFACTOR: centralize the shared known-options list if applicable
-- [ ] 7. Docs: add result_type to start_update/execute_update POD
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #8"
+- [x] 1. RED: unit/start_update_result_type.t (fake the update RPC): start_update/execute_update(..., result_type => ...) sets the first-payload decode hint (WorkflowHandle.pm:475/488); fails today
+- [x] 2. Verify Python start_update result_type; record file:line
+- [x] 3. GREEN: add result_type to known-options + pass to _update_handle (:595), mirroring get_update_handle (:584-586)
+- [x] 4. RED: an unknown option still raises the R44 typed argument error
+- [x] 5. GREEN: only result_type added to the known set
+- [x] 6. REFACTOR: centralize the shared known-options list if applicable (not applicable: start_update's set {headers, wait_for_stage, update_id, result_type} and get_update_handle's set {run_id, result_type} share only one key, so a shared list would obscure more than it simplifies; left as-is per plan.md's "only if it genuinely reduces drift")
+- [x] 7. Docs: add result_type to start_update/execute_update POD
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #8"
 
 ### Step I10: Validate Priority.priority_key at Construction
 - [ ] 1. RED: extend unit/priority_fairness.t: priority_key 0/-1/2.5/"high" throw Exception::Argument; 3 and undef accepted; rejections fail today
