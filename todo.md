@@ -151,8 +151,8 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 5. Document: one-line POD on the shared helpers; commit "Closes #14" noting the POSIX half not-applicable
 
 ### Step I18: Add the Two-Attributed-Classes-Per-File Compile Canary (task)
-- [ ] 1. Scope: TODO canary in attribute_handlers.t + an upstream-report note draft
-- [ ] 2. Tooling: none
-- [ ] 3. Do: add a Test2 todo block eval-compiling two attributed :isa classes in one unit with F::AA loaded (the #18 minimal repro); comment links lessons.md + #18
-- [ ] 4. Verify: prove -lv t/unit/attribute_handlers.t exits 0 with the test reported TODO; prove -lj4 t green overall
-- [ ] 5. Document: leave the upstream-report draft (repro + environment) in the commit body; commit "Closes #18"
+- [x] 1. Scope: TODO canary in attribute_handlers.t + an upstream-report note draft
+- [x] 2. Tooling: none
+- [x] 3. Do: add a Test2 todo block eval-compiling two attributed :isa classes in one unit with F::AA loaded (the #18 minimal repro); comment links lessons.md + #18
+- [x] 4. Verify: prove -lv t/unit/attribute_handlers.t exits 0 with the test reported TODO; prove -lj4 t green overall
+- [x] 5. Document: leave the upstream-report draft (repro + environment) in the commit body; commit "Closes #18"

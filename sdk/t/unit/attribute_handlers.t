@@ -108,6 +108,43 @@ T2->subtest('constraint 4: $data arrives as arrayref or undef, never a bare stri
     T2->is($instance->$ref('V2'), 'named(V2) self=AttrSpike::WFBegin', 'method-call on captured ref works');
 });
 
+# TODO(#18) canary: two attribute-bearing :isa classes compiled in one file
+# should both compile once Future::AsyncAwait is loaded. Today the second
+# class's `method run :Run(...)` dies with "Subroutine attributes must come
+# before the signature", a core perl 5.38.2 parser-state bug documented in
+# .ai-sessions/lessons.md's entry beginning 'The "Subroutine attributes must
+# come before the signature" parse death near `class` blocks is a CORE perl
+# 5.38.2 parser-state bug, NOT (only) the Future::AsyncAwait attribute-parser
+# leak it was first blamed on' (2026-07-10). See GitHub issue #18. Marked
+# TODO so the suite stays green; when a future perl or Future::AsyncAwait
+# release fixes the parser state this test starts passing, which is the
+# signal that the one-attributed-class-per-file workaround documented in
+# README and CLAUDE.md can be revisited. No SDK-side fix is attempted here,
+# the fix belongs upstream. An unexpected PASS is itself a real finding
+# worth reporting, not a silent success.
+T2->todo('GitHub #18: two attributed :isa classes per file (core perl parser-state bug)' => sub {
+    T2->subtest('TODO(#18): two attributed :isa classes per file should compile once upstream perl/F::AA fixes the parser state' => sub {
+        require Future::AsyncAwait;
+        require Temporalio::Workflow;
+        require Temporalio::Workflow::Definition;
+
+        my $ok = eval q{
+            use feature 'class';
+            no warnings 'experimental::class';
+            use Future::AsyncAwait;
+            class TwoA::X :isa(Temporalio::Workflow::Definition) {
+                method run :Run('X') ($i) { return $i }
+            }
+            class TwoA::Y :isa(Temporalio::Workflow::Definition) {
+                method run :Run('Y') ($i) { return $i }
+            }
+            1;
+        };
+        T2->ok($ok, 'both attributed classes compiled in the same unit');
+        T2->is($@, '', 'no compile error from the second class');
+    });
+});
+
 T2->done_testing;
 
 # Writes the runtime-require fixture modules: a BEGIN-phase base and a
