@@ -90,14 +90,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #13"
 
 ### Step I11: Add WorkflowHandle fetch_history
-- [ ] 1. RED: unit/fetch_history.t: fetch_history returns a WorkflowHistory whose events replay identically to a from_json load; fails today
-- [ ] 2. Verify Python client/_workflow.py:391; record in comments
-- [ ] 3. GREEN: add async fetch_history assembling WorkflowHistory from fetch_history_events (WorkflowHandle.pm:609)
-- [ ] 4. RED: assert fetch_history->to_json equals from_json(...)->to_json for the same events
-- [ ] 5. GREEN: assembled history uses the class's field names
-- [ ] 6. REFACTOR: keep fetch_history a thin assembler
-- [ ] 7. Docs: =head2 fetch_history POD entry
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #11"
+- [x] 1. RED: unit/fetch_history.t: fetch_history returns a WorkflowHistory whose events replay identically to a from_json load; fails today
+- [x] 2. Verify Python client/_workflow.py:391; record in comments
+- [x] 3. GREEN: add async fetch_history assembling WorkflowHistory from fetch_history_events (WorkflowHandle.pm:609)
+- [x] 4. RED: assert fetch_history->to_json equals from_json(...)->to_json for the same events
+- [x] 5. GREEN: assembled history uses the class's field names
+- [x] 6. REFACTOR: keep fetch_history a thin assembler
+- [x] 7. Docs: =head2 fetch_history POD entry
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #11"
 
 ### Step I9: Wire the Dynamic Update Handler Validator
 - [ ] 1. RED: fixture WfDef/DynUpdateValidator.pm + replay/dynamic_update_validator.t: rejecting dynamic validator currently accept-then-executes (fails)

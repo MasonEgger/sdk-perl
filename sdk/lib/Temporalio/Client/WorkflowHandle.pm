@@ -629,6 +629,29 @@ class Temporalio::Client::WorkflowHandle {
         );
     }
 
+    # fetch_history(...): the WorkflowHistory assembler over
+    # fetch_history_events (spec I11 / GitHub issue #11; sdk-python
+    # client/_workflow.py:391 fetch_history, which drains
+    # fetch_history_events into a WorkflowHistory(workflow_id, events)). Takes
+    # the SAME known-keys set as fetch_history_events (:616-630) and passes
+    # them straight through; a thin assembler, no iterator logic of its own.
+    async method fetch_history (%opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->fetch_history', \%opts,
+            { page_size => 1, wait_new_event => 1, event_filter_type => 1,
+              skip_archival => 1 });
+        require Temporalio::Client::WorkflowHistory;
+        my $iterator = $self->fetch_history_events(%opts);
+        my @events;
+        while (defined(my $event = await $iterator->next)) {
+            push @events, $event;
+        }
+        return Temporalio::Client::WorkflowHistory->new(
+            workflow_id => $workflow_id,
+            events      => \@events,
+        );
+    }
+
     # ----- private helpers -------------------------------------------------
 
     # An async page iterator over GetWorkflowExecutionHistory for one run id.
@@ -760,6 +783,26 @@ C<< Temporalio::Client->connect >> applies instead (spec R93); a per-call
 value always wins, and with neither set the request field stays unset.
 C<fetch_history_events>
 returns an async iterator over the workflow's history events.
+
+=head2 fetch_history
+
+    my $history = await $handle->fetch_history;
+    my $history = await $handle->fetch_history(
+        page_size => 100, event_filter_type => 1, skip_archival => 0);
+
+Drains C<fetch_history_events> into a L<Temporalio::Client::WorkflowHistory>
+carrying this handle's C<workflow_id> and every fetched event, in order
+(spec I11; sdk-python C<client/_workflow.py> C<fetch_history>). It is a
+thin assembler over C<fetch_history_events> and accepts the exact same
+option keys (C<page_size>, C<wait_new_event>, C<event_filter_type>,
+C<skip_archival>), passed straight through; C<wait_new_event> defaults
+false so C<fetch_history> never blocks waiting for a new event. Passing
+C<< wait_new_event => 1 >> makes the drain long-poll until the workflow
+closes; use C<fetch_history_events> directly for incremental consumption
+instead. The returned C<WorkflowHistory> is the same input type
+L<Temporalio::Test::WorkflowReplay>'s C<replay_workflow> and
+C<replay_workflows> accept, and its C<to_json> round-trips through
+C<< Temporalio::Client::WorkflowHistory->from_json >>.
 
 =head2 reset
 
