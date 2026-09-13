@@ -6,14 +6,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 ## Section 1: Silent-Failure Correctness Bugs
 
 ### Step I2: Fail the Workflow Task When a Sync :Signal Handler Dies
-- [ ] 1. RED: fixture WfDef/DyingSignal.pm + replay/signal_handler_die.t; a dying sync signal handler currently produces a normal completion (fails)
-- [ ] 2. Verify the Python signal-handler-raises contract; record file:line in test comments
-- [ ] 3. GREEN: track/funnel the failed sync-signal Future into the R11 failed-WFT sink in _dispatch_signal (Runner.pm:3164)
-- [ ] 4. RED: WfDef/DyingAsyncSignal.pm case asserting an async dying signal also fails the WFT
-- [ ] 5. GREEN: wire the async path if red; else record it already passes
-- [ ] 6. REFACTOR: one shared failure sink for both signal arms
-- [ ] 7. Docs: correct the signal-failure contract comment/POD
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #2"
+- [x] 1. RED: fixture WfDef/DyingSignal.pm + replay/signal_handler_die.t; a dying sync signal handler currently produces a normal completion (fails)
+- [x] 2. Verify the Python signal-handler-raises contract; record file:line in test comments
+- [x] 3. GREEN: track/funnel the failed sync-signal Future into the R11 failed-WFT sink in _dispatch_signal (Runner.pm:3164)
+- [x] 4. RED: WfDef/DyingAsyncSignal.pm case asserting an async dying signal also fails the WFT
+- [x] 5. GREEN: wire the async path if red; else record it already passes
+- [x] 6. REFACTOR: one shared failure sink for both signal arms
+- [x] 7. Docs: correct the signal-failure contract comment/POD
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #2"
 
 ### Step I3: Unwind Worker::run on a Fatal Poll-Loop Death
 - [ ] 1. RED: unit/fatal_poll_unwind.t (synthetic loop futures) + subprocess-guarded integration/fatal_poll_unwind.t; gather blocks on first failure today

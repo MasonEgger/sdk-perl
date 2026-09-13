@@ -3151,6 +3151,45 @@ class Temporalio::Workflow::Runner {
         return (undef);
     }
 
+    # Settle a signal-handler Future once it is ready (spec §I2, GitHub issue
+    # #2; the single sink both the sync and async :Signal arms below settle
+    # through). A signal has no response channel to reject through (unlike an
+    # update), so its die is classified exactly like the main :Run body's own
+    # die (_outcome_for_failure / _is_workflow_failure_exception, :4107-4126):
+    # a Temporalio::Exception::* (or a class listed in
+    # workflow_failure_exception_types) fails the workflow EXECUTION via
+    # _workflow_failed_completion (a direct FailWorkflowExecution, guarded by
+    # _emit_terminal_command so a later current_activation_error still takes
+    # priority in _build_completion's step 1b); anything else — a plain or
+    # foreign die — is a workflow TASK failure: stash it in
+    # $current_activation_error, the same route _apply_do_update uses for a
+    # post-accept die (:3687) and validators use for a read-only violation
+    # (:3610/:3626), which process_activation's _build_completion (:4003-4004)
+    # turns into a failed WorkflowActivationCompletion. A cancelled handler
+    # future (evict()'s %in_progress_handlers sweep) is dropped with no
+    # activation error, mirroring _update_settlement's eviction-drop rule
+    # (:3663) — the run is being torn down, not failed.
+    # MUST-match sdk-python: a signal-handler exception runs through the SAME
+    # _run_top_level_workflow_function the main :Run body uses
+    # (worker/_workflow_instance.py:2518-2565), which calls
+    # workflow_is_failure_exception (:1820-1835) and on a Temporal failure type
+    # calls _set_workflow_failure (:2560-2562, FailWorkflowExecution);
+    # otherwise it sets self._current_activation_error (:2563-2565), the
+    # workflow-TASK-failure route.
+    method _settle_signal ($future) {
+        return if $future->is_cancelled;
+        if (my @failure = $future->failure) {
+            my $err = $failure[0];
+            if ($self->_is_workflow_failure_exception($err)) {
+                $self->_workflow_failed_completion($err);
+            }
+            else {
+                $current_activation_error //= $err;
+            }
+        }
+        return;
+    }
+
     # Invoke a resolved signal handler (spec section 10.3 ASYNC HANDLER
     # TRACKING). $handler is a unified-table descriptor (spec R86). Named
     # handlers are called with the decoded args; a dynamic handler is called
@@ -3184,14 +3223,19 @@ class Temporalio::Workflow::Runner {
             return Future->wrap($workflow_inbound->handle_signal($input));
         });
 
-        # An already-ready handler (a synchronous handler that returned or threw)
-        # needs no tracking. A pending (async) handler is tracked and removed
-        # from the in-progress set when it becomes ready. The record carries
-        # the descriptor's unfinished policy (spec R87) so the completion
-        # warning can honor a per-handler ABANDON opt-out — Python tracks the
-        # same via HandlerExecution(job.signal_name, defn.unfinished_policy)
-        # (_workflow_instance.py:2446-2447).
-        if (!$future->is_ready) {
+        # An already-ready handler (a synchronous handler that returned or
+        # threw) settles immediately (spec §I2): a sync die must be classified
+        # (via _settle_signal) in THIS activation, not vanish unobserved. A
+        # pending (async) handler is tracked and settled + removed from the
+        # in-progress set when it becomes ready. The record carries the
+        # descriptor's unfinished policy (spec R87) so the completion warning
+        # can honor a per-handler ABANDON opt-out — Python tracks the same via
+        # HandlerExecution(job.signal_name, defn.unfinished_policy)
+        # (_workflow_instance.py:2446-2448).
+        if ($future->is_ready) {
+            $self->_settle_signal($future);
+        }
+        else {
             my $id = ++$handler_seq;
             $in_progress_handlers{$id} = {
                 future            => $future,
@@ -3200,7 +3244,10 @@ class Temporalio::Workflow::Runner {
                 unfinished_policy => $handler->{unfinished_policy}
                                        // 'WARN_AND_ABANDON',
             };
-            $future->on_ready(sub { delete $in_progress_handlers{$id} });
+            $future->on_ready(sub {
+                delete $in_progress_handlers{$id};
+                $self->_settle_signal($future);
+            });
         }
         return;
     }
@@ -4715,15 +4762,22 @@ C<CancelWorkflowExecution> (NOT a failure) (T-wf-12).
 
 A Temporal failure exception (any C<Temporalio::Exception::*>) or a class
 listed in C<workflow_failure_exception_types> — C<FailWorkflowExecution>
-(T-wf-15b/c). Query and update responses buffered in the same activation
-survive alongside the fail command; only state-mutating commands are dropped
-(spec R13, sdk-python parity).
+(T-wf-15b/c). A die of this kind inside a C<:Signal> handler (sync or async)
+takes this same route (spec I2, GitHub issue #2), matching sdk-python's
+C<workflow_is_failure_exception> check that leads to C<_set_workflow_failure>
+(C<_workflow_instance.py:2560-2562>). Query and update responses buffered in
+the same activation survive alongside the fail command; only state-mutating
+commands are dropped (spec R13, sdk-python parity).
 
 =item *
 
 Any other exception (a plain C<die>, a foreign class not listed) — the entire
 completion is C<failed>: a workflow B<task> failure the server retries
-(T-wf-15a).
+(T-wf-15a). A plain or foreign die inside a C<:Signal> handler (sync or
+async) takes this same route (spec I2, GitHub issue #2): a signal has no
+response channel to reject through, so this class of handler die fails the
+workflow task, matching sdk-python's C<_current_activation_error> fallback
+(C<_workflow_instance.py:2563-2565>).
 
 =item *
 

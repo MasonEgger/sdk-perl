@@ -67,11 +67,11 @@ Tools the `bpe:validator` agent should consult when reviewing diffs in `/bpe:goa
 `Runner::_dispatch_signal` (`Workflow/Runner.pm:3164`) wraps the handler in `Future->call`; the resulting already-failed future is not tracked in `%in_progress_handlers` and never observed, so the die vanishes.
 The signal appears delivered, the handler's side effects are partial, and nothing surfaces.
 
-**Required behavior.** A die in a sync signal handler becomes a failed workflow task, matching Python (which fails the workflow task when a signal handler raises).
+**Required behavior.** A die in a sync signal handler is classified exactly like a die escaping the main `:Run` body (`_outcome_for_failure` / `_is_workflow_failure_exception`, `Workflow/Runner.pm:4107-4126`): a `Temporalio::Exception::*` (or a class listed in `workflow_failure_exception_types`) fails the workflow EXECUTION (`FailWorkflowExecution`), matching Python's `workflow_is_failure_exception` -> `_set_workflow_failure` (`../sdk-python temporalio/worker/_workflow_instance.py:2560-2562`); any other (plain or foreign) die fails the workflow TASK, matching Python's `_current_activation_error` route (`:2563-2565`).
 Route the failed signal-handler future into the same die-to-failed-completion funnel R11 built (`Worker/WorkflowDispatcher.pm` catch-all).
 Confirm the async `:Signal` path (already tracked through `%in_progress_handlers`) already reports; if it does not, fix it in the same step.
 
-**Acceptance.** A replay test delivers a signal whose handler dies and asserts a failed WFT completion is produced instead of a normal completion.
+**Acceptance.** A replay test delivers a signal whose handler dies with a plain exception and asserts a failed WFT completion is produced instead of a normal completion; a second replay test delivers a signal whose handler throws a `Temporalio::Exception::Application` and asserts a `FailWorkflowExecution` command instead.
 
 ### I3: A fatal poll-loop death must unwind Worker::run
 
