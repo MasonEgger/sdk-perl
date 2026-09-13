@@ -3457,9 +3457,12 @@ class Temporalio::Workflow::Runner {
     # _workflow_instance.py:1428-1447). The new definition REPLACES the old
     # wholesale (Python builds a fresh _UpdateDefinition), so an omitted
     # validator removes any previous one for that name and removing the
-    # handler drops its validator too. Only a NAMED update carries a validator
-    # here: _apply_do_update never validates a dynamic handler (its documented
-    # step 3), so a validator passed with a dynamic install is ignored.
+    # handler drops its validator too. A validator passed with a DYNAMIC
+    # install is carried on the dynamic definition too (I9, closes #9):
+    # _apply_do_update step 3 resolves it via _resolve_update_validator, the
+    # same read-only guard a named validator runs under. Python carries the
+    # validator the same way, on the _UpdateDefinition itself
+    # (workflow_get_update_validator, _workflow_instance.py:1245-1250).
     # Updates buffer only for a missing instance, never for a missing handler,
     # so there is nothing to drain.
     method workflow_set_update_handler ($name, $handler, $validator = undef) {
@@ -3483,6 +3486,14 @@ class Temporalio::Workflow::Runner {
             }
             else {
                 $h->{dynamic}{update} = $desc;
+                if (defined $validator) {
+                    $h->{dynamic}{update_validator} =
+                        { code => $validator, is_method => 0,
+                          unfinished_policy => 'WARN_AND_ABANDON' };
+                }
+                else {
+                    delete $h->{dynamic}{update_validator};
+                }
             }
         }
         else {
@@ -3492,6 +3503,7 @@ class Temporalio::Workflow::Runner {
             }
             else {
                 delete $h->{dynamic}{update};
+                delete $h->{dynamic}{update_validator};
             }
         }
         return;
@@ -3550,13 +3562,27 @@ class Temporalio::Workflow::Runner {
             (($job->input // [])->@*);
 
         # --- validation phase (sync, read-only) ------------------------------
-        # A named handler with a registered validator is validated only when the
-        # job asks (run_validator is false on replay). A dynamic handler is never
-        # validated (there is no dynamic validator).
-        if ($job->run_validator && !$is_dynamic) {
-            my $validator = $self->_handlers->{validators}{$name};
+        # A named handler is validated against its OWN named validator only,
+        # never falling back to the dynamic validator for a named update that
+        # has none (mirrors Python's handle_update_validator comment,
+        # _workflow_instance.py:2938-2941: "we shouldn't fall back to the
+        # dynamic validator for some defined, named update which doesn't have
+        # a defined validator"). A dynamic handler is validated against the
+        # dynamic definition's validator, when one was registered (I9, closes
+        # #9). Either way, validation runs only when the job asks
+        # (run_validator is false on replay).
+        if ($job->run_validator) {
+            my $validator = $self->_resolve_update_validator($name, $is_dynamic);
             if (defined $validator) {
-                my $result = $self->_run_update_validator($validator, \@args);
+                # The dynamic path must hand the validator the SAME argument
+                # list the dynamic handler gets below (~:3609-3612:
+                # $is_dynamic ? ($name, @{ $in->args }) : @{ $in->args }).
+                # sdk-python builds this list ONCE via _process_handler_args
+                # and feeds it to both handle_update_validator and
+                # handle_update_handler (_workflow_instance.py:2400-2414,
+                # :650, :667). Keep these two call sites in lockstep.
+                my $result = $self->_run_update_validator(
+                    $validator, $is_dynamic ? [ $name, @args ] : \@args);
                 # A read-only-context violation is a workflow TASK failure: the
                 # error is stashed and the outcome table routes it (no
                 # UpdateResponse emitted).
@@ -3642,6 +3668,21 @@ class Temporalio::Workflow::Runner {
             return ($dynamic, 1);
         }
         return (undef);
+    }
+
+    # Resolve the validator for an update (I9, closes #9; mirrors sdk-python
+    # workflow_get_update_validator, _workflow_instance.py:1245-1250, and the
+    # no-fallback rule at :2938-2941). $is_dynamic comes from the paired
+    # _resolve_update_handler call, so this ALWAYS agrees with which
+    # definition actually handled the update: a named update validates
+    # against its own named validator only (never the dynamic one), and a
+    # dynamic update validates against the dynamic definition's validator, if
+    # one was registered (workflow_set_update_handler, undef $name). Returns
+    # the validator descriptor or undef.
+    method _resolve_update_validator ($name, $is_dynamic) {
+        my $h = $self->_handlers;
+        return $is_dynamic ? $h->{dynamic}{update_validator}
+                            : $h->{validators}{$name};
     }
 
     # durable_scheduler_disabled($code) — run $code with the durable scheduler

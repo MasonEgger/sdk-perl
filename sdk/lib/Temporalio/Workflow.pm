@@ -844,9 +844,15 @@ Returns the handler installed for exactly the given update name, or C<undef>
 =head2 set_dynamic_update_handler
 
 Installs, replaces, or removes the dynamic (catch-all) update handler, called
-with C<($name, @args)>. A C<validator> option is accepted for signature parity
-with Python but is not consulted: the runner never validates a dynamic update
-(there is no dynamic validator in this SDK's update dispatch).
+with C<($name, @args)>. The optional C<validator> is honored (I9, closes #9):
+when C<run_validator> is true it runs synchronously in a read-only context
+before acceptance, under the same guard a named handler's validator runs
+under, matching Python's dynamic-definition validator fallback. Omitting it
+removes any previous dynamic validator, and removing the dynamic handler
+removes its validator too. Like the handler, the dynamic validator is called
+with C<($name, @args)>, not C<(@args)> alone, so it sees exactly the same
+argument list the handler it guards does (matching sdk-python's
+C<_process_handler_args>, C<_workflow_instance.py:2400-2414>).
 
 =head2 get_dynamic_update_handler
 

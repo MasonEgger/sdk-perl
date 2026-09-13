@@ -100,14 +100,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #11"
 
 ### Step I9: Wire the Dynamic Update Handler Validator
-- [ ] 1. RED: fixture WfDef/DynUpdateValidator.pm + replay/dynamic_update_validator.t: rejecting dynamic validator currently accept-then-executes (fails)
-- [ ] 2. Verify Python _workflow_ops.py workflow_get_update_validator dynamic fallback; record in comments
-- [ ] 3. GREEN: store/carry the dynamic validator (Runner.pm:3392) and fall back to it in _apply_do_update step 3 (~:3438) under the read-only guard
-- [ ] 4. RED: dynamic validator that emits a command -> workflow TASK failure
-- [ ] 5. GREEN: dynamic validator routed through the same read-only guard
-- [ ] 6. REFACTOR: shared "resolve validator for this update" helper (named + dynamic)
-- [ ] 7. Docs: correct the :3389 comment and set_dynamic_update_handler POD
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #9"
+- [x] 1. RED: fixture WfDef/DynUpdateValidator.pm + replay/dynamic_update_validator.t: rejecting dynamic validator currently accept-then-executes (fails)
+- [x] 2. Verify Python _workflow_ops.py workflow_get_update_validator dynamic fallback; record in comments
+- [x] 3. GREEN: store/carry the dynamic validator (Runner.pm:3392) and fall back to it in _apply_do_update step 3 (~:3438) under the read-only guard
+- [x] 4. RED: dynamic validator that emits a command -> workflow TASK failure
+- [x] 5. GREEN: dynamic validator routed through the same read-only guard
+- [x] 6. REFACTOR: shared "resolve validator for this update" helper (named + dynamic)
+- [x] 7. Docs: correct the :3389 comment and set_dynamic_update_handler POD
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #9"
 
 ## Section 4: Larger Parity Features
 
