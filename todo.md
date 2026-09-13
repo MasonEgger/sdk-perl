@@ -16,14 +16,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #2"
 
 ### Step I3: Unwind Worker::run on a Fatal Poll-Loop Death
-- [ ] 1. RED: unit/fatal_poll_unwind.t (synthetic loop futures) + subprocess-guarded integration/fatal_poll_unwind.t; gather blocks on first failure today
-- [ ] 2. Verify Python worker/_worker.py:813,846-848 (FIRST_EXCEPTION + drain_poll_queue); record in comments
-- [ ] 3. GREEN: extract the gather; replace wait_all (Worker.pm:615) with a first-failure race; on fatal path initiate shutdown + drain polls before _finalize_and_free (:960), preserving on_fatal_error (:631) ordering
-- [ ] 4. RED: healthy-path assertion (no failure -> gather returns only after all loops drain)
-- [ ] 5. GREEN: combinator waits all on the clean path, returns on first failure
-- [ ] 6. REFACTOR: run() reads gather -> (fatal? initiate+drain) -> finalize via _await_loops_then_drain
-- [ ] 7. Docs: correct the run() contract comment (:565-608)
-- [ ] 8. Verify: prove -lj4 t green; commit "Closes #3"
+- [x] 1. RED: unit/fatal_poll_unwind.t (synthetic loop futures) + subprocess-guarded integration/fatal_poll_unwind.t; gather blocks on first failure today
+- [x] 2. Verify Python worker/_worker.py:812,846-848 (FIRST_EXCEPTION + drain_poll_queue); record in comments
+- [x] 3. GREEN: extract the gather; replace wait_all (Worker.pm:615) with a first-failure race; on fatal path initiate shutdown + drain polls before _finalize_and_free (:960), preserving on_fatal_error (:631) ordering
+- [x] 4. RED: healthy-path assertion (no failure -> gather returns only after all loops drain)
+- [x] 5. GREEN: combinator waits all on the clean path, returns on first failure
+- [x] 6. REFACTOR: run() reads gather -> (fatal? initiate+drain) -> finalize via _await_loops_then_drain
+- [x] 7. Docs: correct the run() contract comment (:565-608)
+- [x] 8. Verify: prove -lj4 t green; commit "Closes #3"
 
 ### Step I1: Settle an Evicted Async :Update Parked on wait_condition Without Croaking
 - [ ] 1. RED: fixture WfDef/UpdateParker.pm + replay/evict_pending_update_wait_condition.t; the "already failed" croak fires, no eviction completion today

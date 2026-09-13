@@ -561,13 +561,23 @@ class Temporalio::Worker {
 
     # run (spec 8.2 steps 1-5): build + validate the worker if needed, then
     # drive BOTH the activity poll loop (spec 8.4) and the workflow poll loop
-    # (spec 8.3) concurrently on the IO::Async loop. Returns when BOTH loops
-    # drain — either because `shutdown` was called mid-run (initiate_shutdown
-    # makes core return the ShutDown sentinel from both polls) or because core
-    # shut the worker down. On the way out it finalizes and frees the worker
-    # (the full graceful sequence deferred from `shutdown` per the P2.2 deadlock
-    # note). T-wkr-4: shutdown mid-run causes run to return; a second shutdown is
-    # a no-op.
+    # (spec 8.3) concurrently on the IO::Async loop, racing them via
+    # _await_loops_then_drain. On the CLEAN path all loops drain on their own
+    # (either `shutdown` was called mid-run, making core return the ShutDown
+    # sentinel from every poll, or core shut the worker down itself) and run()
+    # returns once every loop is done. On the FATAL path (spec I3, GitHub
+    # issue #3) one loop dying does NOT wait for its healthy siblings (they
+    # may still be polling with no work and could block indefinitely), so the
+    # gather returns on the FIRST failure; run() then calls
+    # _initiate_shutdown_once itself (so core turns the survivors' next poll
+    # into the ShutDown sentinel) and awaits their drain before finalizing.
+    # Either way it finalizes and frees the worker on the way out (the full
+    # graceful sequence deferred from `shutdown` per the P2.2 deadlock note).
+    # Python parity (../sdk-python worker/_worker.py:812-813,822-825,841,857):
+    # asyncio.wait(tasks, return_when=FIRST_EXCEPTION), on_fatal_error before
+    # initiate_shutdown, then a final wait for every task once shutdown is
+    # initiated. T-wkr-4: shutdown mid-run causes run to return; a second
+    # shutdown is a no-op.
     async method run () {
         $self->_assert_open;
         await $self->validate;     # _ensure_worker + pre-poll validate
@@ -601,21 +611,26 @@ class Temporalio::Worker {
             );
         }
 
+        # Drive every loop concurrently; each drains on its own ShutDown
+        # sentinel (a still-running workflow/activity/Nexus completion must be
+        # sent before its loop returns). @loops stays in scope past the gather
+        # so the fatal path below can await the survivors' drain too.
+        my @loops = ($activity_loop->run, $workflow_loop->run);
+        push @loops, $nexus_loop->run if defined $nexus_loop;
+
         my $error;
         {
             local $@;
-            # Drive every loop concurrently; each drains on its own ShutDown
-            # sentinel. wait_all waits for ALL so no loop is abandoned mid task
-            # (a still-running workflow/activity/Nexus completion must be sent).
-            # wait_all never itself fails, so inspect each sub-future and surface
-            # the first failure after all have settled.
-            my @loops = ($activity_loop->run, $workflow_loop->run);
-            push @loops, $nexus_loop->run if defined $nexus_loop;
-            eval {
-                await Future->wait_all(@loops);
-                $_->is_failed and die(($_->failure)[0]) for @loops;
-                1;
-            } or $error = $@;
+            # _await_loops_then_drain (spec I3, GitHub #3): a first-failure
+            # race, not wait_all: one loop dying fatally must not block on a
+            # healthy sibling that may still be polling with no work. On the
+            # clean path it still waits for every loop to drain (asserted in
+            # sdk/t/unit/fatal_poll_unwind.t); on the fatal path it returns as
+            # soon as the FIRST loop fails, leaving any not-yet-settled
+            # siblings pending (they are awaited again below, after shutdown
+            # is initiated).
+            eval { $error = await $self->_await_loops_then_drain(@loops); 1 }
+                or $error = $@;
         }
 
         # Fatal-error hook (spec R94, parity audit worker finding 3): this is
@@ -643,16 +658,32 @@ class Temporalio::Worker {
             };
         }
 
-        # Both loops have drained (sentinels seen). Make sure shutdown was
-        # actually initiated (a loop may have exited because core shut down on
-        # its own), then finalize + free. _finalize_and_free is idempotent.
-        # Preserve-cause (spec R62, finding L32): pre-R62 this await was
-        # unprotected, so a finalize die REPLACED the poll-loop $error saved
-        # above and the primary failure vanished. A finalize failure must
-        # ATTACH to the saved error; with no saved error it becomes the
-        # primary itself. Folding it into $error also lets the pool close
-        # below still run on the finalize-failure path.
+        # Make sure shutdown was actually initiated (a loop may have exited
+        # because core shut down on its own, or the gather above returned on
+        # the CLEAN path where every loop already drained). On the FATAL path
+        # this is what makes the survivors' next poll come back as the
+        # ShutDown sentinel; without it, _finalize_and_free below could
+        # deadlock on an undrained poll (the P2.2 lesson), which is the same
+        # hang this step fixes one level up.
         $self->_initiate_shutdown_once;
+
+        # Drain the survivors (spec I3): on the CLEAN path every loop is
+        # already ready, so this settles immediately; on the FATAL path this
+        # is the await that mirrors Python's drain_poll_queue
+        # (_worker.py:846-848): the healthy loop(s) left pending by the
+        # first-failure race above now see the sentinel initiate_shutdown just
+        # produced and return. wait_all never itself fails (each loop's own
+        # failure was already captured into $error, or will be, by the gather
+        # above), so no eval is needed here.
+        await Future->wait_all(@loops);
+
+        # Finalize + free. _finalize_and_free is idempotent. Preserve-cause
+        # (spec R62, finding L32): pre-R62 this await was unprotected, so a
+        # finalize die REPLACED the poll-loop $error saved above and the
+        # primary failure vanished. A finalize failure must ATTACH to the
+        # saved error; with no saved error it becomes the primary itself.
+        # Folding it into $error also lets the pool close below still run on
+        # the finalize-failure path.
         {
             local $@;
             eval { await $self->_finalize_and_free; 1 }
@@ -672,6 +703,38 @@ class Temporalio::Worker {
 
         die $error if defined $error;
         return;
+    }
+
+    # _await_loops_then_drain (spec I3, GitHub issue #3): the gather step
+    # run() races. Given the per-kind poll-loop Futures, resolves as soon as
+    # EITHER any one of them fails (the fatal path: returns immediately with
+    # that failure, deliberately leaving any not-yet-settled siblings pending
+    # rather than waiting on them) OR every one of them has drained cleanly
+    # (the clean path: returns undef only once ALL are done). Never itself
+    # dies. Pure with respect to instance state (no FFI, no $worker_ptr
+    # touched) so it is unit-testable with synthetic Future doubles alone
+    # (sdk/t/unit/fatal_poll_unwind.t); the caller (run(), above) is what
+    # actually initiates shutdown and awaits the survivors' drain once this
+    # settles fatally. Python composes the analogous race with
+    # asyncio.wait(tasks, return_when=FIRST_EXCEPTION)
+    # (../sdk-python worker/_worker.py:812-813).
+    async method _await_loops_then_drain (@loops) {
+        my $signal    = Future->new;
+        my $remaining = scalar @loops;
+        my $error;
+        for my $loop_future (@loops) {
+            $loop_future->on_ready(sub ($settled) {
+                if ($settled->is_failed) {
+                    $error //= ($settled->failure)[0];
+                    $signal->done unless $signal->is_ready;
+                }
+                $remaining--;
+                $signal->done if $remaining == 0 && !$signal->is_ready;
+            });
+        }
+        $signal->done if @loops == 0;
+        await $signal;
+        return $error;
     }
 
     # Build the activity dispatcher with the real completer (worker_complete_
