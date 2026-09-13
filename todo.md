@@ -48,14 +48,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 ## Section 2: Schedule Round-Trip Data Loss
 
 ### Step I4: Carry Every _to_proto Field Through Schedule Action _from_proto
-- [ ] 1. RED: unit/schedule_action_roundtrip.t: every optional field populated; _from_proto(_to_proto) drops most today
-- [ ] 2. Verify Python client/_schedule.py:551-552 raw-Payload user_metadata round trip; record in comments
-- [ ] 3. GREEN: complete _from_proto (Action.pm:142) to decode user_metadata, timeouts, retry_policy, memo, search_attributes, headers, priority
-- [ ] 4. RED: integration/schedule_static_summary_roundtrip.t (skip_all offline) describe-modify-update keeps static_summary
-- [ ] 5. GREEN: satisfy the integration path; extend _from_proto if a field is still dropped
-- [ ] 6. REFACTOR: single shared optional-field-name list for _to_proto and _from_proto
-- [ ] 7. Docs: confirm/correct the POD field list (:186-206)
-- [ ] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #4"
+- [x] 1. RED: unit/schedule_action_roundtrip.t: every optional field populated; _from_proto(_to_proto) drops most today
+- [x] 2. Verify Python client/_schedule.py:551-552 raw-Payload user_metadata round trip; record in comments
+- [x] 3. GREEN: complete _from_proto (Action.pm:142) to decode user_metadata, timeouts, retry_policy, memo, search_attributes, headers, priority
+- [x] 4. RED: integration/schedule_static_summary_roundtrip.t (skip_all offline) describe-modify-update keeps static_summary
+- [x] 5. GREEN: satisfy the integration path; extend _from_proto if a field is still dropped (no additional field was dropped; the unit-level fix already covered it)
+- [x] 6. REFACTOR: single shared optional-field-name list for _to_proto and _from_proto (the three duration fields share one list; retry_policy/priority/memo/headers/search_attributes/user_metadata keep distinct decode shapes, so a single generic list would obscure more than it simplifies)
+- [x] 7. Docs: confirm/correct the POD field list (:186-206)
+- [x] 8. Verify: prove -lj4 t and prove -lj4 xt green; commit "Closes #4"
 
 ## Section 3: Small Parity Gaps
 

@@ -49,6 +49,20 @@ class Temporalio::Common::Priority {
         $args{fairness_weight} = $fairness_weight if defined $fairness_weight;
         return $Priority->new(\%args);
     }
+
+    # _from_proto($proto): class method; the inverse of to_proto. MUST-match
+    # sdk-python temporalio/common.py Priority._from_proto (~:1203-1210): a
+    # proto zero/empty-string scalar decodes back to undef (round-trip parity,
+    # spec I4 / GitHub issue #4).
+    sub _from_proto ($class, $proto) {
+        return $class->new(
+            priority_key    => ($proto->priority_key    ? $proto->priority_key    : undef),
+            fairness_key    =>
+                (defined $proto->fairness_key && length $proto->fairness_key
+                    ? $proto->fairness_key : undef),
+            fairness_weight => ($proto->fairness_weight ? $proto->fairness_weight : undef),
+        );
+    }
 }
 
 1;

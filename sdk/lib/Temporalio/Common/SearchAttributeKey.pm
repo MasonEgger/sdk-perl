@@ -63,6 +63,51 @@ class Temporalio::Common::SearchAttributeKey {
             indexed_value_type => 7);
     }
 
+    # Maps a stored payload "type" metadata string back to the factory method
+    # that built it (the reverse of the seven factories above). MUST-match
+    # sdk-python SearchAttributeKey._from_metadata_type (common.py:524-541):
+    # the type metadata is usually the PascalCase form (e.g. "KeywordList")
+    # but the server rarely emits the SCREAMING_SNAKE_CASE
+    # temporal.api.enums.v1.IndexedValueType name instead (e.g.
+    # "INDEXED_VALUE_TYPE_KEYWORD_LIST"), so both forms map to the same
+    # factory. An unrecognized type is ignored (returns undef), never an
+    # exception; this stays forward-compatible with a server-added SA type
+    # this SDK doesn't know yet.
+    my %FACTORY_METHOD_FOR_TYPE = (
+        Text        => 'text',
+        Keyword     => 'keyword',
+        Int         => 'int',
+        Double      => 'double',
+        Bool        => 'bool',
+        Datetime    => 'datetime',
+        KeywordList => 'keyword_list',
+
+        INDEXED_VALUE_TYPE_TEXT         => 'text',
+        INDEXED_VALUE_TYPE_KEYWORD      => 'keyword',
+        INDEXED_VALUE_TYPE_INT          => 'int',
+        INDEXED_VALUE_TYPE_DOUBLE       => 'double',
+        INDEXED_VALUE_TYPE_BOOL         => 'bool',
+        INDEXED_VALUE_TYPE_DATETIME     => 'datetime',
+        INDEXED_VALUE_TYPE_KEYWORD_LIST => 'keyword_list',
+    );
+
+    # _from_metadata_type($name, $metadata_type): class method.
+    sub _from_metadata_type ($class, $name, $metadata_type) {
+        my $method = $FACTORY_METHOD_FOR_TYPE{ $metadata_type // '' };
+        return undef unless $method;
+        return $class->$method($name);
+    }
+
+    # decode_value($payload): the inverse of encode_value. JSON-decodes the
+    # payload data, then undoes the Bool normalization (JSON true/false ->
+    # 1/0). Always json/plain (encode_value never uses any other encoding,
+    # spec section 7.4), so decode needs no data-converter/codec chain.
+    method decode_value ($payload) {
+        my $json = JSON::PP->new->allow_nonref(1)->utf8(1);
+        my $value = $json->decode($payload->data);
+        return $metadata_type eq 'Bool' ? ($value ? 1 : 0) : $value;
+    }
+
     # value_set($value) -> a Temporalio::Common::SearchAttributeUpdate that sets
     # this key to $value (spec section 24; MUST-match sdk-ruby Key#value_set). An
     # undef value is rejected — use value_unset to delete (sdk-ruby raises the
@@ -221,6 +266,13 @@ Class method constructing a boolean-typed search attribute key with the given na
 =head2 datetime
 
 Class method constructing a datetime-typed search attribute key.
+
+=head2 decode_value
+
+    my $value = $key->decode_value($payload);
+
+The inverse of C<encode_value>: JSON-decodes a C<Payload> produced by C<encode_value>
+back into a Perl value (booleans normalize back to C<1>/C<0>).
 
 =head2 double
 

@@ -7,6 +7,9 @@ no warnings 'experimental::class';
 
 use Future::AsyncAwait;
 use Scalar::Util ();
+use Temporalio::Common::Priority ();
+use Temporalio::Common::RetryPolicy ();
+use Temporalio::Common::TypedSearchAttributes ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
 
@@ -43,6 +46,16 @@ class Temporalio::Schedule::Action::StartWorkflow
     # When constructed from a describe response, the args are raw Payloads kept
     # verbatim so describe->modify->update re-emits identical bytes.
     field $_raw_input        :param = undef;
+
+    # Workflow/run/task timeout: identical seconds<->Duration shape in both
+    # directions, so both _to_proto and _from_proto iterate this one
+    # (accessor field name => proto field name) list rather than repeating the
+    # same pattern three times each (spec I4 / GitHub issue #4 REFACTOR step).
+    my @DURATION_FIELDS = (
+        [ execution_timeout => 'workflow_execution_timeout' ],
+        [ run_timeout       => 'workflow_run_timeout' ],
+        [ task_timeout      => 'workflow_task_timeout' ],
+    );
 
     ADJUST {
         $args //= [];
@@ -98,12 +111,16 @@ class Temporalio::Schedule::Action::StartWorkflow
             $info{input} = $Payloads->new({ payloads => [@payloads] });
         }
 
-        $info{workflow_execution_timeout} = _duration($execution_timeout)
-            if defined $execution_timeout;
-        $info{workflow_run_timeout} = _duration($run_timeout)
-            if defined $run_timeout;
-        $info{workflow_task_timeout} = _duration($task_timeout)
-            if defined $task_timeout;
+        my %timeout_field_value = (
+            execution_timeout => $execution_timeout,
+            run_timeout       => $run_timeout,
+            task_timeout      => $task_timeout,
+        );
+        for my $pair (@DURATION_FIELDS) {
+            my ($field, $proto_field) = @$pair;
+            my $seconds = $timeout_field_value{$field};
+            $info{$proto_field} = _duration($seconds) if defined $seconds;
+        }
         $info{retry_policy} = $retry_policy->to_proto if defined $retry_policy;
         $info{priority}     = $priority->to_proto if defined $priority;
 
@@ -138,14 +155,62 @@ class Temporalio::Schedule::Action::StartWorkflow
         return $Action->new({ start_workflow => $NewInfo->new(\%info) });
     }
 
-    # _from_proto($info) — class method; keep the input Payloads raw.
+    # _from_proto($info): class method; keep the input Payloads raw, and
+    # likewise memo/headers/static_summary/static_details decode to raw
+    # pass-through Payloads/Payload maps rather than through the data
+    # converter (this is a sync class method with no client to convert with,
+    # the args contract already established for _raw_input). MUST-match
+    # sdk-python client/_schedule.py ScheduleActionStartWorkflow.__init__'s
+    # raw_info branch (~:684-744): every field _to_proto writes decodes back
+    # here (spec I4 / GitHub issue #4, closing the R82 encode-only gap from
+    # commit 8d37317).
     sub _from_proto ($class, $info) {
-        return $class->new(
+        my %args = (
             workflow   => $info->workflow_type ? $info->workflow_type->name : '',
             id         => $info->workflow_id // '',
             task_queue => $info->task_queue ? $info->task_queue->name : '',
             _raw_input => $info->input,
         );
+
+        for my $pair (@DURATION_FIELDS) {
+            my ($field, $proto_field) = @$pair;
+            my $duration = $info->$proto_field;
+            $args{$field} = _duration_to_seconds($duration) if defined $duration;
+        }
+
+        if (defined(my $retry_policy = $info->retry_policy)) {
+            $args{retry_policy} =
+                Temporalio::Common::RetryPolicy->_from_proto($retry_policy);
+        }
+        if (defined(my $priority = $info->priority)) {
+            $args{priority} = Temporalio::Common::Priority->_from_proto($priority);
+        }
+
+        if (defined(my $memo = $info->memo)) {
+            my $fields = $memo->fields // {};
+            $args{memo} = { %$fields } if %$fields;
+        }
+        if (defined(my $header = $info->header)) {
+            my $fields = $header->fields // {};
+            $args{headers} = { %$fields } if %$fields;
+        }
+        if (defined(my $sa = $info->search_attributes)) {
+            my $decoded =
+                Temporalio::Common::TypedSearchAttributes->_from_proto($sa);
+            $args{search_attributes} = $decoded if @{ $decoded->pairs };
+        }
+
+        # user_metadata -> static_summary/static_details, each a raw
+        # pass-through Payload (mirrors sdk-python raw_info.user_metadata.summary
+        # / .details, ~:730-739).
+        if (defined(my $user_metadata = $info->user_metadata)) {
+            $args{static_summary} = $user_metadata->summary
+                if defined $user_metadata->summary;
+            $args{static_details} = $user_metadata->details
+                if defined $user_metadata->details;
+        }
+
+        return $class->new(%args);
     }
 
     sub _duration ($seconds) {
@@ -153,6 +218,11 @@ class Temporalio::Schedule::Action::StartWorkflow
         my $whole = int($seconds);
         my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
         return $Duration->new({ seconds => $whole, nanos => $nanos });
+    }
+
+    sub _duration_to_seconds ($duration) {
+        return undef unless defined $duration;
+        return ($duration->seconds // 0) + ($duration->nanos // 0) / 1_000_000_000;
     }
 }
 
@@ -189,6 +259,19 @@ search attributes through the client's data converter. An arg that is already a
 C<Payload> passes through unchanged. When the action was decoded from a describe
 response the input is held as raw Payloads so a describe-modify-update round
 trip re-emits identical bytes.
+
+C<_from_proto> (the class method a describe response builds an action through)
+decodes every field C<_to_proto> writes: C<workflow>/C<id>/C<task_queue>/C<args>
+(args stay raw C<Payloads>, per above), C<execution_timeout>/C<run_timeout>/
+C<task_timeout> (seconds), C<retry_policy>
+(a L<Temporalio::Common::RetryPolicy>), C<priority> (a
+L<Temporalio::Common::Priority>), C<search_attributes> (a
+L<Temporalio::Common::TypedSearchAttributes>), and C<memo>/C<headers>/
+C<static_summary>/C<static_details> (each a raw pass-through C<Payload> or a
+C<{ name => Payload }> map, since this is a synchronous class method with no
+data converter to decode through). A describe-modify-update cycle that rebuilds a
+new action from a decoded one's accessors therefore carries every field
+forward instead of silently dropping it (spec I4 / GitHub issue #4).
 
 =head1 CONSTRUCTOR
 
@@ -242,26 +325,36 @@ Accessor returning the retry policy.
 
 =head2 memo
 
-Accessor returning the memo hashref.
+Accessor returning the memo hashref. When the action was constructed directly
+the values are whatever the caller passed; when decoded from a describe
+response (C<_from_proto>) each value is a raw pass-through C<Payload>.
 
 =head2 search_attributes
 
-Accessor returning the typed search attributes.
+Accessor returning the typed search attributes (a
+L<Temporalio::Common::TypedSearchAttributes>, including when decoded from a
+describe response).
 
 =head2 headers
 
-Accessor returning the headers hashref.
+Accessor returning the headers hashref. Same raw-C<Payload>-on-decode
+convention as C<memo>.
 
 =head2 priority
 
-Accessor returning the priority.
+Accessor returning the priority (a L<Temporalio::Common::Priority>, including
+when decoded from a describe response).
 
 =head2 static_summary
 
-Accessor returning the fixed single-line workflow summary (string or Payload).
+Accessor returning the fixed single-line workflow summary (string or Payload
+when set directly; always a raw pass-through C<Payload> when decoded from a
+describe response).
 
 =head2 static_details
 
-Accessor returning the fixed workflow details (string or Payload).
+Accessor returning the fixed workflow details (string or Payload when set
+directly; always a raw pass-through C<Payload> when decoded from a describe
+response).
 
 =cut

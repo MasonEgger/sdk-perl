@@ -56,6 +56,26 @@ class Temporalio::Common::TypedSearchAttributes {
         }
         return $SearchAttributes->new({ indexed_fields => \%indexed_fields });
     }
+
+    # _from_proto($sa): class method; the inverse of to_proto. MUST-match
+    # sdk-python converter/_search_attributes.py decode_typed_search_attributes:
+    # a field with no (or an unrecognized) "type" metadata is silently skipped
+    # (round-trip parity, spec I4 / GitHub issue #4). Undef/empty input decodes
+    # to an empty collection, mirroring TypedSearchAttributes.empty.
+    sub _from_proto ($class, $sa) {
+        my $fields = (defined $sa ? $sa->indexed_fields : undef) // {};
+        my @pairs;
+        for my $name (sort keys %$fields) {
+            my $payload = $fields->{$name};
+            my $metadata_type = $payload->metadata->{type};
+            next unless defined $metadata_type;
+            my $key = Temporalio::Common::SearchAttributeKey->_from_metadata_type(
+                $name, $metadata_type);
+            next unless defined $key;
+            push @pairs, [ $key, $key->decode_value($payload) ];
+        }
+        return $class->new(\@pairs);
+    }
 }
 
 # Spec section 7.4 mandates the positional constructor `->new(\@pairs)`.

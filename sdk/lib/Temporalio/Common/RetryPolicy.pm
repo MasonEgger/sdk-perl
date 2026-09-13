@@ -46,6 +46,26 @@ class Temporalio::Common::RetryPolicy {
         return $RetryPolicy->new(\%args);
     }
 
+    # _from_proto($proto): class method; the inverse of to_proto. MUST-match
+    # sdk-python temporalio/common.py RetryPolicy.from_proto (~:63-75): an
+    # unset maximum_interval decodes to undef, an empty
+    # non_retryable_error_types decodes to undef (round-trip parity, spec I4 /
+    # GitHub issue #4).
+    sub _from_proto ($class, $proto) {
+        my $maximum_interval = $proto->maximum_interval;
+        my $errors           = $proto->non_retryable_error_types;
+        return $class->new(
+            initial_interval    => _duration_to_seconds($proto->initial_interval),
+            backoff_coefficient => $proto->backoff_coefficient,
+            maximum_interval    =>
+                (defined $maximum_interval ? _duration_to_seconds($maximum_interval)
+                                            : undef),
+            maximum_attempts    => $proto->maximum_attempts,
+            non_retryable_error_types =>
+                ($errors && @$errors ? [ @$errors ] : undef),
+        );
+    }
+
     # Helper subs live INSIDE the class block: a bare `class` file compiles
     # file-scope subs into main::, so an outside sub would be uncallable here.
     sub _duration ($seconds) {
@@ -54,6 +74,11 @@ class Temporalio::Common::RetryPolicy {
         my $whole = int($seconds);
         my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
         return $Duration->new({ seconds => $whole, nanos => $nanos });
+    }
+
+    sub _duration_to_seconds ($duration) {
+        return undef unless defined $duration;
+        return ($duration->seconds // 0) + ($duration->nanos // 0) / 1_000_000_000;
     }
 }
 
