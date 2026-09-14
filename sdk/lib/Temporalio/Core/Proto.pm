@@ -258,12 +258,18 @@ Temporalio::Core::Proto - load vendored Temporal protos, generate message classe
 
 =head1 DESCRIPTION
 
-Parses the complete vendored proto trees under C<share/proto> (the Temporal
-C<api_upstream> and coresdk C<local> trees, re-vendored from the pinned
-sdk-rust tag via C<xt/author/vendor-protos.pl>) with the pure-Perl
-L<Protobuf::Parser> — no C<protoc>, no C<libprotobuf> — and installs a Perl
-class for every message under C<Temporalio::Proto::*> via
+Parses the complete vendored proto trees under C<share/proto> with the
+pure-Perl L<Protobuf::Parser> (no C<protoc>, no C<libprotobuf>) and installs a
+Perl class for every message under C<Temporalio::Proto::*> via
 L<Protobuf::Class::Generator>.
+
+Every vendored file is byte-identical to the pinned sdk-rust tag, which holds
+them under C<crates/common/protos/>: the Temporal C<api_upstream> tree, the
+coresdk C<local> tree, C<google/rpc>, and (for the raw cloud, test, and health
+service clients) C<api_cloud_upstream>, C<testsrv_upstream>,
+C<grpc/health/v1>, and C<protoc-gen-openapiv2/options>. Re-vendor from the tag
+path, never from a checkout's current C<HEAD>; a file from a later upstream can
+carry a field the pinned c-bridge's own decode drops on the way through.
 
 The package mapping is mechanical: the proto package's leading C<temporal>
 component is dropped, the remaining components are CamelCased, and the result
@@ -292,6 +298,10 @@ Returns the JSON descriptor / mapping used when resolving messages.
 =head2 load
 
 Loads and parses the vendored proto trees, generating the C<Temporalio::Proto::*> message classes. Idempotent.
+
+The load is eager and whole-graph: the first call to C<load>, C<schema>, C<json>, or C<resolve> parses every root, including the cloud and testservice roots that only the raw C<CloudService> and C<TestService> handles use. Measured on the F5 re-vendor, warm cache: 67 files, 1.8s, 40 MB peak RSS without those roots and C<grpc/health>; 87 files, 2.4s, 45 MB with them. So a client that never touches a raw cloud or test handle still pays about 0.6s and 5 MB at startup.
+
+That cost is deliberate, because neither way of avoiding it is currently safe. Deferring the two trees to first use fails because L<Protobuf::Schema>'s C<resolve> latches: it returns early once the schema is resolved, so a file added afterwards is indexed but never type-resolved or feature-resolved, and there is no reset short of patching the L<Protobuf> distribution. Parsing them into a I<second> schema fails because C<temporal/api/cloud/nexus/v1/message.proto>, which C<temporal/api/cloud/cloudservice/v1/request_response.proto> pulls in, imports C<temporal/api/common/v1/message.proto>: the second schema would regenerate the shared C<Temporalio::Proto::Api::Common::V1::*> classes over the ones the main schema already installed, and those classes back every payload on the hot path. Revisit if L<Protobuf::Schema> grows an incremental resolve, or a generator mode that skips already-installed packages.
 
 =head2 resolve
 

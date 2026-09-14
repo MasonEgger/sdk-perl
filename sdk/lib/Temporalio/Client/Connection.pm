@@ -32,6 +32,27 @@ class Temporalio::Client::Connection {
         health   => 5,
     );
 
+    # _service_code: class-level read of the discriminator table:
+    #
+    #     Temporalio::Client::Connection->_service_code('cloud')   # 3
+    #
+    # Returns undef for an unknown key; rpc_call below turns that into the
+    # Argument throw. It exists so a test can pin the wire values (F5,
+    # GitHub issue #12) without standing up a live connection, and rpc_call
+    # reads it too, so the pins cover the dispatch path rather than a copy of
+    # the table. Signature-less on purpose: a signatured sub ahead of this
+    # class's `field ... :param` declarations trips the 5.38.2 parser trap
+    # recorded in .ai-sessions/lessons.md.
+    sub _service_code {
+        my ($class, $name) = @_;
+        return defined $name ? $RPC_SERVICE{$name} : undef;
+    }
+
+    # The service keys rpc_call accepts, sorted, for its error message.
+    sub _service_names {
+        return sort keys %RPC_SERVICE;
+    }
+
     field $runtime :param;          # Temporalio::Runtime (must outlive us)
     field $ptr     :param = undef;  # TemporalCoreConnection* (undef until the
                                     # deferred connect completes when lazy)
@@ -148,10 +169,10 @@ class Temporalio::Client::Connection {
         my $timeout        = delete $opts{timeout} // 0;
         my $response_class = delete $opts{response_class};
         my $error_context  = delete $opts{error_context} // {};
-        my $service_code = $RPC_SERVICE{$service}
+        my $service_code = __PACKAGE__->_service_code($service)
             // Temporalio::Exception::Argument->throw(
                 message => "unknown RPC service '$service' (expected one of "
-                         . join(', ', sort keys %RPC_SERVICE) . ')');
+                         . join(', ', __PACKAGE__->_service_names) . ')');
         Temporalio::Exception::Argument->throw(
             message => 'rpc_call requires a proto request message object')
             unless Scalar::Util::blessed($request) && $request->can('encode');

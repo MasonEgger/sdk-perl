@@ -200,11 +200,11 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #18"
 
 ### Step F5: Re-vendor Cloud, Test, and Health Protos From the Pinned Tag (task)
-- [ ] 1. Scope: byte-identical to v0.4.0 crates/common/protos; provenance corrected; codes pinned; lazy load if feasible
-- [ ] 2. Tooling: git, cmp, diff -rq
-- [ ] 3. Do: re-vendor; _service_code accessor and 3/4/5 test; response_class assertion; lazy-load probe and implementation or POD cost note; lessons and ABOUTME rewrite
-- [ ] 4. Verify: diff -rq identical; both suites green
-- [ ] 5. Document: session summary with corrected provenance; commit "Refs #12"
+- [x] 1. Scope: byte-identical to v0.4.0 crates/common/protos; provenance corrected; codes pinned; lazy load if feasible
+- [x] 2. Tooling: git, cmp, diff -rq
+- [x] 3. Do: re-vendor; _service_code accessor and 3/4/5 test; response_class assertion; lazy-load probe and implementation or POD cost note; lessons and ABOUTME rewrite
+- [x] 4. Verify: diff -rq identical; both suites green
+- [x] 5. Document: session summary with corrected provenance; commit "Refs #12"
 
 ### Step F6: Make Fork-Pool Frame Pairing Token-Exact
 - [ ] 1. RED: late cancel for finished token, orphan hbd after failed encode, chain dies records nothing, hold-at-accept race, is_worker_shutdown parity; fails today

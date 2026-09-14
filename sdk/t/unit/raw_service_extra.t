@@ -1,10 +1,11 @@
-# ABOUTME: I12 pins: the cloud/test/health raw service handles are generated
-# ABOUTME: from the newly vendored proto descriptors (../sdk-rust checkout HEAD
-# ABOUTME: 3839fa94, api_cloud_upstream/testsrv_upstream/grpc trees; the pinned
-# ABOUTME: v0.4.0 tag predates them), Client's three new accessors delegate to
-# ABOUTME: Connection, each handle stamps its own bridge service =>
-# ABOUTME: cloud|test|health key (discriminator values 3/4/5, header lines
-# ABOUTME: 8-14), and HealthService's server-streaming Watch rpc is skipped.
+# ABOUTME: I12/F5 pins: the cloud/test/health raw service handles are generated
+# ABOUTME: from proto descriptors vendored byte-for-byte from the pinned v0.4.0
+# ABOUTME: tag, which holds all four trees under crates/common/protos
+# ABOUTME: (api_cloud_upstream, testsrv_upstream, grpc, protoc-gen-openapiv2).
+# ABOUTME: Client's three accessors delegate to Connection, each handle stamps
+# ABOUTME: its own bridge service => cloud|test|health key (discriminators
+# ABOUTME: 3/4/5, header lines 8-14) and its descriptor's response class, and
+# ABOUTME: HealthService's server-streaming Watch rpc is skipped.
 use v5.38;
 use warnings;
 use utf8;
@@ -13,6 +14,7 @@ use Test2::V1;
 use Future ();
 use Temporalio::Client ();
 use Temporalio::Client::CloudService ();
+use Temporalio::Client::Connection ();
 use Temporalio::Client::HealthService ();
 use Temporalio::Client::RawService ();
 use Temporalio::Client::TestService ();
@@ -134,6 +136,103 @@ T2->subtest('HealthService skips the server-streaming Watch rpc' => sub {
     T2->ok($watch->{server_streaming}, 'and it is server-streaming');
 });
 
+T2->subtest('the bridge service discriminators are pinned to the C header' => sub {
+    # TemporalCoreRpcService, lines 8-14 of
+    # ../sdk-rust/crates/sdk-core-c-bridge/include/temporal-sdk-core-c-bridge.h
+    # at the pinned v0.4.0 tag:
+    #
+    #     typedef enum TemporalCoreRpcService {
+    #       Workflow = 1,
+    #       Operator,
+    #       Cloud,
+    #       Test,
+    #       Health,
+    #     } TemporalCoreRpcService;
+    #
+    # Only the first arm carries a literal, so the other four are positional:
+    # inserting a service ahead of Cloud renumbers everything after it. These
+    # are the integers Connection::rpc_call hands the c-bridge, so a wrong one
+    # dispatches a cloud call at the test service. Before F5 the values lived
+    # in a file lexical no test read, and the "discriminator 3/4/5" phrases in
+    # the subtest below were decoration.
+    my %expected = (
+        workflow => 1,
+        operator => 2,
+        cloud    => 3,
+        test     => 4,
+        health   => 5,
+    );
+
+    T2->is(Temporalio::Client::Connection->_service_code($_), $expected{$_},
+        "service '$_' is discriminator $expected{$_}")
+        for sort keys %expected;
+
+    T2->is([Temporalio::Client::Connection->_service_names],
+        [sort keys %expected],
+        'those five are the only service keys rpc_call accepts');
+    T2->is(Temporalio::Client::Connection->_service_code('nope'), undef,
+        'an unknown service key reads back undef (rpc_call throws on it)');
+    T2->is(Temporalio::Client::Connection->_service_code(undef), undef,
+        'and so does an undefined key, without an uninitialized warning');
+});
+
+T2->subtest('rpc_call rejects a service key outside that table' => sub {
+    # The lookup and the error text moved behind _service_code/_service_names
+    # in F5, so the dispatch path gets its own assertion: a typo'd service key
+    # has to surface as an Argument throw naming the five accepted keys, not
+    # as a bare undef discriminator handed to the c-bridge.
+    #
+    # A deferred connect rather than a synthetic pointer, for two reasons:
+    # rpc_call runs the service lookup before it awaits connected_ptr, so the
+    # coderef below standing in for a live connect is itself the assertion
+    # that the guard fires first; and a connection holding no pointer is
+    # reclaimed without DESTROY's free-without-close warning.
+    my $connection = Temporalio::Client::Connection->new(
+        runtime => undef,
+        connect => sub { die "rpc_call reached the deferred connect\n" },
+    );
+    my $request = Temporalio::Core::Proto::resolve(
+        'temporal.api.cloud.cloudservice.v1.GetUsersRequest')->new({});
+
+    my $error = T2->dies(sub {
+        $connection->rpc_call('GetUsers', $request, service => 'nope')->get;
+    });
+    T2->ok($error, 'an unknown service key dies');
+    T2->isa_ok($error, ['Temporalio::Exception::Argument'],
+        'as an Argument exception');
+    T2->like($error->message,
+        qr/\Aunknown RPC service 'nope' \(expected one of cloud, health, operator, test, workflow\)\z/,
+        'naming the bad key and listing the five rpc_call accepts');
+});
+
+T2->subtest('the cloud protos carry the pinned tag vintage, not a later one'
+    => sub {
+        # F5: every vendored cloud/testservice/health/openapiv2 file is
+        # byte-identical to v0.4.0:crates/common/protos/<tree>/<path>. The one
+        # file that had drifted was connectivityrule/v1/message.proto, where a
+        # post-tag upstream added `bool enable_stable_ips = 1` to
+        # PublicConnectivityRule. The installed 0.4.0 c-bridge decodes cloud
+        # responses with its own prost types, so a field the tag does not know
+        # is dropped on the way through and a Perl caller would read a value
+        # that never survives the round trip. An empty PublicConnectivityRule
+        # is the tag's shape; this fails the moment someone re-vendors from a
+        # sdk-rust checkout HEAD instead of from the pin.
+        my $schema  = Temporalio::Core::Proto::schema();
+        my $public  = $schema->message(
+            'temporal.api.cloud.connectivityrule.v1.PublicConnectivityRule');
+        T2->ok($public, 'the cloud connectivityrule tree is in the schema');
+        T2->is([map { $_->name } @{ $public->fields }], [],
+            'PublicConnectivityRule has no fields at the pinned tag');
+
+        # Control: a sibling in the same file that does carry fields, so the
+        # assertion above cannot pass by resolving an empty stub.
+        my $private = $schema->message(
+            'temporal.api.cloud.connectivityrule.v1.PrivateConnectivityRule');
+        T2->is([map { $_->name } @{ $private->fields }],
+            [qw(connection_id gcp_project_id region)],
+            'PrivateConnectivityRule still carries its three fields');
+    });
+
 T2->subtest('each handle stamps its own bridge service key' => sub {
     my $connection = FakeConnection->new;
     my $cloud      = $connection->cloud_service;
@@ -147,8 +246,23 @@ T2->subtest('each handle stamps its own bridge service key' => sub {
     T2->is($future->get, 'FAKE-RESPONSE', 'resolving with the rpc_call result');
     T2->is($connection->last_call->{rpc}, 'GetUsers',
         'the CamelCase rpc name the c-bridge dispatches on rides through');
+    T2->ref_is($connection->last_call->{request}, $req,
+        'the request message rides through');
     T2->is($connection->last_call->{opts}{service}, 'cloud',
         'the cloud handle stamps service => cloud (discriminator 3)');
+
+    # The response class comes from the rpc's descriptor output type, not from
+    # rpc_call's s/Request$/Response/ fallback (raw_service.t pins the same
+    # thing for the operator service). Both spellings are asserted: the
+    # resolved class, and the literal package the proto-to-Perl mapping
+    # produces for the cloud package, which nothing else in the suite pins.
+    T2->is($connection->last_call->{opts}{response_class},
+        Temporalio::Core::Proto::resolve(
+            'temporal.api.cloud.cloudservice.v1.GetUsersResponse'),
+        'the response class comes from the descriptor output type');
+    T2->is($connection->last_call->{opts}{response_class},
+        'Temporalio::Proto::Api::Cloud::Cloudservice::V1::GetUsersResponse',
+        'and it is the generated class for the cloud proto package');
 
     $test->get_current_time(
         Temporalio::Core::Proto::resolve('google.protobuf.Empty')->new({}));
