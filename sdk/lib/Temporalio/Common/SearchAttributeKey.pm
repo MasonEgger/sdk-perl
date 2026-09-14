@@ -7,7 +7,6 @@ use feature 'class';
 no warnings 'experimental::class';
 
 use JSON::PP ();
-use Scalar::Util ();
 use Temporalio::Common::SearchAttributeUpdate ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Payload ();
@@ -101,11 +100,63 @@ class Temporalio::Common::SearchAttributeKey {
     # decode_value($payload): the inverse of encode_value. JSON-decodes the
     # payload data, then undoes the Bool normalization (JSON true/false ->
     # 1/0). Always json/plain (encode_value never uses any other encoding,
-    # spec section 7.4), so decode needs no data-converter/codec chain.
+    # spec section 7.4), so decode needs no data-converter/codec chain. This is
+    # the strict form: a payload this key did not encode (another encoding,
+    # malformed data) dies. The wire-decode path uses _decode_value_or_skip.
     method decode_value ($payload) {
         my $json = JSON::PP->new->allow_nonref(1)->utf8(1);
         my $value = $json->decode($payload->data);
         return $metadata_type eq 'Bool' ? ($value ? 1 : 0) : $value;
+    }
+
+    # _decode_value_or_skip($payload) -> (value), or the empty list when the
+    # field must be skipped. The forgiving counterpart of decode_value, used by
+    # the wire-decode loop in TypedSearchAttributes::_decode_fields, where a
+    # value the server indexed under some other convention must never take the
+    # whole decode down. MUST-match sdk-python
+    # converter/_search_attributes.py decode_typed_search_attributes
+    # (:183-202): a value that will not decode is ignored, a list value for a
+    # non-KeywordList key yields its single element (or is ignored when it
+    # holds anything other than one), and a value whose type does not match the
+    # key is ignored. Python's final check is an isinstance against the key's
+    # origin_value_type; a Perl scalar carries no comparable str/int/float
+    # distinction, so the check here covers what Perl can tell apart: decode
+    # failure, list-versus-scalar shape, a JSON object where a scalar belongs,
+    # and Bool (which must be a JSON boolean, not any truthy scalar).
+    method _decode_value_or_skip ($payload) {
+        return () unless $payload->can('data');
+        my $data = $payload->data;
+        return () unless defined $data;
+
+        my $value;
+        {
+            local $@;
+            my $decoded = eval {
+                JSON::PP->new->allow_nonref(1)->utf8(1)->decode($data);
+            };
+            return () if $@;
+            $value = $decoded;
+        }
+
+        if ($metadata_type eq 'KeywordList') {
+            return () unless ref $value eq 'ARRAY';
+            # The skip rule has to be at least as strict as the re-encode
+            # (_normalize), so both call the one predicate: a list this decode
+            # admits but encode_value would reject lands in the typed
+            # collection and then dies on the next update (F9).
+            return () if grep { !_is_keyword_list_element($_) } @$value;
+            return ($value);
+        }
+        if (ref $value eq 'ARRAY') {
+            return () unless @$value == 1;
+            $value = $value->[0];
+        }
+        if ($metadata_type eq 'Bool') {
+            return () unless ref $value eq 'JSON::PP::Boolean';
+            return ($value ? 1 : 0);
+        }
+        return () if ref $value || !defined $value;
+        return ($value);
     }
 
     # value_set($value) -> a Temporalio::Common::SearchAttributeUpdate that sets
@@ -162,14 +213,7 @@ class Temporalio::Common::SearchAttributeKey {
                     "KeywordList search attribute '$name' requires an arrayref");
             }
             for my $v (@$value) {
-                if (ref $v || !defined $v
-                    || Scalar::Util::blessed($v)) {
-                    Temporalio::Exception::Argument->throw(message =>
-                        "KeywordList search attribute '$name' values must be strings");
-                }
-                # Reject non-string scalars (numbers) to match the
-                # all-strings invariant of sdk-python's keyword list.
-                unless (_is_stringish($v)) {
+                unless (_is_keyword_list_element($v)) {
                     Temporalio::Exception::Argument->throw(message =>
                         "KeywordList search attribute '$name' values must be strings");
                 }
@@ -177,6 +221,16 @@ class Temporalio::Common::SearchAttributeKey {
             return [ map { "$_" } @$value ];
         }
         return $value;
+    }
+
+    # The single "may this value sit in a KeywordList?" predicate. _normalize
+    # (encode) and _decode_value_or_skip (wire decode) both call it so the two
+    # rules cannot drift apart again: sdk-python's keyword list is all
+    # strings, so a number, an undef, a ref, or a blessed object (ref covers
+    # the last two) is neither encodable nor decodable as one.
+    sub _is_keyword_list_element ($v) {
+        return 0 if !defined $v || ref $v;
+        return _is_stringish($v) ? 1 : 0;
     }
 
     sub _is_stringish ($v) {
@@ -272,7 +326,10 @@ Class method constructing a datetime-typed search attribute key.
     my $value = $key->decode_value($payload);
 
 The inverse of C<encode_value>: JSON-decodes a C<Payload> produced by C<encode_value>
-back into a Perl value (booleans normalize back to C<1>/C<0>).
+back into a Perl value (booleans normalize back to C<1>/C<0>). Strict: a payload
+this key did not encode (another encoding, malformed data) dies. The wire-decode
+path in L<Temporalio::Common::TypedSearchAttributes> skips such a payload
+instead; see L<Temporalio::Schedule::Action/Search attributes the SDK cannot type>.
 
 =head2 double
 

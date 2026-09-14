@@ -49,24 +49,35 @@ class Temporalio::Common::RetryPolicy {
     }
 
     # _from_proto($proto): class method; the inverse of to_proto. MUST-match
-    # sdk-python temporalio/common.py RetryPolicy.from_proto (~:63-75): an
+    # sdk-python temporalio/common.py RetryPolicy.from_proto (:62-74): an
     # unset maximum_interval decodes to undef, an empty
     # non_retryable_error_types decodes to undef (round-trip parity, spec I4 /
     # GitHub issue #4).
+    #
+    # A scalar field left unset reads undef on a HAND-BUILT proto (a
+    # wire-decoded one carries the proto3 default instead), and passing that
+    # undef through would override this class's default rather than fall back
+    # to it: the policy would come back with no backoff coefficient at all,
+    # where Python's proto reads can never produce None. So an undef read is
+    # omitted from the constructor call and the field default stands (F9).
     sub _from_proto ($class, $proto) {
+        my $initial_interval = Temporalio::Core::Proto::seconds_from_duration(
+            $proto->initial_interval);
         my $maximum_interval = $proto->maximum_interval;
+        my $backoff          = $proto->backoff_coefficient;
+        my $maximum_attempts = $proto->maximum_attempts;
         my $errors           = $proto->non_retryable_error_types;
         return $class->new(
-            initial_interval    =>
-                Temporalio::Core::Proto::seconds_from_duration(
-                    $proto->initial_interval),
-            backoff_coefficient => $proto->backoff_coefficient,
+            (defined $initial_interval
+                ? (initial_interval => $initial_interval) : ()),
+            (defined $backoff ? (backoff_coefficient => $backoff) : ()),
+            (defined $maximum_attempts
+                ? (maximum_attempts => $maximum_attempts) : ()),
             maximum_interval    =>
                 (defined $maximum_interval
                     ? Temporalio::Core::Proto::seconds_from_duration(
                         $maximum_interval)
                     : undef),
-            maximum_attempts    => $proto->maximum_attempts,
             non_retryable_error_types =>
                 ($errors && @$errors ? [ @$errors ] : undef),
         );

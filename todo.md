@@ -237,14 +237,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #1"
 
 ### Step F9: Keep Untyped Search Attributes Through Schedule Action Decode
-- [ ] 1. RED: untyped residual survives, byte-identity round trip, wire-crossing all value types, undef metadata, skip on bad encoding, RetryPolicy defaults, priority undef; fails today
-- [ ] 2. Verify _schedule.py and _search_attributes.py contracts; cite
-- [ ] 3. GREEN: residual or documented limitation; metadata guard; decode_value skip; proto3 defaults
-- [ ] 4. RED: none
-- [ ] 5. GREEN: none
-- [ ] 6. REFACTOR: shared decode-or-skip helper
-- [ ] 7. Docs: Action POD on untyped handling
-- [ ] 8. Verify: both suites green; commit "Refs #4"
+- [x] 1. RED: untyped residual survives, byte-identity round trip, wire-crossing all value types, undef metadata, skip on bad encoding, RetryPolicy defaults, priority undef; fails today
+- [x] 2. Verify _schedule.py and _search_attributes.py contracts; cite
+- [x] 3. GREEN: residual or documented limitation; metadata guard; decode_value skip; proto3 defaults
+- [x] 4. RED: none
+- [x] 5. GREEN: none
+- [x] 6. REFACTOR: shared decode-or-skip helper
+- [x] 7. Docs: Action POD on untyped handling
+- [x] 8. Verify: both suites green; commit "Refs #4"
 
 ### Step F10: Round the Shared Duration Pair Correctly
 - [ ] 1. RED: negative fractions, carry at 1e9, string input, NaN and Inf policy, jitter zero fold; fails today

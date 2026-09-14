@@ -57,24 +57,45 @@ class Temporalio::Common::TypedSearchAttributes {
         return $SearchAttributes->new({ indexed_fields => \%indexed_fields });
     }
 
-    # _from_proto($sa): class method; the inverse of to_proto. MUST-match
-    # sdk-python converter/_search_attributes.py decode_typed_search_attributes:
-    # a field with no (or an unrecognized) "type" metadata is silently skipped
-    # (round-trip parity, spec I4 / GitHub issue #4). Undef/empty input decodes
-    # to an empty collection, mirroring TypedSearchAttributes.empty.
-    sub _from_proto ($class, $sa) {
+    # _decode_fields($sa) -> (\@pairs, \%untyped): class method; the one
+    # "decode a search attribute payload or skip" loop, shared by _from_proto
+    # below and by Schedule::Action::StartWorkflow::_from_proto (which also
+    # needs what was skipped). MUST-match sdk-python
+    # converter/_search_attributes.py decode_typed_search_attributes
+    # (:183-202): a field with no "type" metadata, an unrecognized type, or a
+    # value that will not decode to the key's shape produces no pair. Every
+    # such field lands in %untyped as the VERBATIM payload it arrived as, so a
+    # caller that re-sends the collection loses nothing (F9 / GitHub issue #4);
+    # the metadata map is read through `// {}` because a hand-built payload can
+    # present an undef where the generated class auto-vivifies an empty map.
+    sub _decode_fields ($class, $sa) {
         my $fields = (defined $sa ? $sa->indexed_fields : undef) // {};
-        my @pairs;
+        my (@pairs, %untyped);
         for my $name (sort keys %$fields) {
-            my $payload = $fields->{$name};
-            my $metadata_type = $payload->metadata->{type};
-            next unless defined $metadata_type;
-            my $key = Temporalio::Common::SearchAttributeKey->_from_metadata_type(
-                $name, $metadata_type);
-            next unless defined $key;
-            push @pairs, [ $key, $key->decode_value($payload) ];
+            my $payload       = $fields->{$name};
+            my $metadata_type = ($payload->metadata // {})->{type};
+            my $key           = defined $metadata_type
+                ? Temporalio::Common::SearchAttributeKey->_from_metadata_type(
+                    $name, $metadata_type)
+                : undef;
+            my @value = defined $key ? $key->_decode_value_or_skip($payload) : ();
+            if (@value) {
+                push @pairs, [ $key, $value[0] ];
+            }
+            else {
+                $untyped{$name} = $payload;
+            }
         }
-        return $class->new(\@pairs);
+        return (\@pairs, \%untyped);
+    }
+
+    # _from_proto($sa): class method; the inverse of to_proto. Keeps only the
+    # fields _decode_fields could type; a caller that must also carry the rest
+    # forward calls _decode_fields directly. Undef/empty input decodes to an
+    # empty collection, mirroring TypedSearchAttributes.empty.
+    sub _from_proto ($class, $sa) {
+        my ($pairs) = $class->_decode_fields($sa);
+        return $class->new($pairs);
     }
 }
 
@@ -131,6 +152,15 @@ v0.1 accepts only typed input. A bare untyped hashref — or any pair whose
 key is not a L<Temporalio::Common::SearchAttributeKey> — raises
 L<Temporalio::Exception::Argument>: there is no silent type guessing (spec
 section 7.4).
+
+Decoding is the forgiving direction. A field whose payload carries no
+recognized C<type> metadata, or a value that will not decode to that type's
+shape, is skipped rather than raised on, matching sdk-python's
+C<decode_typed_search_attributes>. Callers that must not lose such a field (a
+schedule action rebuilding itself from a describe response, say) read both
+halves through the internal C<_decode_fields>, which returns the typed pairs
+and the skipped fields as their verbatim payloads. See
+L<Temporalio::Schedule::Action/Search attributes the SDK cannot type>.
 
 =head1 METHODS
 
