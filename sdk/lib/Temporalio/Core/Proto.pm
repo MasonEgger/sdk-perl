@@ -14,6 +14,8 @@ use Protobuf::Schema ();
 use Protobuf::Codec ();
 use Protobuf::JSON ();
 use Protobuf::Class::Generator ();
+use Scalar::Util ();
+use Temporalio::Exception::Argument ();
 use Temporalio::Exception::Runtime ();
 
 # One-shot load guard and the full-name -> generated-package registry that
@@ -88,6 +90,13 @@ sub resolve ($full_name) {
     return $pkg;
 }
 
+# The inclusive bound on google.protobuf.Duration.seconds (10000 years either
+# way), MUST-matched to _DURATION_SECONDS_MAX in protobuf's
+# google/protobuf/internal/well_known_types.py (checked against protobuf
+# 6.33.6). Well inside 2**53, so a value that passes this check also survives
+# the float-to-int64 encode.
+my $DURATION_SECONDS_MAX = 315_576_000_000;
+
 # duration_from_seconds($seconds) -> google.protobuf.Duration instance.
 # Perl-side seconds (possibly fractional) split into Duration { seconds,
 # nanos }. No undef handling here: every call site already guards for
@@ -95,11 +104,54 @@ sub resolve ($full_name) {
 # Converter/Failure.pm's _duration_from_seconds, Common/RetryPolicy.pm's,
 # Client.pm's, Workflow/Runner.pm's, and Schedule::{Policy,Interval,Action,
 # Spec}'s local _duration).
+#
+# Rounding follows Duration._NormalizeDuration and _CheckDurationValid in
+# protobuf's google/protobuf/internal/well_known_types.py (checked against
+# protobuf 6.33.6): seconds and nanos always share a sign, and nanos
+# stay within [-999999999, 999999999]. Two consequences (F10):
+#   1. The fraction is rounded on its ABSOLUTE value and the sign applied
+#      afterwards. The old `int(($seconds - int($seconds)) * 1e9 + 0.5)` split
+#      -1.5 into (-1, -499999999), one nanosecond short, because +0.5 rounds a
+#      negative fraction toward zero.
+#   2. A fraction within half a nanosecond of the next second carries into
+#      seconds. The old form left nanos at 1_000_000_000 (0.9999999999 gave
+#      (0, 1000000000)), which is outside the proto-legal range.
+#
+# Non-numeric input, non-finite input (NaN, +/-Inf), and input beyond the
+# Duration range throw Temporalio::Exception::Argument rather than encoding a
+# mangled int64. The check lives here because this pair is the single choke
+# point for every seconds-to-Duration call site. It is the full house guard
+# from Common/Priority.pm's ADJUST block (:57-60), both halves:
+#   * looks_like_number rejects a string Perl would numify quietly. Without
+#     it 'abc' and '' encode as a zero Duration and '3abc' as 3 seconds, with
+#     nothing louder than a numeric warning to say so.
+#   * `$s - $s != 0` is the finite check: for finite x, x - x is exactly 0,
+#     while Inf - Inf and NaN - NaN are both NaN. It is still needed after
+#     looks_like_number, which accepts the strings 'Inf' and 'NaN'.
+# Numeric strings ('1.5', '1e3', a padded ' 1') pass both halves and convert
+# like the numbers they spell.
 sub duration_from_seconds ($seconds) {
+    Temporalio::Exception::Argument->throw(
+        message => "duration seconds must be a finite number, got '$seconds'")
+        if !Scalar::Util::looks_like_number($seconds)
+        || $seconds - $seconds != 0;
+    Temporalio::Exception::Argument->throw(
+        message => "duration seconds $seconds is outside the "
+            . "google.protobuf.Duration range [-$DURATION_SECONDS_MAX, "
+            . "$DURATION_SECONDS_MAX]")
+        if abs($seconds) > $DURATION_SECONDS_MAX;
+
     my $Duration = resolve('google.protobuf.Duration');
-    my $whole = int($seconds);
-    my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-    return $Duration->new({ seconds => $whole, nanos => $nanos });
+    my $sign  = $seconds < 0 ? -1 : 1;
+    my $magn  = abs($seconds);
+    my $whole = int($magn);
+    my $nanos = int(($magn - $whole) * 1_000_000_000 + 0.5);
+    if ($nanos >= 1_000_000_000) {
+        $whole += 1;
+        $nanos -= 1_000_000_000;
+    }
+    return $Duration->new(
+        { seconds => $sign * $whole, nanos => $sign * $nanos });
 }
 
 # seconds_from_duration($duration) -> Perl-side seconds (possibly fractional),
@@ -291,6 +343,24 @@ protos on first use.
 
 Converts Perl-side (possibly fractional) seconds to a C<google.protobuf.Duration> instance. The shared home (I14) for the seconds-to-Duration conversion formerly duplicated in C<Converter::Failure>, C<Common::RetryPolicy>, C<Client>, C<Workflow::Runner>, and the C<Schedule::*> modules.
 
+The split matches protobuf's own C<Duration._NormalizeDuration> and C<_CheckDurationValid>, so the resulting message is always proto-legal:
+
+=over 4
+
+=item *
+
+B<Sign-aware rounding.> C<seconds> and C<nanos> carry the same sign, and the fractional part is rounded half-away-from-zero on its absolute value: C<-1.5> gives C<< { seconds => -1, nanos => -500000000 } >>, and C<-0.25> gives C<< { seconds => 0, nanos => -250000000 } >>.
+
+=item *
+
+B<Carry at one billion.> A fraction within half a nanosecond of the next second rounds up into C<seconds> rather than leaving C<nanos> at C<1_000_000_000>, which the proto range forbids: C<0.9999999999> gives C<< { seconds => 1, nanos => 0 } >>. C<nanos> therefore always lands in C<[-999999999, 999999999]>.
+
+=item *
+
+B<Non-numeric, non-finite, and out-of-range input throws.> A value that is not a number at all (C<"abc">, C<"">, C<"3abc">, which Perl would otherwise numify quietly to 0, 0, and 3), C<NaN>, C<+Inf>, C<-Inf>, and any magnitude above C<315_576_000_000> seconds (protobuf's inclusive bound, 10000 years either way) all raise L<Temporalio::Exception::Argument>. Callers do not need their own guard: this is the single choke point for every seconds-to-Duration conversion in the SDK. A string that does spell a number is taken as the number it spells, so C<"1.5"> converts like C<1.5>.
+
+=back
+
 =head2 json
 
 Returns the JSON descriptor / mapping used when resolving messages.
@@ -314,5 +384,9 @@ Returns the parsed proto schema object backing message resolution.
 =head2 seconds_from_duration
 
 Converts a C<google.protobuf.Duration> instance back to Perl-side (possibly fractional) seconds, or C<undef> when the Duration is unset. The inverse of C<duration_from_seconds>; the shared home (I14) for the Duration-to-seconds conversion formerly duplicated across the same call sites.
+
+Because C<duration_from_seconds> emits same-sign C<seconds>/C<nanos> pairs, the sum here reproduces the input exactly: C<-1.5> and C<0.9999999999> both survive the round trip (the latter as C<1>, its rounded value). A Duration that reached the SDK with a mismatched sign is summed as given, not normalized.
+
+An all-zero Duration reads back as C<0>, not C<undef>, since the unset-versus-zero distinction is a call-site concern: proto3 cannot tell the two apart on the wire, and only some call sites (C<Schedule::Spec>'s C<jitter>) want zero folded to C<undef>.
 
 =cut

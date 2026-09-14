@@ -104,7 +104,21 @@ class Temporalio::Schedule::Spec {
     # Temporalio::Core::Proto (I14; formerly local _duration/
     # _duration_to_seconds helpers here). The Timestamp pair above is a
     # sibling duplication, not a Duration, and is left alone (out of scope
-    # for I14; see .ai-sessions/implementation-notes.md Step I14).
+    # for I14; see .ai-sessions/session-20260913-1025-goal-step-i14-duration-dedup.md).
+    # That also means _timestamp keeps the naive `+ 0.5` split that
+    # Temporalio::Core::Proto::duration_from_seconds shed in F10. Being an
+    # epoch value is not what makes that safe: _timestamp(0.9999999999) still
+    # yields nanos 1_000_000_000, and _timestamp(-1.5) still yields
+    # (-1, -499999999), whose negative nanos Timestamp forbids. What rules the
+    # carry out is the spacing of doubles at real epochs. From 2**30 seconds
+    # (2004-01-10) on, adjacent doubles are about 238 ns apart, so no
+    # representable fraction can land within the half nanosecond of the next
+    # second that the carry needs: the nearest double below epoch 1773000000
+    # splits to (1772999999, 999999762). The negative case is out of reach for
+    # a different reason, namely that pre-epoch schedules are unsupported;
+    # start_at/end_at are not validated non-negative, so a negative one would
+    # build an illegal Timestamp. Both belong to the Timestamp sibling
+    # follow-up above rather than to F10.
 }
 
 1;

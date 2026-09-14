@@ -123,6 +123,43 @@ T2->subtest('Spec field remaps and start_time' => sub {
 });
 
 # ---------------------------------------------------------------------------
+# Spec jitter: encode, wire round trip, and the zero-to-undef decode fold.
+# ---------------------------------------------------------------------------
+T2->subtest('Spec jitter round-trips across the wire and folds zero to undef' => sub {
+    my $SpecMsg = Temporalio::Core::Proto::resolve(
+        'temporal.api.schedule.v1.ScheduleSpec');
+
+    my $thirty = Temporalio::Schedule::Spec->new(jitter => 30)->_to_proto;
+    T2->is($thirty->jitter->seconds, 30, 'jitter 30 -> Duration.seconds 30');
+    T2->is($thirty->jitter->nanos, 0, 'jitter 30 -> Duration.nanos 0');
+    my $thirty_back =
+        Temporalio::Schedule::Spec->_from_proto($SpecMsg->decode($thirty->encode));
+    T2->is($thirty_back->jitter, 30, 'a 30-second jitter Duration decodes back to 30');
+
+    # A zero jitter is indistinguishable on the wire from an unset one (proto3
+    # drops an all-default sub-message), so _from_proto folds zero to undef.
+    my $zero = Temporalio::Schedule::Spec->new(jitter => 0)->_to_proto;
+    T2->is($zero->jitter->seconds, 0, 'jitter 0 -> Duration.seconds 0');
+    T2->is($zero->jitter->nanos, 0, 'jitter 0 -> Duration.nanos 0');
+    my $zero_back =
+        Temporalio::Schedule::Spec->_from_proto($SpecMsg->decode($zero->encode));
+    T2->is($zero_back->jitter, undef, 'a zero jitter Duration decodes back to undef');
+
+    # An omitted jitter takes the same decode path as the zero one.
+    my $unset_back = Temporalio::Schedule::Spec->_from_proto(
+        $SpecMsg->decode(Temporalio::Schedule::Spec->new->_to_proto->encode));
+    T2->is($unset_back->jitter, undef, 'an omitted jitter decodes back to undef');
+
+    # Fractional jitter survives the split and the read back.
+    my $frac = Temporalio::Schedule::Spec->new(jitter => 1.5)->_to_proto;
+    T2->is($frac->jitter->seconds, 1, 'fractional jitter -> Duration.seconds 1');
+    T2->is($frac->jitter->nanos, 500_000_000, 'fractional jitter -> Duration.nanos');
+    my $frac_back =
+        Temporalio::Schedule::Spec->_from_proto($SpecMsg->decode($frac->encode));
+    T2->is($frac_back->jitter, 1.5, 'a fractional jitter Duration decodes back to 1.5');
+});
+
+# ---------------------------------------------------------------------------
 # Interval: every -> interval, offset -> phase.
 # ---------------------------------------------------------------------------
 T2->subtest('Interval every/offset remap' => sub {

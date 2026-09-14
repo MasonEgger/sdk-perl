@@ -247,14 +247,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #4"
 
 ### Step F10: Round the Shared Duration Pair Correctly
-- [ ] 1. RED: negative fractions, carry at 1e9, string input, NaN and Inf policy, jitter zero fold; fails today
-- [ ] 2. Verify protobuf _NormalizeDuration semantics; cite
-- [ ] 3. GREEN: sign-aware rounding with carry
-- [ ] 4. RED: none
-- [ ] 5. GREEN: none
-- [ ] 6. REFACTOR: fix Spec.pm dangling comment pointer
-- [ ] 7. Docs: POD on rounding and carry
-- [ ] 8. Verify: both suites green; commit "Refs #14"
+- [x] 1. RED: negative fractions, carry at 1e9, string input, NaN and Inf policy, jitter zero fold; fails today
+- [x] 2. Verify protobuf _NormalizeDuration semantics; cite
+- [x] 3. GREEN: sign-aware rounding with carry
+- [x] 4. RED: none
+- [x] 5. GREEN: none
+- [x] 6. REFACTOR: fix Spec.pm dangling comment pointer
+- [x] 7. Docs: POD on rounding and carry
+- [x] 8. Verify: both suites green; commit "Refs #14"
 
 ### Step F11: Prove fetch_history Pages
 - [ ] 1. RED: two-page responder with token and order assertions; options pass-through with non-default filter; proven RED by local short-circuit
