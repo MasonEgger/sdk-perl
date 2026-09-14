@@ -804,6 +804,25 @@ L<Temporalio::Test::WorkflowReplay>'s C<replay_workflow> and
 C<replay_workflows> accept, and its C<to_json> round-trips through
 C<< Temporalio::Client::WorkflowHistory->from_json >>.
 
+Every page is fetched: the drain keeps issuing
+C<GetWorkflowExecutionHistory> calls, threading each response's
+C<next_page_token> into the following request, until the server stops
+returning one. C<page_size> caps the events per call, not the total.
+
+The fetch is pinned to this handle's C<run_id> when the handle has one,
+which matters after a continue-as-new. A handle returned by
+C<start_workflow> or C<signal_with_start_workflow> carries the run id the
+start response reported, so C<fetch_history> on it returns exactly that
+run's history, ending at its C<WorkflowExecutionContinuedAsNew> event; it
+does not walk on into the successor run. (C<execute_workflow> hands back
+the workflow result rather than a handle, so there is no handle to pin.)
+To reach the successor, use a run-id-less handle
+(C<< $client->get_workflow_handle($workflow_id) >>), which sends an empty
+run id and lets the server resolve the workflow's current run. sdk-python differs on this one point: its C<start_workflow>
+leaves the handle's C<run_id> unset and records the started run only as
+C<result_run_id> and C<first_execution_run_id>, so a Python start handle
+is unpinned where a Perl one is pinned.
+
 =head2 reset
 
     my $new_run_id = await $handle->reset(

@@ -257,14 +257,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #14"
 
 ### Step F11: Prove fetch_history Pages
-- [ ] 1. RED: two-page responder with token and order assertions; options pass-through with non-default filter; proven RED by local short-circuit
-- [ ] 2. Verify _workflow.py:391-415; cite
-- [ ] 3. GREEN: fix anything exposed
-- [ ] 4. RED: none
-- [ ] 5. GREEN: none
-- [ ] 6. REFACTOR: none
-- [ ] 7. Docs: run_id pinning sentence in fetch_history POD
-- [ ] 8. Verify: both suites green; commit "Refs #11"
+- [x] 1. RED: two-page responder with token and order assertions; options pass-through with non-default filter; proven RED by local short-circuit
+- [x] 2. Verify _workflow.py:391-415; cite
+- [x] 3. GREEN: fix anything exposed
+- [x] 4. RED: none
+- [x] 5. GREEN: none
+- [x] 6. REFACTOR: none
+- [x] 7. Docs: run_id pinning sentence in fetch_history POD
+- [x] 8. Verify: both suites green; commit "Refs #11"
 
 ### Step F12: Keep the Real Run Future Alive and Observed on a Wedged Shutdown
 - [ ] 1. RED: run future survives uncancelled; failure during race re-raised; late failure retrieved without warning; fails today

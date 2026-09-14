@@ -1,7 +1,7 @@
 # ABOUTME: Unit tests for WorkflowHandle->fetch_history (spec I11 / GitHub
 # ABOUTME: issue #11): assembles a Temporalio::Client::WorkflowHistory by
-# ABOUTME: draining fetch_history_events, matching sdk-python client/_workflow.py
-# ABOUTME: WorkflowHandle.fetch_history (:391) over a mocked _rpc_call.
+# ABOUTME: draining fetch_history_events, matching sdk-python 1.27.2
+# ABOUTME: client/_workflow.py WorkflowHandle.fetch_history over a mocked _rpc_call.
 use v5.38;
 use warnings;
 use utf8;
@@ -136,6 +136,20 @@ sub history_bytes ($events) {
         { events => $events })->encode;
 }
 
+# One GetWorkflowExecutionHistoryResponse page carrying $events and, when
+# $token is defined, the next_page_token the server hands back for the page
+# after it. Mirrors the two-page ListWorkflowExecutions responder in
+# t/unit/workflow_handle_result.t.
+sub history_page ($events, $token) {
+    my $Resp = resolve(
+        'temporal.api.workflowservice.v1.GetWorkflowExecutionHistoryResponse');
+    return $Resp->new({
+        history => Temporalio::Proto::Api::History::V1::History->new(
+            { events => $events }),
+        (defined $token ? (next_page_token => $token) : ()),
+    });
+}
+
 # One GetWorkflowExecutionHistoryResponse page carrying every event and no
 # next_page_token, so the iterator drains in a single _fetch_next_page call.
 sub history_response ($history_proto) {
@@ -191,6 +205,114 @@ T2->subtest('fetch_history assembles a WorkflowHistory from fetched events' =>
 });
 
 # ---------------------------------------------------------------------------
+# Paging (spec F11): fetch_history drains EVERY page. _HistoryEventIterator
+# next keeps calling _fetch_next_page while the last response carried a
+# non-empty next_page_token, and _fetch_next_page threads that token back into
+# the following GetWorkflowExecutionHistoryRequest.
+#
+# MUST-match, verified against sdk-python 1.27.2 client/_workflow.py:
+# WorkflowHandle.fetch_history is a shortcut that collects every event
+# fetch_history_events yields into WorkflowHistory(workflow_id, events);
+# fetch_history_events hands the handle's own run_id to
+# _fetch_history_events_for_run; and WorkflowHistoryEventAsyncIterator
+# fetch_next_page sends next_page_token on the request and stores
+# "resp.next_page_token or None" afterwards, which __anext__ loops on until it
+# is empty. The two-page responder shape is the list_workflows paging subtest
+# in t/unit/workflow_handle_result.t.
+#
+# Proven RED on 2026-09-14 by deleting the token-following branch from
+# _HistoryEventIterator next, which is what a one-page implementation would
+# be. Nine of the eleven assertions below failed: "both pages were fetched"
+# got 1 want 2, "the second request carries the first response
+# next_page_token" got undef want tok1, "every event from both pages reached
+# the WorkflowHistory" got 5 want 10, the three option-repeat checks and the
+# wait_new_event check (all reading a second request that was never made),
+# plus the order and byte-identity pair.
+#
+# The option-repeat checks were separately proven RED the same day by making
+# _fetch_next_page drop maximum_page_size and reset history_event_filter_type
+# and skip_archival to their defaults once $fetched_once was set: page_size
+# got <UNDEF> want 5, event_filter_type got 1 want 2, and skip_archival
+# failed its ok. The token-following and event assertions stayed green under
+# that mutation, so those three isolate the per-page rebuild from the paging
+# loop. Both mutations were reverted.
+# ---------------------------------------------------------------------------
+T2->subtest('fetch_history follows next_page_token across pages' => sub {
+    my $client = make_client;
+    my $proto  = single_timer_history('TimerSleeper', 'run-fetch-4');
+    my @all    = @{ $proto->events };
+    T2->is(scalar @all, 10, 'the fixture splits into two five-event pages');
+
+    my $calls = script(
+        $client,
+        sub { return history_page([ @all[0 .. 4] ], 'tok1') },
+        sub { return history_page([ @all[5 .. 9] ], undef) },
+    );
+
+    my $handle =
+        $client->get_workflow_handle('wf-fetch-4', run_id => 'run-fetch-4');
+    # Every caller option here is a NON-default (the iterator's own defaults
+    # are no maximum_page_size, filter 1/ALL_EVENT, skip_archival 0), so the
+    # page-2 repeat assertions below discriminate a rebuilt request from one
+    # that dropped or reset the options.
+    my $history = run($handle->fetch_history(
+        page_size => 5, event_filter_type => 2, skip_archival => 1));
+
+    T2->is(scalar @$calls, 2,
+        'both pages were fetched, not just the first');
+    T2->ok(!length($calls->[0]{request}->next_page_token // ''),
+        'the first request carries no next_page_token');
+    # Guarded so a one-page implementation reports every symptom below
+    # instead of dying here on a second call that was never made.
+    my $second = @$calls > 1 ? $calls->[1]{request} : undef;
+    T2->is(defined $second ? $second->next_page_token : undef, 'tok1',
+        'the second request carries the first response next_page_token');
+    # _fetch_next_page rebuilds the whole request on every page, so the
+    # caller's options repeat on page 2 rather than reverting to the
+    # defaults; sdk-python 1.27.2 fetch_next_page rebuilds the same four
+    # fields per page.
+    T2->is(defined $second ? $second->maximum_page_size : undef, 5,
+        'the second request repeats the caller page_size');
+    T2->is(defined $second ? $second->history_event_filter_type : undef, 2,
+        'the second request repeats the caller event_filter_type');
+    T2->ok(defined $second && $second->skip_archival,
+        'the second request repeats the caller skip_archival');
+    T2->ok(defined $second && !$second->wait_new_event,
+        'the second request keeps wait_new_event false');
+    T2->is(scalar @{ $history->events }, 10,
+        'every event from both pages reached the WorkflowHistory');
+    T2->is([ map { $_->event_id } @{ $history->events } ], [ 1 .. 10 ],
+        'events arrive in history order across the page boundary');
+    T2->is(history_bytes($history->events), history_bytes(\@all),
+        'the concatenated pages are byte-identical to the whole history');
+});
+
+# ---------------------------------------------------------------------------
+# run_id pinning (spec F11, the documented continue-as-new caveat):
+# _fetch_next_page puts the handle's own run id on the request execution, so a
+# handle seeded from a start response is pinned to THAT run and a run-id-less
+# handle sends an empty run id for the server to resolve. sdk-python 1.27.2
+# fetch_history_events hands self._run_id to _fetch_history_events_for_run the
+# same way; the divergence is upstream in start_workflow, which leaves run_id
+# None in Python and sets it from the start response here.
+# ---------------------------------------------------------------------------
+T2->subtest('fetch_history pins the handle run_id on the request' => sub {
+    my $client = make_client;
+    my $proto  = single_timer_history('TimerSleeper', 'run-fetch-5');
+
+    my $pinned = script($client, sub { return history_response($proto) });
+    run($client->get_workflow_handle('wf-fetch-5', run_id => 'run-fetch-5')
+            ->fetch_history);
+    T2->is($pinned->[0]{request}->execution->run_id, 'run-fetch-5',
+        'a run-id-bearing handle pins that one run on the request');
+
+    my $open = script($client, sub { return history_response($proto) });
+    run($client->get_workflow_handle('wf-fetch-5')->fetch_history);
+    T2->is($open->[0]{request}->execution->run_id, '',
+        'a run-id-less handle sends an empty run id for the server to resolve');
+});
+
+# ---------------------------------------------------------------------------
 # to_json equivalence: fetch_history's WorkflowHistory->to_json equals
 # from_json(...)->to_json for the same events (round-trip parity with the
 # R95 class).
@@ -236,15 +358,37 @@ T2->subtest('fetch_history validates the same known keys as fetch_history_events
     ) or T2->diag("got instead: $err");
 
     my $proto = single_timer_history('TimerSleeper', 'run-fetch-3');
-    script($client, sub { return history_response($proto) });
+    my $calls = script($client, sub { return history_response($proto) });
     my $history = run($handle->fetch_history(
         page_size => 5, wait_new_event => 0,
-        event_filter_type => 1, skip_archival => 1));
+        event_filter_type => 2, skip_archival => 1));
     T2->ok(
         Scalar::Util::blessed($history)
             && $history->isa('Temporalio::Client::WorkflowHistory'),
         'fetch_history accepts every fetch_history_events known key',
     );
+
+    # Accepting a key is not passing it on, so assert each one where it lands
+    # on the wire. Field names are
+    # share/proto/temporal/api/workflowservice/v1/request_response.proto
+    # GetWorkflowExecutionHistoryRequest: maximum_page_size 3,
+    # wait_new_event 5, history_event_filter_type 6, skip_archival 7.
+    # event_filter_type 2 is HISTORY_EVENT_FILTER_TYPE_CLOSE_EVENT
+    # (share/proto/temporal/api/enums/v1/workflow.proto), deliberately NOT the
+    # ALL_EVENT default of 1, so a hardcoded default fails here.
+    #
+    # Proven RED on 2026-09-14 by pinning history_event_filter_type to 1 and
+    # dropping maximum_page_size and skip_archival from _fetch_next_page: the
+    # three assertions below failed while the accepts-every-known-key
+    # assertion above still passed, which is the gap this subtest closes.
+    my $request = $calls->[0]{request};
+    T2->is($request->maximum_page_size, 5,
+        'page_size reaches maximum_page_size');
+    T2->is($request->history_event_filter_type, 2,
+        'event_filter_type reaches history_event_filter_type as CLOSE_EVENT');
+    T2->ok($request->skip_archival, 'skip_archival reaches the request');
+    T2->ok(!$request->wait_new_event,
+        'an explicit wait_new_event of 0 stays false');
 });
 
 T2->done_testing;
