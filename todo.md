@@ -190,14 +190,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #3"
 
 ### Step F4: Make the Two-Classes Canary Able to Flip and Its Claims True
-- [ ] 1. RED: TODO scoped to inner assertions; non-TODO like on error text; no "TODO passed" today
-- [ ] 2. Verify no-SDK probe: perl -c passes, -MFuture::AsyncAwait -c dies
-- [ ] 3. GREEN: correct lessons entry (fold into 2026-07-10); corrected upstream draft in session summary
-- [ ] 4. RED: none
-- [ ] 5. GREEN: none
-- [ ] 6. REFACTOR: none
-- [ ] 7. Docs: canary comment cites corrected entry and #18; flip signal stated
-- [ ] 8. Verify: both suites green; commit "Refs #18"
+- [x] 1. RED: TODO scoped to inner assertions; non-TODO like on error text; no "TODO passed" today
+- [x] 2. Verify no-SDK probe: perl -c passes, -MFuture::AsyncAwait -c dies
+- [x] 3. GREEN: correct lessons entry (fold into 2026-07-10); corrected upstream draft in session summary
+- [x] 4. RED: none
+- [x] 5. GREEN: none
+- [x] 6. REFACTOR: none
+- [x] 7. Docs: canary comment cites corrected entry and #18; flip signal stated
+- [x] 8. Verify: both suites green; commit "Refs #18"
 
 ### Step F5: Re-vendor Cloud, Test, and Health Protos From the Pinned Tag (task)
 - [ ] 1. Scope: byte-identical to v0.4.0 crates/common/protos; provenance corrected; codes pinned; lazy load if feasible
