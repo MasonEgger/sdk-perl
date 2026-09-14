@@ -207,14 +207,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 5. Document: session summary with corrected provenance; commit "Refs #12"
 
 ### Step F6: Make Fork-Pool Frame Pairing Token-Exact
-- [ ] 1. RED: late cancel for finished token, orphan hbd after failed encode, chain dies records nothing, hold-at-accept race, is_worker_shutdown parity; fails today
-- [ ] 2. Verify _activity.py contract; fix citation
-- [ ] 3. GREEN: holder_token guard; hbd after successful encode; drop on chain failure
-- [ ] 4. RED: none
-- [ ] 5. GREEN: none
-- [ ] 6. REFACTOR: reword hold field comment; drop stale citation
-- [ ] 7. Docs: Pool POD on pairing guarantees and chain-failure rule
-- [ ] 8. Verify: both suites green; commit "Refs #7"
+- [x] 1. RED: late cancel for finished token, orphan hbd after failed encode, chain dies records nothing, hold-at-accept race, is_worker_shutdown parity; fails today
+- [x] 2. Verify _activity.py contract; fix citation
+- [x] 3. GREEN: holder_token guard; hbd after successful encode; drop on chain failure
+- [x] 4. RED: none
+- [x] 5. GREEN: none
+- [x] 6. REFACTOR: reword hold field comment; drop stale citation
+- [x] 7. Docs: Pool POD on pairing guarantees and chain-failure rule
+- [x] 8. Verify: both suites green; commit "Refs #7"
 
 ### Step F7: Honor Dynamic Update Validators on Every Path
 - [ ] 1. RED: attribute validator on dynamic update, no-fallback, rejection message and type, install/uninstall symmetry, interceptor validate_update observed, pending-Future validator; fails today

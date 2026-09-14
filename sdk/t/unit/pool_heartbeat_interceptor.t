@@ -36,6 +36,7 @@ use Temporalio::Worker::ActivityRegistry ();
 use Temporalio::Worker::Interceptor ();
 
 require ActDef::PoolHeartbeatIntercepted;
+require ActDef::PoolHeartbeatPairing;
 require ActDef::PoolHeartbeatUnfreezable;
 
 # ---------------------------------------------------------------------------
@@ -229,14 +230,26 @@ T2->subtest(
 # Fix-loop iter 1, temporal.interceptor-exception-containment (warn): an
 # ActivityOutbound that DIES in heartbeat() must be contained to that one
 # heartbeat, not escape Pool's _drain_control read-ready callback and abort
-# whatever await is pumping the shared IO::Async loop (sdk-python parity:
-# worker/_activity.py:838-844 never lets a chain failure reach the loop).
+# whatever await is pumping the shared IO::Async loop.
+#
+# Step F6: containment is not the same as relaying. A chain that dies
+# delegated nothing, so nothing is recorded, which is what the async path
+# already does (Context::heartbeat lets the interceptor's die propagate out
+# of the body's heartbeat() call and records nothing). Python agrees on both
+# of its sync executors: a thread pool re-raises the chain failure into the
+# body through .result(10) (worker/_activity.py:851-853, over the
+# outbound.heartbeat that _ActivityInboundImpl.init put on the context at
+# 813-818), and a process pool's parent-side heartbeater logs the exception
+# and ends its poll loop (worker/_activity.py:1114-1116). Neither falls back
+# to recording the pre-chain value. The citation this comment carried before
+# F6 (worker/_activity.py:838-844) is the heartbeat_with_context definition,
+# not a try/except.
 # ---------------------------------------------------------------------------
 T2->subtest(
     'an ActivityOutbound interceptor that DIES in heartbeat() is contained'
         . ' to that one heartbeat: the pooled activity still completes, the'
-        . ' bytes still relay via the fallback, and the parent loop is not'
-        . ' disrupted for a LATER pooled activity sharing it' => sub
+        . ' heartbeat is DROPPED rather than relayed, and the parent loop is'
+        . ' not disrupted for a LATER pooled activity sharing it' => sub
 {
     my @trace;
     my @relayed;
@@ -268,17 +281,21 @@ T2->subtest(
 
     # Two invocations, one worker: the second dispatch only completes if the
     # first's interceptor throw did not wedge or crash the shared loop.
-    for my $token (qw(tok-throw-1 tok-throw-2)) {
-        my $start = $Start->new({
-            workflow_namespace => 'default',
-            activity_id        => $token,
-            activity_type      => 'PoolHeartbeatIntercepted',
-            input              => [],
-            attempt            => 1,
-        });
-        run_to_ready($dispatcher->dispatch_task($ActivityTask->new({
-            task_token => $token, start => $start,
-        })->encode));
+    my @warnings;
+    {
+        local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+        for my $token (qw(tok-throw-1 tok-throw-2)) {
+            my $start = $Start->new({
+                workflow_namespace => 'default',
+                activity_id        => $token,
+                activity_type      => 'PoolHeartbeatIntercepted',
+                input              => [],
+                attempt            => 1,
+            });
+            run_to_ready($dispatcher->dispatch_task($ActivityTask->new({
+                task_token => $token, start => $start,
+            })->encode));
+        }
     }
 
     T2->is(scalar(@completions), 2,
@@ -294,8 +311,16 @@ T2->subtest(
     T2->is(scalar(grep { $_->{op} eq 'heartbeat-attempt' } @trace), 2,
         'the throwing interceptor ran for BOTH heartbeats: the first throw'
             . ' did not prevent the second activity from dispatching');
-    T2->is(scalar(@relayed), 2,
-        'both heartbeats still reached the real relay via the fallback');
+    T2->is(scalar(@relayed), 0,
+        'neither heartbeat was recorded: a chain that dies delegated'
+            . ' nothing, so the pooled path records nothing either, exactly'
+            . ' as the async path does (pre-F6: the parent relayed the'
+            . " child's pre-chain bytes, so this was 2)");
+    T2->is(scalar(@warnings), 2,
+        'each dropped heartbeat warned once');
+    T2->like($warnings[0] // '',
+        qr/ActivityOutbound heartbeat chain failed for token tok-throw-1/,
+        'the warning names the chain failure and the token it dropped');
 });
 
 # ---------------------------------------------------------------------------
@@ -530,6 +555,186 @@ T2->subtest(
         'the outbound chain ran BEFORE the heartbeat reached core, even'
             . ' under reply-before-drain ordering'
             . ' (pre-fix: ops omits heartbeat, or is out of order)');
+});
+
+# ---------------------------------------------------------------------------
+# Step F6 (spec "F6: Fork-pool frame pairing must be token-exact"): the child
+# sends the raw details ('hbd') and the encoded bytes ('hb') as two frames on
+# one ordered stream, and the parent pairs them by parking the details until
+# the bytes arrive. Pre-F6, Context::_record_heartbeat called the details
+# recorder BEFORE encode_heartbeat_bytes, so a heartbeat whose encode died
+# left its details parked with no 'hb' of its own; the next 'hb' that arrived
+# without details of its own (the Storable-freeze-failure shape the
+# unfreezable subtest above covers) paired with those stale details, and the
+# chain re-encoded the EARLIER heartbeat's args in place of the later one's.
+#
+# ActDef::PoolHeartbeatPairing records exactly that sequence: a detail that
+# freezes but does not convert, then one that converts but does not freeze,
+# then one that survives both.
+# ---------------------------------------------------------------------------
+T2->subtest(
+    'a heartbeat whose encode fails does not leave its details parked for a'
+        . ' LATER heartbeat to pair with' => sub
+{
+    my @trace;
+    my @relayed;
+
+    my $dc       = Temporalio::Converter::Data->new;
+    my $registry = Temporalio::Worker::ActivityRegistry->new(
+        activities => ['ActDef::PoolHeartbeatPairing']);
+    my $pool     = Temporalio::Activity::Pool->new(
+        loop            => $loop,
+        max_workers     => 1,
+        registry        => Temporalio::Worker::ActivityRegistry->new(
+            activities => ['ActDef::PoolHeartbeatPairing']),
+        data_converter  => $dc,
+        heartbeat_relay => sub ($token, $bytes) {
+            push @relayed, { token => $token, bytes => $bytes };
+            return undef;
+        },
+    );
+
+    my @completions;
+    my $dispatcher = Temporalio::Worker::ActivityDispatcher->new(
+        registry       => $registry,
+        data_converter => $dc,
+        task_queue     => 'demo',
+        loop           => $loop,
+        pool           => $pool,
+        completer      => sub ($bytes) { push @completions, $bytes; Future->done },
+        interceptors   => [ HeartbeatSpyInterceptor->new(trace => \@trace) ],
+    );
+
+    my $start = $Start->new({
+        workflow_namespace => 'default',
+        activity_id        => 'a-pairing',
+        activity_type      => 'PoolHeartbeatPairing',
+        input              => [],
+        attempt            => 1,
+    });
+    run_to_ready($dispatcher->dispatch_task($ActivityTask->new({
+        task_token => 'tok-pairing', start => $start,
+    })->encode));
+
+    T2->is(scalar(@completions), 1, 'one completion sent');
+    my $comp = $Completion->decode($completions[0]);
+    T2->is($comp->result->which_status, 'completed',
+        'the activity completed: a detail the converter rejects fails only'
+            . ' that heartbeat, and the body caught it');
+
+    my @heartbeat_events = grep { $_->{op} eq 'heartbeat' } @trace;
+    T2->is(scalar(@heartbeat_events), 1,
+        'the chain observed exactly ONE heartbeat: the only one whose raw'
+            . ' details and encoded bytes BOTH crossed the channel'
+            . ' (pre-F6: 2, the extra one being heartbeat 1 details paired'
+            . " with heartbeat 2's bytes)");
+    if (@heartbeat_events) {
+        T2->is($heartbeat_events[0]{args}, [ 'third-detail' ],
+            'the observed heartbeat carries its OWN args, never an earlier'
+                . " heartbeat's parked details");
+    }
+    T2->is(scalar(grep { ref $_->{args}[0] eq 'SCALAR' } @heartbeat_events), 0,
+        'heartbeat 1 never reached the chain at all: its encode failed, so'
+            . ' it was never recorded on any path');
+
+    # Both surviving 'hb' frames still reach the real relay, each carrying
+    # its own payload: heartbeat 2 through the direct-bytes fallback (its
+    # raw details were lost to the freeze failure) and heartbeat 3 through
+    # the chain root's re-encode.
+    T2->is(scalar(@relayed), 2,
+        'both heartbeats that produced bytes were recorded');
+    my @decoded = map {
+        my $hb = $Heartbeat->decode($_->{bytes});
+        $dc->payload_converter->from_payload($hb->details->[0]);
+    } @relayed;
+    T2->is(\@decoded, [ 'second-detail', 'third-detail' ],
+        'each relayed heartbeat carries its own detail, in order'
+            . " (pre-F6: heartbeat 2's frame re-encoded heartbeat 1's args)");
+});
+
+# ---------------------------------------------------------------------------
+# Step F6: the hold-at-accept variant of the teardown race above. That one
+# arms the hold AFTER 'start' has registered %token_conn, so the rejected
+# `unless defined $token_conn{$token}` reply-time guard would have passed it
+# too. Holding at ACCEPT instead means no frame on the connection is ever
+# drained before the reply lands, so %token_conn is still EMPTY for this
+# token at reply time. This is the ordering the child's own control_connected
+# flag exists for (Pool.pm _child_dispatch), and the only one that tells the
+# two candidate guards apart.
+# ---------------------------------------------------------------------------
+T2->subtest(
+    'a pooled heartbeat still runs the outbound chain when the reply pipe'
+        . ' completes before even the "start" frame has been drained' => sub
+{
+    my @trace;
+    my @relayed;
+
+    my $dc       = Temporalio::Converter::Data->new;
+    my $registry = Temporalio::Worker::ActivityRegistry->new(
+        activities => ['ActDef::PoolHeartbeatIntercepted']);
+    my $pool     = Temporalio::Activity::Pool->new(
+        loop            => $loop,
+        max_workers     => 1,
+        registry        => Temporalio::Worker::ActivityRegistry->new(
+            activities => ['ActDef::PoolHeartbeatIntercepted']),
+        heartbeat_relay => sub ($token, $bytes) {
+            push @relayed, { token => $token, bytes => $bytes };
+            push @trace, { op => 'relay', token => $token };
+            return undef;
+        },
+    );
+
+    my @completions;
+    my $dispatcher = Temporalio::Worker::ActivityDispatcher->new(
+        registry       => $registry,
+        data_converter => $dc,
+        task_queue     => 'demo',
+        loop           => $loop,
+        pool           => $pool,
+        completer      => sub ($bytes) { push @completions, $bytes; Future->done },
+        interceptors   => [ HeartbeatSpyInterceptor->new(trace => \@trace) ],
+    );
+
+    # Arm the hold at ACCEPT: the child's connection is accepted and then
+    # held before its first read-ready, so 'start' never registers
+    # %token_conn and every frame sits unread while invoke() awaits the
+    # reply pipe.
+    $pool->_hold_control_drain_at_accept;
+
+    my $start = $Start->new({
+        workflow_namespace => 'default',
+        activity_id        => 'a-accept-race',
+        activity_type      => 'PoolHeartbeatIntercepted',
+        input              => [],
+        attempt            => 1,
+    });
+    run_to_ready($dispatcher->dispatch_task($ActivityTask->new({
+        task_token => 'tok-accept-race', start => $start,
+    })->encode));
+
+    T2->is(scalar(@completions), 1,
+        'the activity completed via the reply pipe while the control socket'
+            . ' was still held at accept');
+    T2->is(scalar(@trace), 0,
+        'nothing drained yet: not even the "start" frame, so %token_conn is'
+            . ' empty for this token at reply time');
+
+    $pool->_release_control_drain;
+
+    my @heartbeat_events = grep { $_->{op} eq 'heartbeat' } @trace;
+    T2->is(scalar(@heartbeat_events), 1,
+        'the outbound chain still observed the heartbeat: the reply-time'
+            . ' cleanup keys off the CHILD\'s control_connected report, not'
+            . ' off parent-side drain state (a %token_conn guard would have'
+            . ' deleted the chain here)');
+    if (@heartbeat_events) {
+        T2->is($heartbeat_events[0]{args}, [ { pct => 50 }, 'halfway' ],
+            'the interceptor saw the STRUCTURED Perl-level details');
+    }
+
+    my @ops = map { $_->{op} } @trace;
+    T2->is(\@ops, [ 'heartbeat', 'relay' ],
+        'the outbound chain ran BEFORE the heartbeat reached core');
 });
 
 T2->done_testing;

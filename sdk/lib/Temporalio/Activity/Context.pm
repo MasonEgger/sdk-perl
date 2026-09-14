@@ -57,14 +57,15 @@ class Temporalio::Activity::Context {
     field $heartbeat_recorder :param;
 
     # A coderef (@details) -> () invoked with the RAW, unconverted heartbeat
-    # detail values, BEFORE payload conversion (spec I7 direction B, closes
-    # GitHub #7 half B). Pure observation: the real recording still goes
-    # through heartbeat_recorder above (bytes-based, unaffected). The
-    # fork-pool child wires one that relays the Perl-level details to the
-    # parent over the pool's control channel, so the parent's
-    # ActivityOutbound chain can observe them structured (not opaque bytes)
-    # before the pre-encoded bytes reach the real heartbeat_relay: see
-    # Temporalio::Activity::Pool's `_child_dispatch`/`_on_control_frame`.
+    # detail values, AFTER that heartbeat's payload conversion has succeeded
+    # (step F6; spec I7 direction B, closes GitHub #7 half B). Pure
+    # observation: the real recording still goes through heartbeat_recorder
+    # above (bytes-based, unaffected). The fork-pool child wires one that
+    # relays the Perl-level details to the parent over the pool's control
+    # channel, so the parent's ActivityOutbound chain can observe them
+    # structured (not opaque bytes) before the pre-encoded bytes reach the
+    # real heartbeat_relay: see Temporalio::Activity::Pool's
+    # `_child_dispatch`/`_on_control_frame`.
     # undef (every other construction) means no such relay.
     field $heartbeat_details_recorder :param = undef;
 
@@ -243,11 +244,26 @@ class Temporalio::Activity::Context {
     }
 
     method _record_heartbeat (@details) {
-        $heartbeat_details_recorder->(@details)
-            if defined $heartbeat_details_recorder;
+        # Encode FIRST, relay the raw details SECOND (step F6). The two go
+        # out as separate frames on the fork pool's control channel, and the
+        # parent pairs them by parking the details until the bytes arrive
+        # (Activity::Pool's 'hbd'/'hb' cases), so a details frame sent for a
+        # heartbeat that then fails to encode would sit parked and pair with
+        # a LATER heartbeat's bytes, making the parent re-encode the earlier
+        # heartbeat's args in place of the later one's. Ordering the two
+        # calls is the whole fix: a failed encode now sends neither frame,
+        # so nothing is ever parked without its own bytes following
+        # immediately. The alternative (tagging both frames with a
+        # per-invocation sequence number and pairing only on a match) buys
+        # nothing here, because the child is synchronous: it cannot have two
+        # heartbeats in flight at once, so "the details immediately before
+        # these bytes" is already an exact identification once the orphan
+        # case is gone.
         my $bytes =
             encode_heartbeat_bytes($data_converter, $info->{task_token},
                 @details);
+        $heartbeat_details_recorder->(@details)
+            if defined $heartbeat_details_recorder;
 
         my $error = $heartbeat_recorder->($bytes);
         if (defined $error && length $error) {
@@ -486,9 +502,12 @@ Constructs a Temporalio::Activity::Context. Named parameters:
 =item C<heartbeat_details_recorder>
 
 (optional, default C<undef>) A coderef invoked with the RAW, unconverted
-C<@details> before payload conversion (spec I7 direction B), for pure
-observation; the fork-pool child wires one to relay Perl-level heartbeat
-details to the parent's ActivityOutbound chain.
+C<@details> (spec I7 direction B), for pure observation; the fork-pool child
+wires one to relay Perl-level heartbeat details to the parent's
+ActivityOutbound chain. It is invoked only B<after> that heartbeat's own
+payload conversion has succeeded (step F6), so a heartbeat that fails to
+encode never announces details the real recording will not follow: see
+L<Temporalio::Activity::Pool/Frame pairing guarantees (step F6)>.
 
 =item C<outbound>
 
