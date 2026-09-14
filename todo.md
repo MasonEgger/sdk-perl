@@ -277,14 +277,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #5"
 
 ### Step F13: Prove result_type Reaches the Converter
-- [ ] 1. RED: recording converter asserts the hint on start_update result, execute_update, and the polling branch; proven RED by local break
-- [ ] 2. Verify client.py and _impl.py anchors; cite
-- [ ] 3. GREEN: fix anything exposed
-- [ ] 4. RED: none
-- [ ] 5. GREEN: none
-- [ ] 6. REFACTOR: method-name anchors in WorkflowHandle comments
-- [ ] 7. Docs: handle POD names both constructors; Interceptor POD documents opts keys
-- [ ] 8. Verify: both suites green; commit "Refs #8"
+- [x] 1. RED: recording converter asserts the hint on start_update result, execute_update, and the polling branch; proven RED by local break
+- [x] 2. Verify client.py and _impl.py anchors; cite
+- [x] 3. GREEN: fix anything exposed
+- [x] 4. RED: none
+- [x] 5. GREEN: none
+- [x] 6. REFACTOR: method-name anchors in WorkflowHandle comments
+- [x] 7. Docs: handle POD names both constructors; Interceptor POD documents opts keys
+- [x] 8. Verify: both suites green; commit "Refs #8"
 
 ### Step F14: Bound Priority to What the Wire Carries
 - [ ] 1. RED: 2**31 and 3e9 rejected, 2**31-1 accepted, overloaded object rejected, "3" round-trips; fails today

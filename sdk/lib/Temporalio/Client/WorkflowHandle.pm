@@ -486,9 +486,13 @@ class Temporalio::Client::WorkflowHandle {
     # returned outcome. 'admitted' is rejected with Argument before any RPC.
     # %opts: update_id (default a fresh UUID), wait_for_stage, result_type (I8 /
     # GitHub issue #8: optional decode hint for the eventual result, threaded to
-    # _update_handle exactly as get_update_handle's already does at :584-586;
-    # Python parity: WorkflowHandle.start_update result_type,
-    # ../sdk-python temporalio/client/_workflow.py:903).
+    # _update_handle exactly as get_update_handle already does, and from there
+    # to the payload converter as the decode type hint on both branches of
+    # WorkflowUpdateHandle::result. Python parity: WorkflowHandle.start_update
+    # result_type, ../sdk-python temporalio/client/_workflow.py:903, carried on
+    # the interceptor input as StartWorkflowUpdateInput.ret_type
+    # (client/_interceptor.py:321) and read back to build the handle at
+    # client/_impl.py:766.
     async method start_update ($name, $args = [], %opts) {
         # Also guards execute_update, which funnels its caller options here.
         Temporalio::Common::Options::assert_known_keys(
