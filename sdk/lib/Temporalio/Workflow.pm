@@ -836,6 +836,15 @@ any previous validator for the name, and removing the handler removes its
 validator too (the new definition replaces the old wholesale, as Python's
 does).
 
+A validator B<must be synchronous>: do the checks inline and throw to reject.
+A validator that returns a Future which is not ready is itself a validator
+error, and the update is rejected with a failure of type
+C<AsyncUpdateValidator> naming the fix. Attribute-declared
+(C<:UpdateValidator>) and runtime-registered validators are honored
+identically, and both pass through the workflow inbound interceptor chain's
+C<validate_update> (sdk-python's C<handle_update_validator>,
+C<_workflow_instance.py:650>).
+
 =head2 get_update_handler
 
 Returns the handler installed for exactly the given update name, or C<undef>
@@ -847,12 +856,24 @@ Installs, replaces, or removes the dynamic (catch-all) update handler, called
 with C<($name, @args)>. The optional C<validator> is honored (I9, closes #9):
 when C<run_validator> is true it runs synchronously in a read-only context
 before acceptance, under the same guard a named handler's validator runs
-under, matching Python's dynamic-definition validator fallback. Omitting it
+under. It is the dynamic definition's B<own> validator, used for updates the
+dynamic handler handles and for nothing else: a named update that has no
+validator of its own is accepted unvalidated rather than falling back to this
+one (sdk-python C<_workflow_instance.py:2938-2941>). Omitting the C<validator>
 removes any previous dynamic validator, and removing the dynamic handler
 removes its validator too. Like the handler, the dynamic validator is called
 with C<($name, @args)>, not C<(@args)> alone, so it sees exactly the same
 argument list the handler it guards does (matching sdk-python's
 C<_process_handler_args>, C<_workflow_instance.py:2400-2414>).
+
+The attribute spelling is equivalent: an C<:UpdateValidator> naming the
+C<:Update(dynamic=1)> method registers the same dynamic validator (see
+L<Temporalio::Workflow::Definition>), the Perl form of sdk-python's
+C<@workflow.update(dynamic=True)> plus C<@fn.validator>. Because both
+spellings write the same dynamic registration, a runtime install here
+replaces an attribute-declared dynamic validator too: calling this method
+without a C<validator> clears one that C<:UpdateValidator> declared, exactly
+as it clears one a previous runtime call installed.
 
 =head2 get_dynamic_update_handler
 

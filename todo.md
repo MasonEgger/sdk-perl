@@ -217,14 +217,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #7"
 
 ### Step F7: Honor Dynamic Update Validators on Every Path
-- [ ] 1. RED: attribute validator on dynamic update, no-fallback, rejection message and type, install/uninstall symmetry, interceptor validate_update observed, pending-Future validator; fails today
-- [ ] 2. Verify _workflow_instance.py:650, 1245-1250, 2938-2941; cite
-- [ ] 3. GREEN: _handlers wiring; route through validate_update; pending-Future guard
-- [ ] 4. RED: none
-- [ ] 5. GREEN: none
-- [ ] 6. REFACTOR: Workflow.pm POD reword
-- [ ] 7. Docs: validators synchronous; both registrations honored
-- [ ] 8. Verify: both suites green; commit "Refs #9"
+- [x] 1. RED: attribute validator on dynamic update, no-fallback, rejection message and type, install/uninstall symmetry, interceptor validate_update observed, pending-Future validator; fails today
+- [x] 2. Verify _workflow_instance.py:650, 1245-1250, 2938-2941; cite
+- [x] 3. GREEN: _handlers wiring; route through validate_update; pending-Future guard
+- [x] 4. RED: none
+- [x] 5. GREEN: none
+- [x] 6. REFACTOR: Workflow.pm POD reword
+- [x] 7. Docs: validators synchronous; both registrations honored
+- [x] 8. Verify: both suites green; commit "Refs #9"
 
 ### Step F8: Settle Handlers Silently During Eviction
 - [ ] 1. RED: condition-parked signal under evict, Cancelled counter, weakened runner freed, converter dies inside evict; fails today

@@ -22,6 +22,7 @@ use Temporalio::Converter::Failure ();
 use Temporalio::Interceptor::Headers ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception ();
+use Temporalio::Exception::Application ();
 use Temporalio::Exception::Cancelled ();
 use Temporalio::Exception::ChildWorkflow ();
 use Temporalio::Exception::WorkflowAlreadyStarted ();
@@ -116,9 +117,10 @@ class Temporalio::Workflow::Runner {
     # The combined worker interceptor list (client-supplied then worker-supplied,
     # spec section 27.2). Folded over a root impl once the instance exists to
     # form $workflow_inbound; execute_workflow / handle_signal / handle_query /
-    # handle_update all flow through that chain to the real handler (#10: the
-    # chain was built by Worker.pm but the dispatch path never called it). The
-    # replay harness defaults it empty (no interceptors).
+    # validate_update / handle_update all flow through that chain to the real
+    # handler (#10: the chain was built by Worker.pm but the dispatch path
+    # never called it; spec F7 added validate_update, which _apply_do_update
+    # used to bypass). The replay harness defaults it empty (no interceptors).
     field $interceptors :param = [];
 
     # The worker's runtime metric meter (spec R83), injected by the
@@ -3429,12 +3431,32 @@ class Temporalio::Workflow::Runner {
                     unfinished_policy => $bucket_pols->{$_} // 'WARN_AND_ABANDON',
                 } } keys %$bucket };
             };
+            my $validators = $wrap->($defs->{validators});
+            my $dynamic    = $wrap->($defs->{dynamic}, $pols->{dynamic} // {});
+            # Spec F7: an ATTRIBUTE-declared :UpdateValidator that names the
+            # dynamic :Update method belongs to the DYNAMIC definition, not to
+            # a named update (a dynamic handler has no update name, so the
+            # method name is the only key the attribute can carry). Promote it
+            # into the dynamic slot the runtime path writes
+            # (workflow_set_update_handler with undef $name), so
+            # _resolve_update_validator reads ONE place regardless of how the
+            # validator was registered. sdk-python reaches the same state via
+            # @workflow.update(dynamic=True) + @fn.validator, which calls
+            # set_validator on the dynamic _UpdateDefinition
+            # (workflow/_handlers.py:382). The entry is COPIED, not moved: a
+            # separately declared :Update whose NAME happens to equal that
+            # method name keeps its own validator.
+            if (my $dyn_method = $defs->{dynamic_methods}{update}) {
+                if (my $v = $validators->{$dyn_method}) {
+                    $dynamic->{update_validator} = $v;
+                }
+            }
             {
                 signals    => $wrap->($defs->{signals}, $pols->{signals} // {}),
                 queries    => $wrap->($defs->{queries}),
                 updates    => $wrap->($defs->{updates}, $pols->{updates} // {}),
-                validators => $wrap->($defs->{validators}),
-                dynamic    => $wrap->($defs->{dynamic}, $pols->{dynamic} // {}),
+                validators => $validators,
+                dynamic    => $dynamic,
             };
         };
     }
@@ -3668,15 +3690,24 @@ class Temporalio::Workflow::Runner {
         if ($job->run_validator) {
             my $validator = $self->_resolve_update_validator($name, $is_dynamic);
             if (defined $validator) {
-                # The dynamic path must hand the validator the SAME argument
-                # list the dynamic handler gets below (~:3609-3612:
-                # $is_dynamic ? ($name, @{ $in->args }) : @{ $in->args }).
-                # sdk-python builds this list ONCE via _process_handler_args
-                # and feeds it to both handle_update_validator and
-                # handle_update_handler (_workflow_instance.py:2400-2414,
-                # :650, :667). Keep these two call sites in lockstep.
+                # The validator and the handler are handed the SAME Input
+                # shape and the SAME argument list: the bare decoded @args on
+                # the Input, with the update name prepended by the `_root`
+                # coderef on the dynamic path only. sdk-python builds the list
+                # ONCE via _process_handler_args and feeds one HandleUpdateInput
+                # to both handle_update_validator and handle_update_handler
+                # (_workflow_instance.py:2400-2414, :650, :667). Keep
+                # _run_update_validator and the acceptance phase below in
+                # lockstep. The two Inputs get SEPARATE shallow copies of
+                # @args, so an interceptor that rewrites args inside
+                # validate_update cannot reach the handler. sdk-python goes
+                # further and re-decodes the payloads for the handler after
+                # validation (_workflow_instance.py:651-658), where we hand
+                # each phase a shallow copy, so an in-place mutation of a
+                # reference-typed argument by a validator can still reach the
+                # handler here (pre-existing difference, not introduced by I9).
                 my $result = $self->_run_update_validator(
-                    $validator, $is_dynamic ? [ $name, @args ] : \@args);
+                    $validator, $job->id // '', $name, $is_dynamic, \@args);
                 # A read-only-context violation is a workflow TASK failure: the
                 # error is stashed and the outcome table routes it (no
                 # UpdateResponse emitted).
@@ -3794,27 +3825,51 @@ class Temporalio::Workflow::Runner {
     # True while a durable_scheduler_disabled block is on the stack.
     method durable_scheduler_suppressed { return $durable_suppress_depth > 0 ? 1 : 0 }
 
-    # Run a sync update validator under the read-only guard (spec section 19.2
-    # step 3). Returns a hashref:
-    #   { rejected => $failure_proto }  — the validator threw a normal failure
-    #   { task_failure => 1 }           — the validator violated read-only
-    #   {}                              — the validator passed (accept)
+    # Run a sync update validator through the workflow-INBOUND chain under the
+    # read-only guard (spec section 19.2 step 3, spec F7). Returns a hashref:
+    #   { rejected => $failure_proto }  the validator threw a normal failure,
+    #                                   or was not synchronous (see below)
+    #   { task_failure => 1 }           the validator violated read-only
+    #   {}                              the validator passed (accept)
     # A read-only violation (the validator issued a command) is routed as a
     # workflow TASK failure via $current_activation_error.
-    method _run_update_validator ($validator, $args) {
+    #
+    # The chain call is $workflow_inbound->validate_update($input), the analog
+    # of sdk-python's `self._inbound.handle_update_validator(handler_input)`
+    # inside `with self._as_read_only(in_query_or_validator=True)`
+    # (_workflow_instance.py:650). An interceptor overriding validate_update
+    # therefore observes every validated update, named or dynamic, and may
+    # rewrite the Input's args before the validator sees them. The caller has
+    # already resolved WHICH validator applies (_resolve_update_validator, and
+    # the no-fallback rule with it), so the chain root just calls `_root`.
+    method _run_update_validator ($validator, $id, $name, $is_dynamic, $args) {
         my $commands_before = scalar @commands;
         my $future = Future->call(sub {
             dynamically $read_only_depth = $read_only_depth + 1;
-            return Future->wrap($self->_invoke_handler($validator, @$args));
+            my $input =
+                Temporalio::Worker::Interceptor::Input::HandleUpdate->new(
+                    id     => $id,
+                    update => $name,
+                    args   => [@$args],
+                    _root  => sub ($in) {
+                        return $self->_invoke_handler($validator,
+                            $is_dynamic
+                                ? ($name, @{ $in->args })
+                                : @{ $in->args });
+                    },
+                );
+            return Future->wrap($workflow_inbound->validate_update($input));
         });
         # Leak backstop (step R24 REFACTOR, finding R8; mirrors
         # _apply_query_workflow): commands buffered by an unguarded API inside
         # the read-only scope are stripped, and a validator that leaked without
         # dying is routed as the same task failure the guard would have raised.
+        # ->failure is only legal on a READY Future (a pending one croaks from
+        # ->await), so the readiness check comes first here and again below.
         my $leaked = scalar(@commands) - $commands_before;
         if ($leaked > 0) {
             splice @commands, $commands_before, $leaked;
-            if (!$future->failure) {
+            if (!($future->is_ready && $future->failure)) {
                 $current_activation_error //= Temporalio::Exception::ReadOnly->new(
                     message => "Temporalio::Workflow::Runner: update validator "
                              . "emitted $leaked command(s) from a read-only "
@@ -3823,6 +3878,31 @@ class Temporalio::Workflow::Runner {
                 );
                 return { task_failure => 1 };
             }
+        }
+        # Spec F7: an update validator MUST be synchronous. sdk-python calls it
+        # as `handler(*input.args)` with no await (_workflow_instance.py:2938
+        # -2945), so an `async def` validator there hands back an un-awaited
+        # coroutine that is merely truthy and the update is accepted
+        # unvalidated. Perl sees the same mistake as a Future that is not
+        # ready, and REJECTS the update: a rejection is deterministic (the same
+        # decision on every replay) and tells the caller what to fix, where
+        # accepting would ship an unvalidated update and a task failure would
+        # wedge the workflow task in a retry loop. The abandoned Future is
+        # cancelled so nothing keeps waiting on a result no one will read.
+        if (!$future->is_ready) {
+            $future->cancel;
+            return {
+                rejected => $failure_converter->to_failure(
+                    Temporalio::Exception::Application->new(
+                        message => "Update validator for '$name' must be "
+                                 . "synchronous: it returned a Future that is "
+                                 . "not ready. Do the checks inline and throw "
+                                 . "to reject; move any awaiting into the "
+                                 . "update handler.",
+                        type => 'AsyncUpdateValidator',
+                    ),
+                    $payload_converter),
+            };
         }
         if (my @failure = $future->failure) {
             my $err = $failure[0];
