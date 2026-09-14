@@ -297,8 +297,8 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #10"
 
 ### Step F15: Pin the count_workflows Group Shape (task)
-- [ ] 1. Scope: group_values asserted; POD names public decode accessor; $query optional
-- [ ] 2. Tooling: podchecker
-- [ ] 3. Do: Payload in one mocked group with isa assertion; POD rewrite
-- [ ] 4. Verify: single file, both suites, podchecker clean
-- [ ] 5. Document: commit "Refs #13"
+- [x] 1. Scope: group_values asserted; POD names public decode accessor; $query optional
+- [x] 2. Tooling: podchecker
+- [x] 3. Do: Payload in one mocked group with isa assertion; POD rewrite
+- [x] 4. Verify: single file, both suites, podchecker clean
+- [x] 5. Document: commit "Refs #13"

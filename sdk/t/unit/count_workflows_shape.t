@@ -1,6 +1,6 @@
-# ABOUTME: Pins the count_workflows return shape ahead of the I13 POD fix
-# ABOUTME: (issue #13): the code has always returned { count, groups }
-# ABOUTME: this assertion locks that shape, green from the start (R64 pattern).
+# ABOUTME: Pins the count_workflows return shape the Client POD documents
+# ABOUTME: (issue #13): { count, groups }, each group's group_values left as
+# ABOUTME: raw Payload protos the client's payload converter decodes.
 use v5.38;
 use warnings;
 use utf8;
@@ -76,7 +76,12 @@ T2->subtest('count_workflows plain form resolves to { count, groups }' => sub {
 
 # ---------------------------------------------------------------------------
 # Group-by form: the response carries AggregationGroup buckets, each with its
-# own count and group_values.
+# own count and group_values. The response is built, encoded, and decoded so
+# the assertions see what a real reply carries rather than whatever the mock
+# happened to hold: a nested value passed to ->new as a bare hashref stays a
+# hashref (.ai-sessions/lessons.md, the proto sub-message trap), while one
+# built with $Payload->new stays blessed. The decode settles the wire shape
+# either way.
 # ---------------------------------------------------------------------------
 T2->subtest('count_workflows group-by form populates groups' => sub {
     my $client = make_client;
@@ -84,23 +89,65 @@ T2->subtest('count_workflows group-by form populates groups' => sub {
         resolve('temporal.api.workflowservice.v1.CountWorkflowExecutionsResponse');
     my $Group = resolve(
         'temporal.api.workflowservice.v1.CountWorkflowExecutionsResponse.AggregationGroup');
+    my $Payload = resolve('temporal.api.common.v1.Payload');
+
+    # The first bucket carries a real search-attribute payload. metadata->{type}
+    # is the search attribute's indexed value type and metadata->{encoding} is
+    # what the payload converter dispatches on; Python reads the same two keys
+    # in _decode_search_attribute_value
+    # (../sdk-python/temporalio/converter/_search_attributes.py:207-213).
+    my $wire = $Response->new({
+        count  => 12,
+        groups => [
+            $Group->new({
+                count        => 5,
+                group_values => [
+                    $Payload->new({
+                        metadata => {
+                            type     => 'Keyword',
+                            encoding => 'json/plain',
+                        },
+                        data => '"x"',
+                    }),
+                ],
+            }),
+            $Group->new({ count => 7, group_values => [] }),
+        ],
+    })->encode;
+
     $MOCKS{ Scalar::Util::refaddr($client) } = sub {
         my ($rpc, $request, %opts) = @_;
-        return Future->done($Response->new({
-            count  => 12,
-            groups => [
-                $Group->new({ count => 5, group_values => [] }),
-                $Group->new({ count => 7, group_values => [] }),
-            ],
-        }));
+        return Future->done($Response->decode($wire));
     };
 
     my $result =
         $client->count_workflows('WorkflowType="Foo" GROUP BY ExecutionStatus')->get;
     T2->is($result->{count}, 12, 'count is the sum across groups');
+    T2->ok(!ref $result->{count}, 'count comes off the wire as a plain scalar');
+    T2->ok(Scalar::Util::looks_like_number($result->{count}),
+        'count is a number, not a proto wrapper');
     T2->is(scalar(@{ $result->{groups} }), 2, 'both aggregation buckets present');
     T2->is($result->{groups}[0]->count, 5, 'first bucket count');
     T2->is($result->{groups}[1]->count, 7, 'second bucket count');
+
+    # What the Client POD promises about group_values: raw Payload protos, left
+    # undecoded, with the client's payload converter as the decode path.
+    my $values = $result->{groups}[0]->group_values;
+    T2->is(scalar(@$values), 1, 'first bucket carries one group value');
+    T2->isa_ok($values->[0], 'Temporalio::Proto::Api::Common::V1::Payload');
+    T2->is(ref($values->[0]), $Payload,
+        'group value is the resolved Payload proto class, not a hashref');
+    T2->is($values->[0]->metadata->{type}, 'Keyword',
+        'metadata->{type} names the search attribute type');
+    T2->is($values->[0]->metadata->{encoding}, 'json/plain',
+        'metadata->{encoding} is what the payload converter dispatches on');
+    T2->is(
+        $client->data_converter->payload_converter->from_payload($values->[0]),
+        'x',
+        'the POD decode path yields the search attribute value',
+    );
+    T2->is(scalar(@{ $result->{groups}[1]->group_values // [] }), 0,
+        'a bucket with no group values stays empty');
 });
 
 T2->done_testing;

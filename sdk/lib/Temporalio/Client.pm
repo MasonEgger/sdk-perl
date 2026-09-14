@@ -1229,6 +1229,7 @@ Accessor returning the C<connection> value.
 =head2 count_workflows
 
 Async. Returns a L<Future> resolving to a hashref C<< { count => $n, groups => \@groups } >> for the given visibility query. C<count> is the approximate number of matching executions; C<groups> is empty unless the query has a C<GROUP BY> clause, in which case it holds one C<CountWorkflowExecutionsResponse::AggregationGroup> per bucket (each with its own C<count> and C<group_values>).
+Omit C<$query> to count every execution in the namespace; the request then carries an empty query string.
 
 Plain form:
 
@@ -1243,8 +1244,16 @@ Group-by form:
     }
 
 C<< $group->group_values >> holds raw C<temporal.api.common.v1.Payload>
-proto objects, not decoded search-attribute values; decode them with the
-client's data converter before printing.
+proto objects, not decoded search-attribute values. (Python decodes them into
+search attribute values; this SDK hands the payloads over untouched.) Decode
+one with the client's payload converter:
+
+    my $value = $client->data_converter->payload_converter
+        ->from_payload($group->group_values->[0]);
+
+The payload's C<< metadata->{type} >> names the search attribute's indexed
+value type (C<Keyword>, C<Int>, C<Datetime>, and so on), which is how a caller
+tells a C<Datetime> value apart from an ordinary string.
 
 =head2 create_schedule
 
