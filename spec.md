@@ -325,6 +325,7 @@ Required: a recording payload converter asserting the hint on both `start_update
 
 The guard has no upper bound, so values above int32 pass construction and die later with the codec's OutOfRange class; overloaded objects pass every clause.
 Required: an int32 upper bound and a `ref` rejection in the guard, the comment widened to what the guard actually accepts, and tests for 2**31, an overloaded object, and the string form round trip.
+The sibling `fairness_weight` guard also rejects references, closing the same hole in the same shape.
 
 ### F15: count_workflows POD must be pinned by its test (nit, from I13)
 

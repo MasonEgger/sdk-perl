@@ -11,6 +11,18 @@ use Temporalio::Core::Proto ();
 
 Temporalio::Core::Proto->load;
 
+# A scalar that numifies to a valid key (0+ returns 7) but stringifies to
+# nonsense ("" returns 'seven'). It satisfies every numeric clause of the
+# ADJUST guard, so before spec F14 it constructed cleanly and only died at
+# encode with a proto type mismatch rather than Temporalio::Exception::Argument.
+package Temporalio::Test::OverloadedNumber {
+    use overload
+        '0+'     => sub { 7 },
+        '""'     => sub { 'seven' },
+        fallback => 1;
+    sub new ($class) { return bless {}, $class }
+}
+
 # ---------------------------------------------------------------------------
 # All three fields -> temporal.api.common.v1.Priority
 # (Python parity: common.py:1149-1220 _to_proto; proto fields at
@@ -60,13 +72,18 @@ T2->subtest('non-numeric fairness_weight rejected at construction' => sub {
 });
 
 # ---------------------------------------------------------------------------
-# Construction-time priority_key validation (spec I10, GitHub issue #10).
-# Python enforces this in Priority.__post_init__
+# Construction-time priority_key validation (spec I10 and F14, GitHub issue
+# #10). Python enforces the lower half in Priority.__post_init__
 # (../sdk-python temporalio/common.py:1222-1228): when priority_key is not
-# None, it must be an int and must be >= 1.
+# None, it must be an int and must be >= 1. Perl also enforces the upper
+# half, because the proto field is int32
+# (share/proto/temporal/api/common/v1/message.proto:318): a key above
+# 2147483647 can never reach the wire, so the guard rejects it at
+# construction with Temporalio::Exception::Argument instead of letting the
+# codec raise Protobuf::Exception::Codec::OutOfRange at encode (spec F14).
 # ---------------------------------------------------------------------------
 T2->subtest('priority_key rejection matrix' => sub {
-    for my $bad (0, -1, 2.5, 'high', 'inf', 9**9**9, 'nan', '-inf') {
+    for my $bad (0, -1, 2.5, 'high', 'inf', 9**9**9, 'nan', '-inf', 2**31, 3e9) {
         my $err = T2->dies(sub {
             Temporalio::Common::Priority->new(priority_key => $bad);
         });
@@ -76,12 +93,59 @@ T2->subtest('priority_key rejection matrix' => sub {
     }
 });
 
+# ---------------------------------------------------------------------------
+# A reference is rejected before any numeric clause runs (spec F14). Overloaded
+# numification made the object look like 7 to looks_like_number, int(), and the
+# range comparisons, so only an explicit ref test keeps it out.
+# ---------------------------------------------------------------------------
+T2->subtest('overloaded object rejected at construction' => sub {
+    my $err = T2->dies(sub {
+        Temporalio::Common::Priority->new(
+            priority_key => Temporalio::Test::OverloadedNumber->new);
+    });
+    T2->ok($err, 'object with overloaded 0+ throws');
+    T2->like($err, qr/priority_key/, 'error names priority_key');
+    T2->isa_ok($err, 'Temporalio::Exception::Argument');
+
+    my $weight_err = T2->dies(sub {
+        Temporalio::Common::Priority->new(
+            fairness_weight => Temporalio::Test::OverloadedNumber->new);
+    });
+    T2->ok($weight_err, 'overloaded fairness_weight throws');
+    T2->isa_ok($weight_err, 'Temporalio::Exception::Argument');
+});
+
 T2->subtest('priority_key accepted values' => sub {
     my $with_key = Temporalio::Common::Priority->new(priority_key => 3);
     T2->is($with_key->priority_key, 3, 'positive integer accepted');
 
     my $without_key = Temporalio::Common::Priority->new(priority_key => undef);
     T2->is($without_key->priority_key, undef, 'undef accepted');
+});
+
+# ---------------------------------------------------------------------------
+# The int32 ceiling itself is a legal key, and the forms the guard accepts
+# survive a full encode/decode round trip. Perl's guard is looser than
+# Python's isinstance(int): a numeric string, a whitespace-padded string, and
+# an exponent form all numify to a whole number and encode cleanly, so pin
+# that documented divergence here (spec F14).
+# ---------------------------------------------------------------------------
+T2->subtest('priority_key int32 ceiling and string forms round-trip' => sub {
+    my $Priority = Temporalio::Core::Proto::resolve(
+        'temporal.api.common.v1.Priority');
+
+    my %cases = (
+        '2147483647' => 2147483647,   # int32 max, the highest legal key
+        '3'          => 3,            # numeric string, unlike Python's int-only
+        ' 1'         => 1,            # looks_like_number tolerates padding
+        '1e0'        => 1,            # exponent form numifies to a whole number
+    );
+    for my $input (sort keys %cases) {
+        my $pri = Temporalio::Common::Priority->new(priority_key => $input);
+        my $round = $Priority->decode($pri->to_proto->encode);
+        T2->is($round->priority_key, $cases{$input},
+            "priority_key '$input' round-trips as $cases{$input}");
+    }
 });
 
 # ---------------------------------------------------------------------------

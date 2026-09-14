@@ -287,14 +287,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #8"
 
 ### Step F14: Bound Priority to What the Wire Carries
-- [ ] 1. RED: 2**31 and 3e9 rejected, 2**31-1 accepted, overloaded object rejected, "3" round-trips; fails today
-- [ ] 2. Verify common.py:1222-1228; cite
-- [ ] 3. GREEN: ref and int32 upper-bound clauses
-- [ ] 4. RED: none
-- [ ] 5. GREEN: none
-- [ ] 6. REFACTOR: widen guard comment
-- [ ] 7. Docs: Priority POD states int32 bound
-- [ ] 8. Verify: both suites green; commit "Refs #10"
+- [x] 1. RED: 2**31 and 3e9 rejected, 2**31-1 accepted, overloaded object rejected, "3" round-trips; fails today
+- [x] 2. Verify common.py:1222-1228; cite
+- [x] 3. GREEN: ref and int32 upper-bound clauses
+- [x] 4. RED: none
+- [x] 5. GREEN: none
+- [x] 6. REFACTOR: widen guard comment
+- [x] 7. Docs: Priority POD states int32 bound
+- [x] 8. Verify: both suites green; commit "Refs #10"
 
 ### Step F15: Pin the count_workflows Group Shape (task)
 - [ ] 1. Scope: group_values asserted; POD names public decode accessor; $query optional

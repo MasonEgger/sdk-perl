@@ -2,6 +2,9 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- A value guard must test `ref` BEFORE any numeric clause, because an object with overloaded numification passes every one of them (F14, GitHub issue #10).
+  `Scalar::Util::looks_like_number` follows an overloaded `0+`, and so do `int()` and every comparison, so a blessed reference whose `0+` returns 7 satisfied the whole `priority_key` guard, constructed cleanly, and died much later inside the codec with a proto type mismatch instead of `Temporalio::Exception::Argument` at the offending line.
+  Test what the value IS before testing what it looks like numerically, and prove it with a fixture class whose `0+` returns a legal value and whose `""` returns nonsense, since a fixture that stringifies plausibly cannot distinguish the `ref` clause from the `looks_like_number` one (2026-09-14)
 - A type hint is only proven CONSUMED when the test's payload converter is sensitive to it (F13, GitHub issue #8).
   Every stock converter in this SDK self-describes and discards the `$type_hint` it is handed, so a client built with `Temporalio::Converter::Data->new` cannot tell a handle that threads `result_type` into `from_payloads` from one that stores it on a field and passes `undef`: the accessor assertion and a constructor-kwargs spy both stay green under that mutation.
   Give the test client a payload converter that RECORDS each hint (a `:isa(Temporalio::Converter::Payload)` class delegating to the Json converter, as `t/unit/start_update_result_type.t` does), assert on the recorded list, and prove RED by flipping the real argument to `undef` rather than by deleting the feature (2026-09-14)
@@ -33,10 +36,6 @@
 - A vendoring tool that wipes its destination must validate EVERY source tree BEFORE the wipe, never inside the copy loop that follows it (F5: `xt/author/vendor-protos.pl` checked each source subtree after `remove_tree($dest)`, so a source root that existed but was missing one subtree emptied `share/proto` and only then died).
   Hoist the existence checks into their own pass ahead of the destructive step.
   The failure mode otherwise is strictly worse than not running the tool at all: the working state is gone and the replacement never arrives (2026-09-13)
-- sdk-core's shutdown counts a workflow run as pending work only when `has_any_pending_work` says so (`../sdk-rust crates/sdk-core/src/worker/workflow/workflow_stream.rs:554` -> `managed_run.rs:840`): an outstanding WFT, activation, or buffered task, or `trying_to_evict` set.
-  A merely CACHED run is none of those, so "cache a run, then break the poll loop" does NOT reproduce a shutdown wedge; the idle run owes core no eviction round trip and shutdown completes (F3, GitHub issue #3, where the plan's stated RED was exactly that and passed pre-fix).
-  To make core genuinely owe a reply the dead loop can fail to send, build the worker with `max_cached_workflows => 0`, which queues an eviction the instant a workflow task completes.
-  The pre-fix signal is then deterministic (exactly one workflow completion sent, plus a core-side "Activation processor channel not dropped" panic on its workflow-processing thread), not a timeout (2026-09-13)
 
 ## Testing
 - A mocked-RPC test proves a paging loop only when the responder scripts at least TWO pages and the caller's options are all NON-defaults (F11, GitHub issue #11).
@@ -150,6 +149,10 @@
 
 ## Rust
 - cbindgen renders opaque `_private: [u8; 0]` structs as zero-size definitions; borrowed foreign types need `[export] exclude` + `after_includes` forward typedefs to coexist with the owning header (2026-06-11)
+- sdk-core's shutdown counts a workflow run as pending work only when `has_any_pending_work` says so (`../sdk-rust crates/sdk-core/src/worker/workflow/workflow_stream.rs:554` -> `managed_run.rs:840`): an outstanding WFT, activation, or buffered task, or `trying_to_evict` set.
+  A merely CACHED run is none of those, so "cache a run, then break the poll loop" does NOT reproduce a shutdown wedge; the idle run owes core no eviction round trip and shutdown completes (F3, GitHub issue #3, where the plan's stated RED was exactly that and passed pre-fix).
+  To make core genuinely owe a reply the dead loop can fail to send, build the worker with `max_cached_workflows => 0`, which queues an eviction the instant a workflow task completes.
+  The pre-fix signal is then deterministic (exactly one workflow completion sent, plus a core-side "Activation processor channel not dropped" panic on its workflow-processing thread), not a timeout (2026-09-13)
 
 ## Perl
 - A Perl "positive integer" guard built from `looks_like_number` + `int()`-equality + `>= 1` still admits `+Inf` (I10, GitHub issue #10: `'inf'`, `'Infinity'`, and `9**9**9` all satisfy `looks_like_number`, equal their own `int()`, and are `>= 1`). Add an explicit finiteness check (`$x - $x != 0` is true for Inf/NaN, false for any finite number) or a whole-number regex instead of trusting the int-equality trick alone (2026-09-13)
