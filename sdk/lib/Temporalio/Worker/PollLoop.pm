@@ -68,6 +68,23 @@ class Temporalio::Worker::PollLoop {
         die $dispatch_error if defined $dispatch_error;
         return;
     }
+
+    # drain_in_flight() (spec F3, GitHub issue #3): a Future that settles once
+    # every dispatch this loop still has running has finished. run() awaits its
+    # own @in_flight on the exit paths it controls, but a poll source that DIES
+    # throws straight out of the while loop above, so those dispatches are left
+    # un-awaited and their completions unsent. Core is waiting on exactly that
+    # work (at_task_mgr::shutdown does not finish while an activity body is
+    # outstanding), and the futures are cancelled the moment this object goes
+    # away, so Worker::run calls this on the fatal unwind to let them settle
+    # before _finalize_and_free. Mirrors Python's wait_all_completed
+    # (../sdk-python worker/_worker.py:865-871). Never fails: wait_all cannot,
+    # and a dispatch failure on this path is subordinate to the poll-source
+    # death run() is already unwinding. Safe on a loop that never ran and safe
+    # to call more than once.
+    method drain_in_flight () {
+        return Future->wait_all(@in_flight);
+    }
 }
 
 1;
@@ -104,6 +121,11 @@ sent. A dispatcher maps task-processing dies to failed completions itself
 core was broken; C<run> surfaces that by failing, after draining the remaining
 in-flight dispatches — it is never warned-and-swallowed (finding R5: the
 swallow left workflow tasks uncompleted and the workflow wedged until timeout).
+
+A POLL SOURCE that dies is different: it throws out of the loop before that
+in-flight drain is reached, so C<run> fails with dispatches still running.
+C<drain_in_flight> exposes them to the caller, which is what
+L<Temporalio::Worker>'s fatal unwind awaits before finalizing (spec F3).
 
 Making the poll source injectable lets unit tests feed crafted C<ActivityTask>
 protos (and the shutdown sentinel) without a live server; the worker supplies a
@@ -142,6 +164,16 @@ Constructs a Temporalio::Worker::PollLoop. Named parameters:
 =head2 dispatcher
 
 Accessor returning the C<dispatcher> value.
+
+=head2 drain_in_flight
+
+    await $loop->drain_in_flight;
+
+Returns a L<Future> that settles once every dispatch the loop still has running
+has finished. C<run> already does this on the exit paths it controls, but a
+poll source that dies throws out of the loop with those dispatches un-awaited;
+L<Temporalio::Worker>'s fatal unwind calls this so their completions still
+reach core before the worker is finalized (spec F3). Never fails.
 
 =head2 poll_source
 

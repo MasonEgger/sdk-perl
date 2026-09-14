@@ -99,6 +99,15 @@ class Temporalio::Worker::ActivityDispatcher {
     # (worker/_activity.py:185-187, called from _worker.py:840-850).
     method notify_shutdown () {
         $worker_shutdown_event->set;
+        # spec I7 direction A (closes GitHub #7 half A): reach pooled
+        # activities too. Pool->notify_shutdown broadcasts a 'shutdown'
+        # frame to every fork-pool child over the same control channel that
+        # carries cancellation details, so a pooled body's
+        # is_worker_shutdown/wait_for_worker_shutdown observe shutdown-begin
+        # the same way an async body's do. Pre-I7 the pool had no shutdown
+        # signal at all (the fork-pool child's Context.worker_shutdown_event
+        # was always undef).
+        $pool->notify_shutdown if defined $pool;
         return;
     }
 
@@ -237,7 +246,8 @@ class Temporalio::Worker::ActivityDispatcher {
                         info    => $info,
                         _root => sub ($in) {
                             return $self->_run_in_pool($task_token, $info,
-                                $cancellation, @{ $in->args });
+                                $cancellation, $details_holder, $outbound,
+                                @{ $in->args });
                         },
                     );
                 $result = await $inbound->execute_activity($input);
@@ -248,12 +258,15 @@ class Temporalio::Worker::ActivityDispatcher {
                 # the injected recorder.
                 # outbound is the finished activity-outbound chain from
                 # build_chains above (spec R72): the context routes the body's
-                # heartbeat()/info() through it. The fork-pool path builds its
-                # OWN context in the child with no chain (interceptor objects
-                # do not cross the fork), so pooled sync-activity heartbeats
-                # bypass the outbound chain — a documented spec §0 deviation
-                # from Python, whose shared-state manager heartbeats
-                # parent-side through the chain (_activity.py:857-865).
+                # heartbeat()/info() through it. The fork-pool path (spec I7,
+                # closes GitHub #7) builds its OWN context in the child with no
+                # chain OBJECT (interceptor instances do not cross the fork),
+                # but the SAME $outbound instance also reaches the pool via
+                # _run_in_pool below: a pooled heartbeat relays its raw Perl
+                # details to the parent, which runs this identical chain there
+                # before forwarding to the real recorder, matching Python's
+                # shared-state manager, which heartbeats parent-side through
+                # the chain (_activity.py:857-865).
                 my $ctx = Temporalio::Activity::Context->new(
                     info               => $info,
                     cancellation       => $cancellation,
@@ -265,9 +278,11 @@ class Temporalio::Worker::ActivityDispatcher {
                     cancellation_details_holder => $details_holder,
                     # The dispatcher-wide shutdown event (spec R84): shared,
                     # not per-activity, so one notify_shutdown reaches every
-                    # running body. The fork-pool path's child context gets
-                    # none (the event does not cross the fork — the
-                    # cancellation_details deviation, documented there).
+                    # running body. The fork-pool path's child context gets a
+                    # Temporalio::Activity::ChildShutdownEvent instead (this
+                    # SAME event object cannot cross the fork), fed by the
+                    # pool's own notify_shutdown broadcast (spec I7 direction
+                    # A); see notify_shutdown below, which fires both.
                     worker_shutdown_event => $worker_shutdown_event,
                     metric_meter       => $metric_meter,
                 );
@@ -355,8 +370,15 @@ class Temporalio::Worker::ActivityDispatcher {
     # forward a cancel that fires WHILE the child runs down its live control
     # channel — pre-R19 the flag below was the ONLY hand-off, so a cancel
     # task arriving mid-body (_handle_cancel cancelling this token) was
-    # invisible in-child and the body ran to completion.
-    async method _run_in_pool ($task_token, $info, $cancellation, @args) {
+    # invisible in-child and the body ran to completion. $details_holder and
+    # $outbound (spec I7, closes GitHub #7) are the SAME shared holder and
+    # ActivityOutbound chain the async branch above uses: passing them to
+    # the pool lets a delivered cancel carry its reason/details down to the
+    # child (direction A) and a relayed heartbeat run through the chain
+    # parent-side before reaching the real recorder (direction B).
+    async method _run_in_pool ($task_token, $info, $cancellation,
+        $details_holder, $outbound, @args)
+    {
         Temporalio::Exception::Application->throw(
             message => 'Sync activity dispatched but the worker has no activity'
                 . ' pool configured',
@@ -370,7 +392,11 @@ class Temporalio::Worker::ActivityDispatcher {
             task_token    => $task_token,
             cancelled     => $cancellation->is_cancelled,
         );
-        return await $pool->invoke($inv, cancellation => $cancellation);
+        return await $pool->invoke($inv,
+            cancellation    => $cancellation,
+            details_holder  => $details_holder,
+            outbound        => $outbound,
+        );
     }
 
     # Build the failed/cancelled completion for a thrown $error. A Cancelled

@@ -93,6 +93,9 @@ class Temporalio::Client {
     # delegate to the service client.
     method workflow_service { $connection->workflow_service }
     method operator_service { $connection->operator_service }
+    method cloud_service    { $connection->cloud_service }
+    method test_service     { $connection->test_service }
+    method health_service   { $connection->health_service }
 
     # _outbound — the client outbound interceptor chain head (spec section 27.2).
     # Built once: a root OutboundInterceptor whose methods perform the real
@@ -555,7 +558,9 @@ class Temporalio::Client {
         ) {
             my ($kw, $proto_field) = @$pair;
             my $seconds = delete $k{$kw};
-            $fields{$proto_field} = _duration($seconds) if defined $seconds;
+            $fields{$proto_field} =
+                Temporalio::Core::Proto::duration_from_seconds($seconds)
+                if defined $seconds;
         }
 
         if (my $args_ref = $args) {
@@ -716,13 +721,8 @@ class Temporalio::Client {
         return $num;
     }
 
-    sub _duration ($seconds) {
-        my $Duration = Temporalio::Core::Proto::resolve(
-            'google.protobuf.Duration');
-        my $whole = int($seconds);
-        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-        return $Duration->new({ seconds => $whole, nanos => $nanos });
-    }
+    # The seconds<->google.protobuf.Duration conversion pair lives in
+    # Temporalio::Core::Proto (I14; formerly a local _duration helper here).
 
     # True when the error is a server ALREADY_EXISTS (gRPC code 6). On
     # CreateSchedule the section 7.5 table maps this to a generic RpcError
@@ -1058,7 +1058,10 @@ RPCs the high-level client does not wrap remain reachable through the raw
 service handles (spec R91): C<workflow_service> and C<operator_service>
 return L<Temporalio::Client::WorkflowService> and
 L<Temporalio::Client::OperatorService> handles whose per-rpc methods are
-generated from the vendored proto service descriptors.
+generated from the vendored proto service descriptors. C<cloud_service>,
+C<test_service>, and C<health_service> (spec I12) return the same kind of
+generated handle over the Temporal Cloud, time-skipping test server, and
+gRPC health-check RPC surfaces respectively.
 
 Workflow operations (C<start_workflow> and friends, spec section 7.4) are
 documented under L</METHODS>.
@@ -1225,7 +1228,32 @@ Accessor returning the C<connection> value.
 
 =head2 count_workflows
 
-Async. Returns a L<Future> resolving to the count of executions matching the given visibility query.
+Async. Returns a L<Future> resolving to a hashref C<< { count => $n, groups => \@groups } >> for the given visibility query. C<count> is the approximate number of matching executions; C<groups> is empty unless the query has a C<GROUP BY> clause, in which case it holds one C<CountWorkflowExecutionsResponse::AggregationGroup> per bucket (each with its own C<count> and C<group_values>).
+Omit C<$query> to count every execution in the namespace; the request then carries an empty query string.
+
+Plain form:
+
+    my $result = await $client->count_workflows('WorkflowType="MyWorkflow"');
+    say $result->{count};
+
+Group-by form:
+
+    my $result = await $client->count_workflows('WorkflowType="MyWorkflow" GROUP BY ExecutionStatus');
+    for my $group (@{ $result->{groups} }) {
+        say $group->count;
+    }
+
+C<< $group->group_values >> holds raw C<temporal.api.common.v1.Payload>
+proto objects, not decoded search-attribute values. (Python decodes them into
+search attribute values; this SDK hands the payloads over untouched.) Decode
+one with the client's payload converter:
+
+    my $value = $client->data_converter->payload_converter
+        ->from_payload($group->group_values->[0]);
+
+The payload's C<< metadata->{type} >> names the search attribute's indexed
+value type (C<Keyword>, C<Int>, C<Datetime>, and so on), which is how a caller
+tells a C<Datetime> value apart from an ordinary string.
 
 =head2 create_schedule
 
@@ -1357,6 +1385,26 @@ and converters.
 Returns a L<Temporalio::Client::OperatorService> raw service handle over the
 OperatorService RPC surface, e.g. search-attribute management (spec R91;
 Python C<_client.py:316-318> parity). Same raw-call semantics as
+L</workflow_service>.
+
+=head2 cloud_service
+
+Returns a L<Temporalio::Client::CloudService> raw service handle over the
+Temporal Cloud CloudService RPC surface, e.g. user, namespace, and billing
+management (spec I12; Python C<service.py:255,326> parity). Same raw-call
+semantics as L</workflow_service>.
+
+=head2 test_service
+
+Returns a L<Temporalio::Client::TestService> raw service handle over the
+time-skipping test server's TestService RPC surface (spec I12; Python
+C<service.py:256,329> parity). Same raw-call semantics as L</workflow_service>.
+
+=head2 health_service
+
+Returns a L<Temporalio::Client::HealthService> raw service handle over the
+standard gRPC health-checking protocol (spec I12; Python
+C<service.py:257,332> parity). Same raw-call semantics as
 L</workflow_service>.
 
 =head1 OMITTED LEGACY BUILD-ID APIS

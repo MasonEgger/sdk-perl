@@ -160,6 +160,46 @@ T2->subtest('keyword_list rejects non-string elements' => sub {
         or T2->diag('got: ' . (ref($err) || $err // 'no exception'));
 });
 
+# _from_metadata_type MUST-match sdk-python SearchAttributeKey._from_metadata_type
+# (common.py:524-541), which accepts both the usual PascalCase type metadata
+# and the SCREAMING_SNAKE_CASE INDEXED_VALUE_TYPE_* forms the server emits in
+# rare cases.
+my %SNAKE_ALIAS = (
+    Text        => 'INDEXED_VALUE_TYPE_TEXT',
+    Keyword     => 'INDEXED_VALUE_TYPE_KEYWORD',
+    Int         => 'INDEXED_VALUE_TYPE_INT',
+    Double      => 'INDEXED_VALUE_TYPE_DOUBLE',
+    Bool        => 'INDEXED_VALUE_TYPE_BOOL',
+    Datetime    => 'INDEXED_VALUE_TYPE_DATETIME',
+    KeywordList => 'INDEXED_VALUE_TYPE_KEYWORD_LIST',
+);
+
+T2->subtest(
+    '_from_metadata_type accepts SCREAMING_SNAKE_CASE INDEXED_VALUE_TYPE_* aliases'
+        => sub {
+    for my $pascal (sort keys %SNAKE_ALIAS) {
+        my $snake = $SNAKE_ALIAS{$pascal};
+
+        my $from_pascal = Temporalio::Common::SearchAttributeKey
+            ->_from_metadata_type('Field', $pascal);
+        my $from_snake = Temporalio::Common::SearchAttributeKey
+            ->_from_metadata_type('Field', $snake);
+
+        T2->ok(defined $from_snake, "$snake resolves to a key")
+            or next;
+        T2->is($from_snake->metadata_type, $pascal,
+            "$snake decodes to PascalCase metadata_type $pascal");
+        T2->is($from_snake->indexed_value_type, $from_pascal->indexed_value_type,
+            "$snake indexed_value_type matches its $pascal twin");
+        T2->is($from_snake->name, 'Field', "$snake preserves the name");
+    }
+
+    T2->ok(
+        !defined Temporalio::Common::SearchAttributeKey
+            ->_from_metadata_type('Field', 'INDEXED_VALUE_TYPE_UNSPECIFIED'),
+        'an unrecognized SCREAMING_SNAKE_CASE type still returns undef');
+});
+
 # ---------------------------------------------------------------------------
 # TypedSearchAttributes -> SearchAttributes proto map
 # ---------------------------------------------------------------------------
@@ -189,6 +229,42 @@ T2->subtest('TypedSearchAttributes encode into the proto map' => sub {
     my $back  = $class->decode($proto->encode);
     T2->is($back->indexed_fields->{CustomIntField}->data, '42',
         'survives encode/decode');
+});
+
+T2->subtest(
+    'TypedSearchAttributes::_from_proto decodes SCREAMING_SNAKE_CASE type '
+        . 'metadata like its PascalCase twin'
+        => sub {
+    my $SearchAttributes = Temporalio::Core::Proto::resolve(
+        'temporal.api.common.v1.SearchAttributes');
+    my $Payload = Temporalio::Core::Proto::resolve(
+        'temporal.api.common.v1.Payload');
+
+    my $proto = $SearchAttributes->new({
+        indexed_fields => {
+            PascalField => $Payload->new({
+                metadata => { encoding => 'json/plain', type => 'Int' },
+                data     => '42',
+            }),
+            SnakeField => $Payload->new({
+                metadata => {
+                    encoding => 'json/plain',
+                    type     => 'INDEXED_VALUE_TYPE_INT',
+                },
+                data => '42',
+            }),
+        },
+    });
+
+    my $tsa = Temporalio::Common::TypedSearchAttributes->_from_proto($proto);
+    my %by_name = map { $_->[0]->name => $_->[1] } @{ $tsa->pairs };
+    T2->is($by_name{PascalField}, 42, 'PascalCase type metadata decodes');
+    T2->is($by_name{SnakeField}, 42,
+        'SCREAMING_SNAKE_CASE type metadata decodes to the same value');
+
+    my %key_by_name = map { $_->[0]->name => $_->[0] } @{ $tsa->pairs };
+    T2->is($key_by_name{SnakeField}->metadata_type, 'Int',
+        'decoded key normalizes back to PascalCase metadata_type');
 });
 
 T2->subtest('empty TypedSearchAttributes -> empty map' => sub {

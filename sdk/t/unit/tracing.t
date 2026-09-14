@@ -2,7 +2,9 @@
 # ABOUTME: v1 spec section 27.4): drives the PUBLIC wrapper surface with a fake
 # ABOUTME: tracer/propagator (t/lib/FakeOTel.pm) — spans per intercepted surface,
 # ABOUTME: _tracer-data inject/extract round-trip, error status, replay-safe
-# ABOUTME: workflow spans — plus the headless helpers and the OTel-gated fixture.
+# ABOUTME: workflow spans; plus the headless helpers, the OTel-gated fixture, and
+# ABOUTME: the F1 end-to-end pass: a real Runner driven through the replay harness
+# ABOUTME: whose emitted ScheduleActivity header decodes to the carrier in ONE step.
 use v5.38;
 use warnings;
 use utf8;
@@ -22,6 +24,10 @@ use Temporalio::Client::Interceptor ();
 use Temporalio::Worker::Interceptor ();
 use Temporalio::Workflow::Unsafe ();
 use Temporalio::Exception::Application ();
+use Temporalio::Converter::Payload ();
+use Temporalio::Interceptor::Headers ();
+use Temporalio::Payload ();
+use Temporalio::Test::WorkflowReplay ();
 use FakeOTel ();
 
 # The Temporalio::*::Interceptor modules pull Future::AsyncAwait's parser hook
@@ -46,6 +52,22 @@ sub carrier_payload {
         metadata => { encoding => 'json/plain' },
         data     => JSON::PP->new->canonical->utf8->encode($carrier),
     };
+}
+
+# F1: the same carrier as a BLESSED wire Payload, the shape the inbound side
+# actually receives (ActivityDispatcher threads the activity Start task's
+# header_fields straight into the input, and those are proto Payloads off the
+# wire). sdk-python's header type is Mapping[str, Payload] on BOTH sides and
+# it builds the value with payload_converter.to_payloads([carrier])[0]
+# (contrib/opentelemetry/_interceptor.py:675-682), so a blessed Payload is
+# the contract, not a hashref. Signature-less for the same parser reason as
+# carrier_payload above.
+sub blessed_carrier_payload {
+    my ($carrier) = @_;
+    return Temporalio::Payload->new({
+        metadata => { encoding => 'json/plain' },
+        data     => JSON::PP->new->canonical->utf8->encode($carrier),
+    });
 }
 
 my $TP1 = '00-' . ('1' x 32) . '-' . ('a' x 16) . '-01';
@@ -107,6 +129,11 @@ class RecActivityNext :isa(Temporalio::Worker::ActivityInbound) {
 class RecWorkflowNext :isa(Temporalio::Worker::WorkflowInbound) {
     field $seen :param;
     field $fail :param = undef;
+    # init capture (I6): records whatever outbound the OTel interceptor's
+    # init() delegates down-chain, so the test can read $seen->{init_outbound}
+    # to reach the WRAPPED tracing outbound (the OUTBOUND-SPAN SEAM contract:
+    # init wraps $args[0] and delegates the wrapped instance).
+    method init { my ($outbound) = @_; $seen->{init_outbound} = $outbound; return }
     method execute_workflow {
         my ($in) = @_;
         $seen->{execute_workflow} = $in;
@@ -117,6 +144,46 @@ class RecWorkflowNext :isa(Temporalio::Worker::WorkflowInbound) {
     method validate_update { my ($in) = @_; $seen->{validate_update} = $in; return 'v-done' }
     method handle_update   { my ($in) = @_; $seen->{handle_update}   = $in; return 'u-done' }
 }
+
+# I6: workflow-outbound chain root fixture: records the Input each traced op
+# receives (after any span+inject wrapping) and returns a delegation marker,
+# mirroring RecClientNext/RecActivityNext for the outbound surface.
+class RecOutboundNext :isa(Temporalio::Worker::WorkflowOutbound) {
+    field $seen :param;
+    method execute_activity {
+        my ($in) = @_; $seen->{execute_activity} = $in; return 'res-execute_activity' }
+    method execute_local_activity {
+        my ($in) = @_; $seen->{execute_local_activity} = $in;
+        return 'res-execute_local_activity' }
+    method start_child_workflow {
+        my ($in) = @_; $seen->{start_child_workflow} = $in;
+        return 'res-start_child_workflow' }
+    method signal_child_workflow {
+        my ($in) = @_; $seen->{signal_child_workflow} = $in;
+        return 'res-signal_child_workflow' }
+    method signal_external_workflow {
+        my ($in) = @_; $seen->{signal_external_workflow} = $in;
+        return 'res-signal_external_workflow' }
+    method continue_as_new {
+        my ($in) = @_; $seen->{continue_as_new} = $in;
+        die "continue_as_new reached the chain root\n" }
+    method start_nexus_operation {
+        my ($in) = @_; $seen->{start_nexus_operation} = $in;
+        return 'res-start_nexus_operation' }
+    method info { my ($in) = @_; $seen->{info} = $in; return 'res-info' }
+}
+
+# I6 replay fixture: a minimal $Temporalio::Workflow::Runner::CURRENT stand-in
+# so _wf_replaying (which reads Temporalio::Workflow::is_replaying, which
+# reads $Runner::CURRENT) reports "replaying" without a real Runner. Every
+# other headless subtest in this file runs with no $CURRENT set, which raises
+# NoRunner inside the eval and so defaults _wf_replaying to false.
+package FakeReplayRunner;
+sub new ($class) { bless {}, $class }
+sub is_replaying    ($self) { 1 }
+sub activation_time ($self) { 1700000000 }
+sub info             ($self) { {} }
+package main;
 
 # --------------------------------------------------------------------------
 # R22 + R41: client outbound surface — a span per call, context injected into
@@ -424,6 +491,507 @@ T2->subtest('R22 CompleteWorkflow on failure' => sub {
 });
 
 # --------------------------------------------------------------------------
+# I6 (closes GitHub #6): workflow-outbound surface: a completed span per
+# traced op (the %OUT_SPAN_VERB table), the NEW span's context injected into
+# the op's outbound headers, parented on the run's cached inbound context.
+# MUST-match sdk-python _TracingWorkflowOutboundInterceptor
+# (contrib/opentelemetry/_interceptor.py:751-831): start_activity /
+# start_local_activity -> StartActivity:{activity} CLIENT (both reuse the
+# same verb, :789-820); start_child_workflow -> StartChildWorkflow:{workflow}
+# CLIENT (:800-809); signal_child_workflow -> SignalChildWorkflow:{signal}
+# SERVER (:767-776); signal_external_workflow ->
+# SignalExternalWorkflow:{signal} CLIENT (:778-787); start_nexus_operation ->
+# StartNexusOperation:{service}/{operation} CLIENT with PLAIN STRING headers
+# (add_to_outbound_str / _carrier_to_nexus_headers:834-843, NOT a
+# _tracer-data Payload, spec section 26.1); continue_as_new injects the run's
+# context into headers with NO span at all (_context_to_headers:762-765).
+# --------------------------------------------------------------------------
+T2->subtest('I6 workflow outbound: spans + header inject per op' => sub {
+    my $tracer = FakeOTel::Tracer->new;
+    my $i = $TI->new(tracer => $tracer, propagator => FakeOTel::Propagator->new);
+    my %seen;
+    my $wi = $i->intercept_workflow(RecWorkflowNext->new(seen => \%seen));
+
+    # Cache the run's inbound context (execute_workflow with a start header,
+    # same scaffolding as the R22 workflow-inbound subtest above): every
+    # outbound span below parents on $TP1.
+    $wi->execute_workflow(
+        Temporalio::Worker::Interceptor::Input::ExecuteWorkflow->new(
+            type    => 'Greet',
+            args    => [],
+            headers => { '_tracer-data' => carrier_payload({ traceparent => $TP1 }) },
+        ))->get;
+
+    # init() wraps the received outbound (the OUTBOUND-SPAN SEAM contract)
+    # and delegates the WRAPPED instance down-chain; RecWorkflowNext's init
+    # captures it in $seen->{init_outbound}.
+    my %ob_seen;
+    $wi->init(RecOutboundNext->new(seen => \%ob_seen));
+    my $ob = $seen{init_outbound};
+    T2->ok(Scalar::Util::blessed($ob), 'init delegated a wrapped outbound down-chain');
+    T2->isa_ok($ob, ['Temporalio::Worker::WorkflowOutbound'],
+        'the wrapped outbound is still a WorkflowOutbound');
+
+    # execute_activity -> StartActivity:{activity}, CLIENT.
+    my $act_res = $ob->execute_activity(
+        Temporalio::Worker::Interceptor::Input::StartActivity->new(
+            activity => 'Charge', args => [], headers => {}, kwargs => {}));
+    T2->is($act_res, 'res-execute_activity', 'delegation result preserved');
+    my $act_spans = $tracer->spans_named('StartActivity:Charge');
+    T2->is(scalar @$act_spans, 1, 'StartActivity:{activity} span');
+    T2->is($act_spans->[0]->kind, 'client', 'client span kind');
+    T2->is($act_spans->[0]->parent->carrier->{traceparent}, $TP1,
+        'parented on the cached workflow context');
+    my $act_hdr = $ob_seen{execute_activity}->headers->{'_tracer-data'};
+    T2->ok(defined $act_hdr, '_tracer-data injected into the activity headers');
+    T2->is($i->_payload_to_carrier($act_hdr)->{traceparent},
+        $act_spans->[0]->traceparent,
+        'injected carrier round-trips the NEW span context');
+
+    # F1: every op injects ITS OWN span's context, not the run's parent. Before
+    # F1 only execute_activity asserted the round trip; the other four asserted
+    # `defined` only, so an op that injected the cached wf_carrier (or another
+    # op's context) would have passed.
+
+    # execute_local_activity reuses the StartActivity verb (Python :811-820).
+    $ob->execute_local_activity(
+        Temporalio::Worker::Interceptor::Input::StartLocalActivity->new(
+            activity => 'LocalCharge', args => [], headers => {}, kwargs => {}));
+    my $la_spans = $tracer->spans_named('StartActivity:LocalCharge');
+    T2->is(scalar @$la_spans, 1,
+        'execute_local_activity reuses the StartActivity:{activity} verb');
+    my $la_hdr = $ob_seen{execute_local_activity}->headers->{'_tracer-data'};
+    T2->ok(defined $la_hdr, 'local-activity header injected');
+    T2->is($i->_payload_to_carrier($la_hdr)->{traceparent},
+        $la_spans->[0]->traceparent,
+        'the local-activity carrier round-trips ITS OWN span context');
+
+    # start_child_workflow -> StartChildWorkflow:{workflow}, CLIENT.
+    $ob->start_child_workflow(
+        Temporalio::Worker::Interceptor::Input::StartChildWorkflow->new(
+            workflow => 'Child', args => [], headers => {}, kwargs => {}));
+    my $child_spans = $tracer->spans_named('StartChildWorkflow:Child');
+    T2->is(scalar @$child_spans, 1, 'StartChildWorkflow:{workflow} span');
+    T2->is($child_spans->[0]->kind, 'client', 'client span kind');
+    my $child_hdr = $ob_seen{start_child_workflow}->headers->{'_tracer-data'};
+    T2->ok(defined $child_hdr, 'start_child_workflow header injected');
+    T2->is($i->_payload_to_carrier($child_hdr)->{traceparent},
+        $child_spans->[0]->traceparent,
+        'the child-start carrier round-trips ITS OWN span context');
+
+    # signal_child_workflow -> SignalChildWorkflow:{signal}, SERVER.
+    $ob->signal_child_workflow(
+        Temporalio::Worker::Interceptor::Input::SignalChildWorkflow->new(
+            signal => 'go', child_workflow_id => 'child-1',
+            args => [], headers => {}));
+    my $sig_child = $tracer->spans_named('SignalChildWorkflow:go');
+    T2->is(scalar @$sig_child, 1, 'SignalChildWorkflow:{signal} span');
+    T2->is($sig_child->[0]->kind, 'server', 'server span kind (Python parity)');
+    my $sig_child_hdr = $ob_seen{signal_child_workflow}->headers->{'_tracer-data'};
+    T2->ok(defined $sig_child_hdr, 'signal_child_workflow header injected');
+    T2->is($i->_payload_to_carrier($sig_child_hdr)->{traceparent},
+        $sig_child->[0]->traceparent,
+        'the signal-child carrier round-trips ITS OWN span context');
+
+    # signal_external_workflow -> SignalExternalWorkflow:{signal}, CLIENT. This
+    # op also proves REPLACEMENT: it starts with a stale _tracer-data header
+    # (a sender context an interceptor above might have left), and the injected
+    # map must carry the new span's context under the one key, not both.
+    $ob->signal_external_workflow(
+        Temporalio::Worker::Interceptor::Input::SignalExternalWorkflow->new(
+            signal => 'go', namespace => 'ns', workflow_id => 'ext-1',
+            workflow_run_id => undef, args => [],
+            headers => {
+                '_tracer-data' => carrier_payload({ traceparent => $TP2 }),
+                'x-other'      => 'kept',
+            }));
+    my $sig_ext = $tracer->spans_named('SignalExternalWorkflow:go');
+    T2->is(scalar @$sig_ext, 1, 'SignalExternalWorkflow:{signal} span');
+    T2->is($sig_ext->[0]->kind, 'client', 'client span kind (Python parity)');
+    my $sig_ext_headers = $ob_seen{signal_external_workflow}->headers;
+    my $sig_ext_hdr = $sig_ext_headers->{'_tracer-data'};
+    T2->ok(defined $sig_ext_hdr, 'signal_external_workflow header injected');
+    T2->is($i->_payload_to_carrier($sig_ext_hdr)->{traceparent},
+        $sig_ext->[0]->traceparent,
+        'a pre-existing _tracer-data header is REPLACED by this span context');
+    T2->is($sig_ext_headers->{'x-other'}, 'kept',
+        'unrelated headers survive the injection');
+    # A Perl hash cannot hold the key twice, so counting keys proves nothing.
+    # The claim worth asserting is that the stale value lost: what rides out
+    # under the one key is the new span context, never $TP2.
+    T2->isnt($i->_payload_to_carrier($sig_ext_hdr)->{traceparent}, $TP2,
+        'the stale sender context is gone: replaced, not merged or preferred');
+
+    # start_nexus_operation -> StartNexusOperation:{service}/{operation},
+    # CLIENT, PLAIN STRING headers (spec section 26.1: nexus_header is a Str
+    # => Str map, never a _tracer-data Payload).
+    $ob->start_nexus_operation(
+        Temporalio::Worker::Interceptor::Input::StartNexusOperation->new(
+            endpoint => 'ep', service => 'svc', operation => 'op',
+            input => undef, headers => {}, kwargs => {}));
+    my $nexus_spans = $tracer->spans_named('StartNexusOperation:svc/op');
+    T2->is(scalar @$nexus_spans, 1,
+        'StartNexusOperation:{service}/{operation} span');
+    T2->is($nexus_spans->[0]->kind, 'client', 'client span kind');
+    my $nexus_hdr = $ob_seen{start_nexus_operation}->headers;
+    T2->ok(!exists $nexus_hdr->{'_tracer-data'},
+        'nexus headers carry the carrier keys directly, not a _tracer-data Payload');
+    T2->is($nexus_hdr->{traceparent}, $nexus_spans->[0]->traceparent,
+        'the carrier traceparent key is merged straight into the string header map');
+
+    # continue_as_new: NO span, header injection ONLY, using the run's cached
+    # context (Python :762-765 has no replay gate either).
+    my $before_span_count = scalar @{ $tracer->spans };
+    my $can_input = Temporalio::Worker::Interceptor::Input::ContinueAsNew->new(
+        workflow => 'Greet', args => [], headers => {}, kwargs => {});
+    my $ok = eval { $ob->continue_as_new($can_input); 1 };
+    T2->ok(!$ok && $@ =~ /continue_as_new reached the chain root/,
+        'continue_as_new still unwinds to the chain root (headers were injected first)');
+    T2->is(scalar @{ $tracer->spans }, $before_span_count,
+        'continue_as_new creates NO span');
+    my $can_hdr = $ob_seen{continue_as_new}->headers->{'_tracer-data'};
+    T2->ok(defined $can_hdr, 'continue_as_new injects the header anyway');
+    T2->is($i->_payload_to_carrier($can_hdr)->{traceparent}, $TP1,
+        'continue_as_new injects the cached run context (no new span to derive one from)');
+
+    # sub-step 4/5: round-trip check: a downstream ActivityInbound
+    # interceptor reading the injected _tracer-data header (same header_key
+    # on both sides) sees the OUTBOUND span as its parent.
+    my $ai = $i->intercept_activity(RecActivityNext->new(seen => \%seen));
+    $ai->execute_activity(
+        Temporalio::Worker::Interceptor::Input::ExecuteActivity->new(
+            args    => [],
+            headers => { '_tracer-data' => $act_hdr },
+            info    => { activity_type => 'Downstream' }))->get;
+    my $down = $tracer->spans_named('RunActivity:Downstream')->[0];
+    T2->is($down->parent->carrier->{traceparent}, $act_spans->[0]->traceparent,
+        'a downstream inbound interceptor parents on the outbound span context');
+});
+
+# --------------------------------------------------------------------------
+# F1 (spec F1, GitHub #6): the end-to-end shape check the I6 linkage test
+# could not make, because it handed the outbound fixture's raw header value
+# straight to the inbound hook. Here the REAL Runner is driven through the
+# replay harness (the reproduction lessons.md 2026-06-26 prescribes for this
+# double-encode class), so the injected header goes through
+# Temporalio::Interceptor::Headers::to_payload_map on its way into the
+# ScheduleActivity command, and the start header arrives at execute_workflow
+# as the blessed proto Payload Runner::_apply_initialize threads off the
+# InitializeWorkflow job. Decoding the emitted header ONCE with the data
+# converter must recover the carrier, which is what a receiving SDK does
+# (sdk-python _context_from_headers: from_payloads([header_payload])[0],
+# contrib/opentelemetry/_interceptor.py:159-172).
+#
+# FAILS on HEAD: _carrier_to_payload returns an unblessed { metadata, data }
+# hashref, so is_payload is false and to_payload_map JSON-encodes the whole
+# hashref as a payload BODY; and _payload_to_carrier requires `ref eq 'HASH'`,
+# so the blessed start header extracts nothing and the outbound gate never
+# even opens. Observed on HEAD before the fix: "the outbound wrapper created a
+# StartActivity span inside the Runner" fails with an undef span, and the
+# subtest returns right there, before the header assertion is ever reached,
+# because with no span there is no injection to check.
+#
+# MUTATION CHECK (the R41 convention). Reverting the blessing ALONE, so
+# _carrier_to_payload hands back the unblessed { metadata, data } hashref while
+# the duck-typed _payload_to_carrier stays in place, isolates the double wrap:
+# the span and the header are still produced, only their SHAPE is wrong.
+# Observed RED under that mutation, verbatim from prove -lv and trimmed to
+# this subtest:
+#
+#     not ok 8 - F1 replay harness: emitted ScheduleActivity headers ... {
+#         ok 5 - the emitted header value is a Payload (true of both shapes ...)
+#         not ok 6 - the emitted payload body IS the carrier map, not a
+#                    serialized payload hashref
+#         not ok 7 - the emitted bytes carry the outbound span traceparent
+#                    directly
+#         not ok 8 - a single decode yields the carrier map, not a wrapped
+#                    payload hashref
+#         not ok 9 - the recovered traceparent is the outbound span context
+#         1..9
+#     }
+#
+# 6 and 8 are boolean ok() calls, so neither prints a comparison table. 7 and
+# 9 are scalar is() calls, and each prints the same one-row table: under the
+# wrap the carrier key sits one level down inside the serialized body, so the
+# lookup comes back undef.
+#
+#     # +---------+---------------------------------------------------------+
+#     # | GOT     | CHECK                                                   |
+#     # +---------+---------------------------------------------------------+
+#     # | <UNDEF> | 00-ffffffffffffffff0000000000000020-0000000000000020-01 |
+#     # +---------+---------------------------------------------------------+
+#
+# The CHECK value is the FakeOTel span traceparent. Its span id is that
+# package's per-run counter (sprintf '%016x', ++$NEXT_ID in t/lib/FakeOTel.pm),
+# so those digits shift if a subtest ahead of this one creates more spans.
+#
+# Note assertion 5: is_payload stays GREEN under the mutation, because
+# to_payload_map encodes the hashref into a Payload of its own. It is kept
+# only as a shape guard and its label says so; the body assertions 6-9 are
+# what hold the one-decode contract.
+# --------------------------------------------------------------------------
+T2->subtest('F1 replay harness: emitted ScheduleActivity headers are real Payloads' => sub {
+    my $PC     = Temporalio::Converter::Payload->default;
+    my $tracer = FakeOTel::Tracer->new;
+    my $i = $TI->new(tracer => $tracer, propagator => FakeOTel::Propagator->new);
+
+    my $harness = Temporalio::Test::WorkflowReplay->new(
+        workflow_class => 'WfDef::ActivityCaller',
+        interceptors   => [$i],
+    );
+    my $activation =
+        'Temporalio::Proto::Coresdk::WorkflowActivation::WorkflowActivation';
+    my @cmds = $harness->push_activation($activation->new({
+        run_id    => 'r1',
+        timestamp => { seconds => 100 },
+        jobs      => [
+            { initialize_workflow => {
+                workflow_type => 'ActivityCaller',
+                arguments     => [ $PC->to_payload('Alice') ],
+                headers       => {
+                    '_tracer-data' =>
+                        $PC->to_payload({ traceparent => $TP1 }),
+                },
+            } },
+        ],
+    }));
+
+    my $span = $tracer->spans_named('StartActivity:SayHello')->[0];
+    T2->ok(defined $span,
+        'the outbound wrapper created a StartActivity span inside the Runner');
+    T2->is($span->parent->carrier->{traceparent}, $TP1,
+        'the outbound span parents on the blessed start header carrier')
+        if defined $span;
+
+    my ($sa) = grep { $_->which_variant eq 'schedule_activity' } @cmds;
+    T2->ok(defined $sa, 'the workflow emitted a ScheduleActivity command');
+    return unless defined $sa && defined $span;
+
+    my $emitted = ($sa->schedule_activity->headers // {})->{'_tracer-data'};
+    T2->ok(defined $emitted,
+        'the emitted command carries the _tracer-data header');
+    return unless defined $emitted;
+    # MUTATION CHECK: is_payload($emitted) on its own survives the double wrap,
+    # because to_payload_map hands back a Payload either way (it encodes the
+    # unblessed hashref into one). It is kept as a shape guard, with a label
+    # that claims only what it proves. What cannot survive the double wrap is
+    # the payload BODY: under the wrap those bytes are a serialized
+    # { metadata, data } hashref, so the carrier keys are one level down.
+    T2->ok(Temporalio::Interceptor::Headers::is_payload($emitted),
+        'the emitted header value is a Payload (true of both shapes; body checked below)');
+    my $body = eval { JSON::PP->new->utf8->decode($emitted->data) };
+    T2->ok(ref $body eq 'HASH'
+            && !exists $body->{metadata} && !exists $body->{data},
+        'the emitted payload body IS the carrier map, not a serialized payload hashref');
+    T2->is($body->{traceparent}, $span->traceparent,
+        'the emitted bytes carry the outbound span traceparent directly')
+        if ref $body eq 'HASH';
+
+    # ONE decode, exactly as a receiving SDK does.
+    my $carrier = $PC->from_payload($emitted);
+    T2->ok(ref $carrier eq 'HASH'
+            && !exists $carrier->{metadata} && !exists $carrier->{data},
+        'a single decode yields the carrier map, not a wrapped payload hashref');
+    T2->is($carrier->{traceparent}, $span->traceparent,
+        'the recovered traceparent is the outbound span context')
+        if ref $carrier eq 'HASH';
+});
+
+# --------------------------------------------------------------------------
+# F1: the inbound half. A BLESSED wire Payload (what ActivityDispatcher hands
+# the chain from the activity Start task's header_fields, and what
+# Runner::_apply_initialize hands execute_workflow) must extract to a carrier.
+# Payload.pm's POD is explicit that payloads materialized from the wire are
+# instances of the generated parent class, so consumers duck-type on the
+# metadata/data accessors rather than matching a hashref.
+#
+# FAILS on HEAD: _payload_to_carrier's `ref $payload eq 'HASH'` guard returns
+# undef for any blessed proto Payload, so no parent is extracted and the
+# workflow-span gate stays shut. Observed on HEAD: "a blessed wire Payload
+# header yields a parent context" fails (parent undef).
+# --------------------------------------------------------------------------
+T2->subtest('F1 inbound: a blessed wire Payload extracts the parent' => sub {
+    my $tracer = FakeOTel::Tracer->new;
+    my $i = $TI->new(tracer => $tracer, propagator => FakeOTel::Propagator->new);
+    my %seen;
+
+    my $ai = $i->intercept_activity(RecActivityNext->new(seen => \%seen));
+    $ai->execute_activity(
+        Temporalio::Worker::Interceptor::Input::ExecuteActivity->new(
+            args    => [],
+            headers => { '_tracer-data' =>
+                blessed_carrier_payload({ traceparent => $TP1 }) },
+            info    => { activity_type => 'Charge' }))->get;
+    my $span = $tracer->spans_named('RunActivity:Charge')->[0];
+    T2->ok(defined $span && defined $span->parent,
+        'a blessed wire Payload header yields a parent context');
+    T2->is($span->parent->carrier->{traceparent}, $TP1,
+        'the parent is the carrier the blessed Payload carried')
+        if defined $span && defined $span->parent;
+
+    # The workflow-inbound side caches the run carrier off the same blessed
+    # shape, so the default (parent-present) workflow-span gate opens.
+    my $wi = $i->intercept_workflow(RecWorkflowNext->new(seen => \%seen));
+    $wi->execute_workflow(
+        Temporalio::Worker::Interceptor::Input::ExecuteWorkflow->new(
+            type    => 'Greet',
+            args    => [],
+            headers => { '_tracer-data' =>
+                blessed_carrier_payload({ traceparent => $TP2 }) }))->get;
+    my $run = $tracer->spans_named('RunWorkflow:Greet')->[0];
+    T2->ok(defined $run,
+        'the workflow-span gate opens off a blessed start header');
+    T2->is($run->parent->carrier->{traceparent}, $TP2,
+        'the run span parents on the blessed start header carrier')
+        if defined $run;
+
+    # The legacy unblessed { metadata, data } shape still decodes: the
+    # extractor duck-types rather than switching on one representation.
+    T2->is($i->_payload_to_carrier(carrier_payload({ traceparent => $TP3 })),
+        { traceparent => $TP3 },
+        'the legacy hashref shape still decodes');
+});
+
+# --------------------------------------------------------------------------
+# F1 sub-steps 4/5: the Headers.pm contract directly. The value
+# _carrier_to_payload builds must satisfy is_payload, and to_payload_map must
+# pass that exact instance through rather than encoding it a second time
+# (#10 GAP B, the double-encode class lessons.md 2026-06-26 records).
+#
+# FAILS on HEAD: the unblessed hashref fails is_payload, so to_payload_map
+# hands it to the JSON converter and the map value is a NEW Payload whose body
+# is the serialized hashref.
+# --------------------------------------------------------------------------
+T2->subtest('F1 to_payload_map passes the injected header payload through' => sub {
+    my $PC = Temporalio::Converter::Payload->default;
+    my $i  = $TI->new;
+
+    my $payload = $i->_carrier_to_payload({ traceparent => $TP1 });
+    T2->ok(Temporalio::Interceptor::Headers::is_payload($payload),
+        'the built header value satisfies the Headers.pm is_payload contract');
+
+    my $map = Temporalio::Interceptor::Headers::to_payload_map(
+        $PC, { '_tracer-data' => $payload });
+    T2->is(Scalar::Util::refaddr($map->{'_tracer-data'}),
+        Scalar::Util::refaddr($payload),
+        'the same Payload instance rides through: no second encode');
+    T2->is($PC->from_payload($map->{'_tracer-data'}),
+        { traceparent => $TP1 },
+        'one decode off the map recovers the carrier');
+});
+
+# --------------------------------------------------------------------------
+# F1: the OUTBOUND parent-missing gate (_traced_call). With no run carrier and
+# always_create_workflow_spans=0 there is no span and no injection; with =1
+# there are both, and the injected carrier is the new parentless span's own
+# context. continue_as_new has no span and no gate, but with no carrier there
+# is nothing to render, so it writes no header either.
+# --------------------------------------------------------------------------
+T2->subtest('F1 outbound parent-missing gate' => sub {
+    my $start_activity = sub {
+        my ($ob, $name) = @_;
+        return $ob->execute_activity(
+            Temporalio::Worker::Interceptor::Input::StartActivity->new(
+                activity => $name, args => [], headers => {}, kwargs => {}));
+    };
+
+    # Default: no start header, so no run carrier, so nothing happens.
+    my $tracer = FakeOTel::Tracer->new;
+    my $i = $TI->new(tracer => $tracer, propagator => FakeOTel::Propagator->new);
+    my %seen;
+    my $wi = $i->intercept_workflow(RecWorkflowNext->new(seen => \%seen));
+    $wi->execute_workflow(
+        Temporalio::Worker::Interceptor::Input::ExecuteWorkflow->new(
+            type => 'Greet', args => [], headers => {}))->get;
+    my %ob_seen;
+    $wi->init(RecOutboundNext->new(seen => \%ob_seen));
+    my $ob = $seen{init_outbound};
+
+    $start_activity->($ob, 'Charge');
+    T2->is(scalar @{ $tracer->spans_named('StartActivity:Charge') }, 0,
+        'no outbound span without a run parent context (default gate)');
+    T2->ok(!exists $ob_seen{execute_activity}->headers->{'_tracer-data'},
+        'and no header injected either');
+
+    # continue_as_new: no gate, but an absent carrier renders an empty
+    # propagator carrier, so _inject_headers writes nothing.
+    eval {
+        $ob->continue_as_new(
+            Temporalio::Worker::Interceptor::Input::ContinueAsNew->new(
+                workflow => 'Greet', args => [], headers => {}, kwargs => {}));
+        1;
+    };
+    T2->ok(!exists $ob_seen{continue_as_new}->headers->{'_tracer-data'},
+        'continue_as_new injects nothing when the run carrier is absent');
+
+    # always_create_workflow_spans=1: span AND injection, parentless.
+    my $tracer2 = FakeOTel::Tracer->new;
+    my $i2 = $TI->new(tracer => $tracer2,
+        propagator => FakeOTel::Propagator->new,
+        always_create_workflow_spans => 1);
+    my %seen2;
+    my $wi2 = $i2->intercept_workflow(RecWorkflowNext->new(seen => \%seen2));
+    $wi2->execute_workflow(
+        Temporalio::Worker::Interceptor::Input::ExecuteWorkflow->new(
+            type => 'Greet', args => [], headers => {}))->get;
+    my %ob_seen2;
+    $wi2->init(RecOutboundNext->new(seen => \%ob_seen2));
+    my $ob2 = $seen2{init_outbound};
+
+    $start_activity->($ob2, 'Charge');
+    my $spans2 = $tracer2->spans_named('StartActivity:Charge');
+    T2->is(scalar @$spans2, 1,
+        'always_create_workflow_spans=1 creates the outbound span with no parent');
+    T2->ok(!defined $spans2->[0]->parent, 'and the span has no parent')
+        if @$spans2;
+    my $hdr2 = $ob_seen2{execute_activity}->headers->{'_tracer-data'};
+    T2->ok(defined $hdr2, 'and injects the header');
+    T2->is($i2->_payload_to_carrier($hdr2)->{traceparent},
+        $spans2->[0]->traceparent,
+        'the injected carrier is the parentless span own context')
+        if defined $hdr2 && @$spans2;
+});
+
+# --------------------------------------------------------------------------
+# I6: workflow-outbound spans no-op while replaying: no span AND no header
+# injection (Python _completed_span:699-701 returns before either happens).
+# --------------------------------------------------------------------------
+T2->subtest('I6 workflow outbound: no-op while replaying' => sub {
+    my $tracer = FakeOTel::Tracer->new;
+    my $i = $TI->new(tracer => $tracer, propagator => FakeOTel::Propagator->new);
+    my %seen;
+    my $wi = $i->intercept_workflow(RecWorkflowNext->new(seen => \%seen));
+    $wi->execute_workflow(
+        Temporalio::Worker::Interceptor::Input::ExecuteWorkflow->new(
+            type    => 'Greet',
+            args    => [],
+            headers => { '_tracer-data' => carrier_payload({ traceparent => $TP1 }) },
+        ))->get;
+
+    my %ob_seen;
+    $wi->init(RecOutboundNext->new(seen => \%ob_seen));
+    my $ob = $seen{init_outbound};
+
+    local $Temporalio::Workflow::Runner::CURRENT = FakeReplayRunner->new;
+    $ob->execute_activity(
+        Temporalio::Worker::Interceptor::Input::StartActivity->new(
+            activity => 'Charge', args => [], headers => {}, kwargs => {}));
+    T2->is(scalar @{ $tracer->spans_named('StartActivity:Charge') }, 0,
+        'no span created while replaying');
+    T2->ok(!exists $ob_seen{execute_activity}->headers->{'_tracer-data'},
+        'no header injected while replaying either');
+
+    $ob->start_nexus_operation(
+        Temporalio::Worker::Interceptor::Input::StartNexusOperation->new(
+            endpoint => 'ep', service => 'svc', operation => 'op',
+            input => undef, headers => {}, kwargs => {}));
+    T2->is(scalar @{ $tracer->spans_named('StartNexusOperation:svc/op') }, 0,
+        'no nexus span while replaying');
+    T2->ok(!exists $ob_seen{start_nexus_operation}->headers->{traceparent},
+        'no nexus string-header injection while replaying');
+});
+
+# --------------------------------------------------------------------------
 # R22: no tracer configured — every wrapper delegates unchanged (headless
 # no-op), no header is added, nothing dies.
 # --------------------------------------------------------------------------
@@ -524,6 +1092,8 @@ T2->subtest('T-trace-4 span-name table' => sub {
         'SignalChildWorkflow:go', 'SignalChildWorkflow:{signal}');
     T2->is($i->_outbound_span_name('signal_external_workflow', { name => 'go' }),
         'SignalExternalWorkflow:go', 'SignalExternalWorkflow:{signal}');
+    T2->is($i->_outbound_span_name('start_nexus_operation', { name => 'svc/op' }),
+        'StartNexusOperation:svc/op', 'StartNexusOperation:{service}/{operation}');
 });
 
 # --------------------------------------------------------------------------

@@ -108,6 +108,65 @@ T2->subtest('constraint 4: $data arrives as arrayref or undef, never a bare stri
     T2->is($instance->$ref('V2'), 'named(V2) self=AttrSpike::WFBegin', 'method-call on captured ref works');
 });
 
+# Canary for GitHub issue #18: two attribute-bearing :isa classes compiled in
+# one unit with Future::AsyncAwait loaded. Today the second class's
+# `method run :Run(...)` dies with "Subroutine attributes must come before the
+# signature", the perl 5.38.2 parser-state bug documented in
+# .ai-sessions/lessons.md's entry beginning 'The "Subroutine attributes must
+# come before the signature" parse death near `class` blocks is a CORE perl
+# 5.38.2 parser-state bug, NOT (only) the Future::AsyncAwait attribute-parser
+# leak it was first blamed on' (2026-07-10, F4 correction addendum). Loading
+# Future::AsyncAwait is what arms this shape: the same two classes with no
+# F::AA in the process compile clean, so the `require` below is part of the
+# reproduction, not a convenience. The in-eval `use Future::AsyncAwait` is
+# redundant with that `require` (either one alone reproduces, probe-checked);
+# it stays because it mirrors the shape of a real workflow module, which
+# imports F::AA itself. No SDK-side fix is attempted; the fix belongs
+# upstream.
+#
+# How this canary flips, precisely. The TODO covers ONLY the two assertions
+# that state the desired end state, so today they emit `not ok ... # TODO`
+# (failures under amnesty) and the file's top-level line for this subtest is a
+# plain `ok`, with NO "TODO passed" in the prove summary. When a future perl or
+# Future::AsyncAwait release fixes the parser state, two things happen at once:
+# those inner assertions start reporting "TODO passed", AND the non-TODO like()
+# below goes RED because $err is no longer the parse death. The red like() is
+# the intended alarm: it fails the subtest, fails the file, and cannot be
+# mistaken for routine green. It also keeps the canary honest in the other
+# direction, since a wrong-reason failure (a renamed :Run handler, a
+# TwoA::* package collision, a load error) fails loudly instead of silently
+# standing in for the bug. On a flip, revisit the one-attributed-class-per-file
+# workaround documented in README and CLAUDE.md, and close #18.
+T2->subtest('#18 canary: two attributed :isa classes per file under Future::AsyncAwait' => sub {
+    require Future::AsyncAwait;
+    require Temporalio::Workflow::Definition;
+
+    my $ok = eval q{
+        use feature 'class';
+        no warnings 'experimental::class';
+        use Future::AsyncAwait;
+        class TwoA::X :isa(Temporalio::Workflow::Definition) {
+            method run :Run('X') ($i) { return $i }
+        }
+        class TwoA::Y :isa(Temporalio::Workflow::Definition) {
+            method run :Run('Y') ($i) { return $i }
+        }
+        1;
+    };
+    my $err = $@;
+
+    T2->todo('GitHub #18: two attributed :isa classes per file (perl 5.38.2 parser-state bug)' => sub {
+        T2->ok($ok, 'both attributed classes compiled in the same unit');
+        T2->is($err, '', 'no compile error from the second class');
+    });
+
+    T2->like(
+        $err,
+        qr/Subroutine attributes must come before the signature/,
+        'still failing for the #18 reason, not some other reason (red here means #18 flipped or the fixture rotted)',
+    );
+});
+
 T2->done_testing;
 
 # Writes the runtime-require fixture modules: a BEGIN-phase base and a

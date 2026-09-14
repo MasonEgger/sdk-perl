@@ -262,6 +262,13 @@ C<args> field; the cancel input carries C<ctx> and C<token>.
 =item * L<Temporalio::Worker::WorkflowInbound>: C<init($outbound)>,
 C<execute_workflow>, C<handle_signal>, C<handle_query>, C<validate_update>,
 C<handle_update>. Runs under C<$Runner::CURRENT> and must be deterministic.
+C<validate_update> and C<handle_update> both receive a
+C<Input::HandleUpdate>. C<validate_update> is called only for an update that
+HAS a validator (named or dynamic, attribute-declared or runtime-registered),
+before acceptance, in a read-only context, and must return synchronously; a
+throw from it rejects the update and C<handle_update> is never reached. This
+mirrors sdk-python's C<handle_update_validator> / C<handle_update_handler>
+pair (C<_workflow_instance.py:650> and C<:667>).
 
 =item * L<Temporalio::Worker::WorkflowOutbound>: C<execute_activity>,
 C<execute_local_activity>, C<start_child_workflow>, C<signal_child_workflow>,

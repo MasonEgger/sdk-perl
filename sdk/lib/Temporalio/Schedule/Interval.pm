@@ -17,8 +17,9 @@ class Temporalio::Schedule::Interval {
     method _to_proto {
         my $Spec = Temporalio::Core::Proto::resolve(
             'temporal.api.schedule.v1.IntervalSpec');
-        my %f = (interval => _duration($every));
-        $f{phase} = _duration($offset) if defined $offset;
+        my %f = (interval => Temporalio::Core::Proto::duration_from_seconds($every));
+        $f{phase} = Temporalio::Core::Proto::duration_from_seconds($offset)
+            if defined $offset;
         return $Spec->new(\%f);
     }
 
@@ -27,22 +28,16 @@ class Temporalio::Schedule::Interval {
         my $interval = $spec->interval;
         my $phase    = $spec->phase;
         return $class->new(
-            every  => _duration_to_seconds($interval),
-            offset => (defined $phase ? _duration_to_seconds($phase) : undef),
+            every  => Temporalio::Core::Proto::seconds_from_duration($interval),
+            offset => (defined $phase
+                ? Temporalio::Core::Proto::seconds_from_duration($phase)
+                : undef),
         );
     }
 
-    sub _duration ($seconds) {
-        my $Duration = Temporalio::Core::Proto::resolve('google.protobuf.Duration');
-        my $whole = int($seconds);
-        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-        return $Duration->new({ seconds => $whole, nanos => $nanos });
-    }
-
-    sub _duration_to_seconds ($duration) {
-        return undef unless defined $duration;
-        return ($duration->seconds // 0) + ($duration->nanos // 0) / 1_000_000_000;
-    }
+    # The seconds<->google.protobuf.Duration conversion pair lives in
+    # Temporalio::Core::Proto (I14; formerly local _duration/
+    # _duration_to_seconds helpers here).
 }
 
 1;

@@ -94,6 +94,13 @@ my $child = sub {
         # ShutDown sentinel (undef) becomes a poll-loop death. $polls_started
         # resolves once BOTH loops have issued a poll, so the test only
         # initiates shutdown against a live, draining worker.
+        #
+        # The wrapper stays armed for the rest of the run, so the F3 drain
+        # run() starts for the dead kind has its own first poll fail here too,
+        # on the very sentinel it was waiting for. The resulting
+        # "Temporalio::Worker: <kind> drain died: R94 injected poll-loop
+        # failure" line on stderr is expected output of this test, not a
+        # regression: it is the drain reporting that it stopped early.
         my $injected = "R94 injected poll-loop failure\n";
         my ($polls_seen, $polls_started);
         my $arm_polls = sub {

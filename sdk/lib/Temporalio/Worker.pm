@@ -15,10 +15,12 @@ use Temporalio::Core::ByteArray ();
 use Temporalio::Core::Callback ();
 use Temporalio::Core::FFI ();
 use Temporalio::Core::FFI::WorkerOptions ();
+use Temporalio::Core::Proto ();
 use Temporalio::Exception::Argument ();
 use Temporalio::Exception::Bridge ();
 use Temporalio::Exception::Runtime ();
 use Temporalio::Activity::Pool ();
+use Temporalio::Worker::ActivityCompletion ();
 use Temporalio::Worker::ActivityDispatcher ();
 use Temporalio::Worker::ActivityRegistry ();
 use Temporalio::Worker::Interceptor ();
@@ -28,6 +30,18 @@ use Temporalio::Worker::PollLoop ();
 use Temporalio::Worker::WorkflowDispatcher ();
 use Temporalio::Worker::WorkflowRegistry ();
 use Temporalio::Workflow::DeterminismGuard ();
+
+# The failure message every drained task is answered with (spec F3). MUST-match
+# the reference SDKs, which all write this exact string: ../sdk-python
+# temporalio/worker/_activity.py:198, _workflow.py:239, _nexus.py:206.
+my $DRAIN_FAILURE_MESSAGE = 'Worker shutting down';
+
+# Proto classes the drain builds its completions from, filled on FIRST USE by
+# _drain_proto (defined below the class, next to the other package-scope subs)
+# and memoized there. Resolution is deferred rather than done at file scope so
+# this module's load order relative to the generated proto classes stays
+# exactly as it was (t/integration/determinism_guard_load_order.t pins it).
+my %DRAIN_PROTO;
 
 class Temporalio::Worker {
     # --- spec section 8.1 kwargs -----------------------------------------
@@ -146,6 +160,9 @@ class Temporalio::Worker {
     field $is_shutdown = 0;
     field $is_running  = 0;  # true between run start and its return
     field $initiated   = 0;  # initiate_shutdown sent once
+    # Poll kinds whose queue drain has already been started (spec F3). One
+    # drain per kind, ever: a second would race the first for the same queue.
+    field %drain_started;
 
     ADJUST {
         Temporalio::Exception::Argument->throw(
@@ -561,13 +578,28 @@ class Temporalio::Worker {
 
     # run (spec 8.2 steps 1-5): build + validate the worker if needed, then
     # drive BOTH the activity poll loop (spec 8.4) and the workflow poll loop
-    # (spec 8.3) concurrently on the IO::Async loop. Returns when BOTH loops
-    # drain — either because `shutdown` was called mid-run (initiate_shutdown
-    # makes core return the ShutDown sentinel from both polls) or because core
-    # shut the worker down. On the way out it finalizes and frees the worker
-    # (the full graceful sequence deferred from `shutdown` per the P2.2 deadlock
-    # note). T-wkr-4: shutdown mid-run causes run to return; a second shutdown is
-    # a no-op.
+    # (spec 8.3) concurrently on the IO::Async loop, racing them via
+    # _await_loops_then_drain. On the CLEAN path all loops drain on their own
+    # (either `shutdown` was called mid-run, making core return the ShutDown
+    # sentinel from every poll, or core shut the worker down itself) and run()
+    # returns once every loop is done. On the FATAL path (spec I3, GitHub
+    # issue #3) one loop dying does NOT wait for its healthy siblings (they
+    # may still be polling with no work and could block indefinitely), so the
+    # gather returns on the FIRST failure; run() then calls
+    # _initiate_shutdown_once itself (so core turns the survivors' next poll
+    # into the ShutDown sentinel), replaces each DEAD loop with a
+    # _drain_poll_queue of its kind (spec F3: the loop stopped polling, but
+    # core still owes that kind replies before it will shut down), waits for
+    # every loop and drain, and lets each loop's still-running dispatches
+    # settle via drain_in_flight. Only then does it finalize and free the
+    # worker (the full graceful sequence deferred from `shutdown` per the P2.2
+    # deadlock note), on every path. Python runs the same sequence in the same
+    # order (../sdk-python worker/_worker.py:812-813, 822-825, 841,
+    # 843-846, 857, 865-871, 875): asyncio.wait(FIRST_EXCEPTION),
+    # on_fatal_error, initiate_shutdown, swap each failed task for
+    # drain_poll_queue, a final wait over that whole task set,
+    # wait_all_completed, finalize_shutdown. T-wkr-4: shutdown mid-run causes
+    # run to return; a second shutdown is a no-op.
     async method run () {
         $self->_assert_open;
         await $self->validate;     # _ensure_worker + pre-poll validate
@@ -601,21 +633,36 @@ class Temporalio::Worker {
             );
         }
 
+        # Drive every loop concurrently; each drains on its own ShutDown
+        # sentinel (a still-running workflow/activity/Nexus completion must be
+        # sent before its loop returns). Each loop is kept PAIRED with its kind
+        # and its PollLoop object, and the pairs stay in scope past the gather,
+        # because the fatal path below needs all three: the future to tell a
+        # dead loop from a survivor, the kind to pick the drain's poll source
+        # and completion shape, and the object to await the dispatches the
+        # dead loop left in flight.
+        my @kinds = (
+            { kind => 'activity', loop => $activity_loop },
+            { kind => 'workflow', loop => $workflow_loop },
+        );
+        push @kinds, { kind => 'nexus', loop => $nexus_loop }
+            if defined $nexus_loop;
+        $_->{future} = $_->{loop}->run for @kinds;
+        my @loops = map { $_->{future} } @kinds;
+
         my $error;
         {
             local $@;
-            # Drive every loop concurrently; each drains on its own ShutDown
-            # sentinel. wait_all waits for ALL so no loop is abandoned mid task
-            # (a still-running workflow/activity/Nexus completion must be sent).
-            # wait_all never itself fails, so inspect each sub-future and surface
-            # the first failure after all have settled.
-            my @loops = ($activity_loop->run, $workflow_loop->run);
-            push @loops, $nexus_loop->run if defined $nexus_loop;
-            eval {
-                await Future->wait_all(@loops);
-                $_->is_failed and die(($_->failure)[0]) for @loops;
-                1;
-            } or $error = $@;
+            # _await_loops_then_drain (spec I3, GitHub #3): a first-failure
+            # race, not wait_all: one loop dying fatally must not block on a
+            # healthy sibling that may still be polling with no work. On the
+            # clean path it still waits for every loop to drain (asserted in
+            # sdk/t/unit/fatal_poll_unwind.t); on the fatal path it returns as
+            # soon as the FIRST loop fails, leaving any not-yet-settled
+            # siblings pending (they are awaited again below, after shutdown
+            # is initiated).
+            eval { $error = await $self->_await_loops_then_drain(@loops); 1 }
+                or $error = $@;
         }
 
         # Fatal-error hook (spec R94, parity audit worker finding 3): this is
@@ -643,16 +690,75 @@ class Temporalio::Worker {
             };
         }
 
-        # Both loops have drained (sentinels seen). Make sure shutdown was
-        # actually initiated (a loop may have exited because core shut down on
-        # its own), then finalize + free. _finalize_and_free is idempotent.
-        # Preserve-cause (spec R62, finding L32): pre-R62 this await was
-        # unprotected, so a finalize die REPLACED the poll-loop $error saved
-        # above and the primary failure vanished. A finalize failure must
-        # ATTACH to the saved error; with no saved error it becomes the
-        # primary itself. Folding it into $error also lets the pool close
-        # below still run on the finalize-failure path.
+        # Make sure shutdown was actually initiated (a loop may have exited
+        # because core shut down on its own, or the gather above returned on
+        # the CLEAN path where every loop already drained). On the FATAL path
+        # this is what makes the survivors' next poll come back as the
+        # ShutDown sentinel; without it, _finalize_and_free below could
+        # deadlock on an undrained poll (the P2.2 lesson), which is the same
+        # hang this step fixes one level up.
         $self->_initiate_shutdown_once;
+
+        # Replace each DEAD loop with a drain of its queue (spec F3, GitHub
+        # issue #3). Python does exactly this, in this order and in this spot:
+        # every worker whose task is done WITH an exception gets its task
+        # swapped for drain_poll_queue right after initiate_shutdown
+        # (_worker.py:843-846). A failed loop has stopped polling its kind for
+        # good, and core will not finish shutting down while tasks of that kind
+        # are still owed a reply: with ignore_evicts_on_shutdown false (its
+        # default; this SDK never sets it) every pending eviction must be
+        # polled AND replied to, and at_task_mgr::shutdown waits on in-flight
+        # activity bodies whose graceful-period cancel only ever arrives on a
+        # poll. A drain die is swallowed here for the same reason the hook
+        # above is: nothing on the way out may replace the poll-loop $error.
+        # It is warned first, though, mirroring the on_fatal_error handling
+        # just above: if the drain stops early on a poll or completion error
+        # that is not the shutdown sentinel, finalize below may then wedge, and
+        # stderr is the only place that can say why (Python drops this one
+        # silently, _worker.py:857-862). Survivors are deliberately NOT
+        # drained; they are still polling and will see the sentinel
+        # initiate_shutdown just produced.
+        my @drains;
+        for my $entry (@kinds) {
+            next unless $entry->{future}->is_failed;
+            my $kind = $entry->{kind};
+            push @drains, $self->_drain_poll_queue($kind)->else(sub ($err, @) {
+                chomp(my $drain_err = "$err");
+                warn "Temporalio::Worker: $kind drain died: $drain_err\n";
+                return Future->done;
+            });
+        }
+
+        # Wait for every loop and every drain (spec I3 + F3). On the CLEAN path
+        # each loop is already ready and there are no drains, so this settles
+        # immediately; on the FATAL path the survivors left pending by the
+        # first-failure race see the sentinel and return, and the drains run
+        # until their kind's poll reports shutdown. This is Python's final
+        # asyncio.wait over the same task set, drains included
+        # (_worker.py:857). wait_all never itself fails (each loop's own
+        # failure was already captured into $error, or will be, by the gather
+        # above), so no eval is needed here.
+        await Future->wait_all(@loops, @drains);
+
+        # Then let the dispatches the loops still have running finish, so their
+        # completions reach core before it is asked to shut down. A loop that
+        # died in its poll source never reached its own in-flight drain, and
+        # those dispatches are cancelled the moment the PollLoop goes out of
+        # scope below. Python calls wait_all_completed unconditionally in the
+        # same place, between the task wait and finalize_shutdown
+        # (_worker.py:865-871); unconditional here too, because a loop that
+        # failed AFTER the race above settled is not in @drains and would
+        # otherwise be missed. Free on a cleanly drained loop, whose in-flight
+        # futures are all ready already.
+        await Future->wait_all(map { $_->{loop}->drain_in_flight } @kinds);
+
+        # Finalize + free. _finalize_and_free is idempotent. Preserve-cause
+        # (spec R62, finding L32): pre-R62 this await was unprotected, so a
+        # finalize die REPLACED the poll-loop $error saved above and the
+        # primary failure vanished. A finalize failure must ATTACH to the
+        # saved error; with no saved error it becomes the primary itself.
+        # Folding it into $error also lets the pool close below still run on
+        # the finalize-failure path.
         {
             local $@;
             eval { await $self->_finalize_and_free; 1 }
@@ -672,6 +778,140 @@ class Temporalio::Worker {
 
         die $error if defined $error;
         return;
+    }
+
+    # _await_loops_then_drain (spec I3, GitHub issue #3): the gather step
+    # run() races. Given the per-kind poll-loop Futures, resolves as soon as
+    # EITHER any one of them fails (the fatal path: returns immediately with
+    # that failure, deliberately leaving any not-yet-settled siblings pending
+    # rather than waiting on them) OR every one of them has drained cleanly
+    # (the clean path: returns undef only once ALL are done). Never itself
+    # dies. Pure with respect to instance state (no FFI, no $worker_ptr
+    # touched) so it is unit-testable with synthetic Future doubles alone
+    # (sdk/t/unit/fatal_poll_unwind.t); the caller (run(), above) is what
+    # actually initiates shutdown and awaits the survivors' drain once this
+    # settles fatally. Python composes the analogous race with
+    # asyncio.wait(tasks, return_when=FIRST_EXCEPTION)
+    # (../sdk-python worker/_worker.py:812-813).
+    async method _await_loops_then_drain (@loops) {
+        my $signal    = Future->new;
+        my $remaining = scalar @loops;
+        my $error;
+        for my $loop_future (@loops) {
+            $loop_future->on_ready(sub ($settled) {
+                if ($settled->is_failed) {
+                    $error //= ($settled->failure)[0];
+                    $signal->done unless $signal->is_ready;
+                }
+                $remaining--;
+                $signal->done if $remaining == 0 && !$signal->is_ready;
+            });
+        }
+        $signal->done if @loops == 0;
+        await $signal;
+        return $error;
+    }
+
+    # _drain_poll_queue($kind) (spec F3, GitHub issue #3): the Perl analogue of
+    # Python's per-kind drain_poll_queue (../sdk-python worker/_activity.py:
+    # 190-201, _workflow.py:231-242, _nexus.py:198-209). Keeps polling ONE kind
+    # and answers every task core still has queued with a FAILED completion,
+    # stopping on the undef ShutDown sentinel (the SDK's spelling of Python's
+    # PollShutdownError). run() starts one of these per DEAD loop, after
+    # initiate_shutdown and before finalize; a live loop is never drained,
+    # since the drain and the loop would then race for the same queue.
+    #
+    # Guarded to run at most ONCE per kind for that same reason. The guard is
+    # on the KIND rather than on the loop object because the queue belongs to
+    # core, not to the PollLoop that happened to be reading it.
+    #
+    # Deliberately gives no result back: the tasks answered here are being
+    # abandoned, and the failure this method reports to core is the abandonment
+    # itself. Its own die (a poll or completion that cannot be issued at all)
+    # ends the drain rather than looping forever, and run() swallows it so it
+    # can never displace the poll-loop error already being unwound.
+    async method _drain_poll_queue ($kind) {
+        return if $drain_started{$kind}++;
+        while (1) {
+            my $bytes = await $self->_drain_poll($kind);
+            last unless defined $bytes;
+            await $self->_drain_complete($kind, $bytes);
+        }
+        return;
+    }
+
+    # The drain's poll source for one kind: the same bridge call the kind's
+    # PollLoop was driving before it died. An unknown kind yields the sentinel
+    # so a future poll kind added without a drain arm stops rather than spins.
+    method _drain_poll ($kind) {
+        return $self->_poll_activity_task       if $kind eq 'activity';
+        return $self->_poll_workflow_activation if $kind eq 'workflow';
+        return $self->_poll_nexus_task          if $kind eq 'nexus';
+        return Future->done(undef);
+    }
+
+    # Build and send ONE drained task's failed completion. The message is the
+    # reference SDKs' exact string, and each kind's completion is their exact
+    # shape, field for field:
+    #   activity  ActivityTaskCompletion{task_token, result.failed.failure
+    #             .message}                                (_activity.py:195-199)
+    #   workflow  WorkflowActivationCompletion{run_id, failed.failure.message}
+    #                                                      (_workflow.py:236-240)
+    #   nexus     NexusTaskCompletion{task_token, error.failure.message}, the
+    #             deprecated HandlerError variant Python still writes here, and
+    #             which the NexusDispatcher's own failure path also uses
+    #                                                      (_nexus.py:203-207)
+    # A Nexus cancel_task variant carries its own task_token; Python reads
+    # task.task.task_token unconditionally, which would answer a cancel with an
+    # empty token, so the variant is honored here instead.
+    method _drain_complete ($kind, $bytes) {
+        my $failure =
+            Temporalio::Worker::_drain_proto('temporal.api.failure.v1.Failure')
+                ->new({ message => $DRAIN_FAILURE_MESSAGE });
+
+        if ($kind eq 'activity') {
+            my $task = Temporalio::Worker::_drain_proto(
+                'coresdk.activity_task.ActivityTask')->decode($bytes);
+            return $self->_complete_activity_task(
+                Temporalio::Worker::ActivityCompletion::failure(
+                    $task->task_token, $failure));
+        }
+
+        if ($kind eq 'workflow') {
+            my $activation = Temporalio::Worker::_drain_proto(
+                'coresdk.workflow_activation.WorkflowActivation')
+                    ->decode($bytes);
+            my $failed = Temporalio::Worker::_drain_proto(
+                'coresdk.workflow_completion.Failure')
+                    ->new({ failure => $failure });
+            return $self->_complete_workflow_activation(
+                Temporalio::Worker::_drain_proto(
+                    'coresdk.workflow_completion.WorkflowActivationCompletion')
+                        ->new({
+                            run_id => $activation->run_id,
+                            failed => $failed,
+                        })->encode);
+        }
+
+        if ($kind eq 'nexus') {
+            my $task = Temporalio::Worker::_drain_proto(
+                'coresdk.nexus.NexusTask')->decode($bytes);
+            my $poll  = $task->task;
+            my $token = defined $poll
+                ? $poll->task_token
+                : $task->cancel_task->task_token;
+            my $handler_error = Temporalio::Worker::_drain_proto(
+                'temporal.api.nexus.v1.HandlerError')
+                    ->new({ failure => $failure });
+            return $self->_complete_nexus_task(
+                Temporalio::Worker::_drain_proto(
+                    'coresdk.nexus.NexusTaskCompletion')->new({
+                        task_token => $token,
+                        error      => $handler_error,
+                    })->encode);
+        }
+
+        return Future->done;
     }
 
     # Build the activity dispatcher with the real completer (worker_complete_
@@ -719,10 +959,15 @@ class Temporalio::Worker {
         return undef unless $activity_registry->has_sync_activities;
         my $runtime = $self->_runtime;
         return Temporalio::Activity::Pool->new(
-            loop          => $runtime->loop,
-            max_workers   => $sync_activity_workers,
-            registry      => $activity_registry,
-            inherited_fhs => [ $runtime->read_handle ],
+            loop            => $runtime->loop,
+            max_workers     => $sync_activity_workers,
+            registry        => $activity_registry,
+            inherited_fhs   => [ $runtime->read_handle ],
+            # spec I7 REFACTOR sub-step 6 (closes GitHub #7): lets the pool's
+            # parent-side ActivityOutbound chain root re-encode a rewritten
+            # heartbeat with the SAME converter the async path uses, instead
+            # of relaying a pooled child's pre-rewrite bytes unchanged.
+            data_converter  => $client->data_converter,
             heartbeat_relay => sub ($task_token, $heartbeat_bytes) {
                 return $self->_record_heartbeat($heartbeat_bytes);
             },
@@ -1059,6 +1304,13 @@ my @TOLERABLE_SHUTDOWN_PATTERNS = (
     qr/\bBrokenPipe\b/,
     qr/Cannot finalize, expected \d+ reference/i,
 );
+
+# _drain_proto($full_name) -> the generated proto class, resolved once per name
+# into the %DRAIN_PROTO cache declared above the class (spec F3). Same
+# fully-qualified-glob reason as _shutdown_error_is_tolerable below.
+sub Temporalio::Worker::_drain_proto ($name) {
+    return $DRAIN_PROTO{$name} //= Temporalio::Core::Proto::resolve($name);
+}
 
 # Declared at package scope with the fully-qualified glob: a bare `sub` in a
 # file that uses `feature 'class'` would land in main::, not the class package
@@ -1490,7 +1742,47 @@ Accessor returning the C<nexus_registry> value (the L<Temporalio::Worker::NexusR
 =head2 run
 
 Async. Runs the worker: starts the workflow and activity poll loops and returns a L<Future> that completes when the worker is shut down.
-On a fatal poll-loop failure the C<on_fatal_error> hook (when given) is invoked with the error before the shutdown sequence commences; the failure then propagates from C<run> after finalize and free.
+
+A poll loop that dies is fatal to the whole worker, and C<run> unwinds it in a
+fixed order rather than waiting on the loops that are still healthy (one of
+them may be long-polling an idle queue and would never return on its own):
+
+=over 4
+
+=item 1.
+
+The first loop failure wins the race and becomes the error C<run> will
+ultimately raise. Nothing raised later on the way out replaces it; a finalize
+failure attaches to it as a secondary instead.
+
+=item 2.
+
+The C<on_fatal_error> hook (when given) is invoked with that error, before any
+shutdown has been requested. A hook that dies is warned about and ignored.
+
+=item 3.
+
+Shutdown is initiated, which turns the surviving loops' next poll into the
+shutdown sentinel so they return.
+
+=item 4.
+
+Each DEAD loop is replaced by a drain of its poll kind. The drain answers every
+task core still has queued for that kind with a failed completion whose failure
+message is C<Worker shutting down>, until the poll reports shutdown. This is
+not optional politeness: core does not finish shutting down while a pending
+eviction has yet to be polled and replied to, or while an activity body is
+still outstanding, so skipping it deadlocks the finalize below.
+
+=item 5.
+
+The dispatches every loop still has running are awaited, so their completions
+reach core, and only then is the worker finalized and freed.
+
+=back
+
+The original failure then propagates from C<run>. A worker that has unwound
+this way is spent: a second C<run> refuses with C<Worker is shut down>.
 
 =head2 shutdown
 

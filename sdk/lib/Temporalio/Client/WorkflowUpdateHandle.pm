@@ -155,10 +155,26 @@ Temporalio::Client::WorkflowUpdateHandle - handle to a started workflow update
 
 =head1 DESCRIPTION
 
-A reference to a single workflow update (spec section 19), returned by
-C<< $workflow_handle->start_update >>. It carries the C<workflow_id>, C<run_id>,
-and C<update_id> plus a back-reference to the owning L<Temporalio::Client>, and
-any C<known_outcome> the start RPC already returned.
+A reference to a single workflow update (spec section 19). It carries the
+C<workflow_id>, C<run_id>, and C<update_id> plus a back-reference to the owning
+L<Temporalio::Client>, and any C<known_outcome> the start RPC already returned.
+
+Three L<Temporalio::Client::WorkflowHandle> methods construct one, and each of
+them sets C<result_type> from its own C<result_type> option:
+
+=over 4
+
+=item * C<< $workflow_handle->start_update >> returns the handle once the
+update is at least accepted.
+
+=item * C<< $workflow_handle->execute_update >> builds one internally and
+returns C<< ->result >> from it, so the handle never reaches the caller but the
+hint still governs the decode.
+
+=item * C<< $workflow_handle->get_update_handle >> builds one for an update id
+you already hold, with no RPC.
+
+=back
 
 =head2 result
 
@@ -177,11 +193,19 @@ Accessor returning the owning L<Temporalio::Client>.
 
 =head2 result_type
 
-Accessor returning the optional decode hint for the update result (set by
-C<< $workflow_handle->get_update_handle(..., result_type => $t) >>, spec R92).
+Accessor returning the optional decode hint for the update result, set from the
+C<< result_type => $t >> option of C<< $workflow_handle->start_update >>,
+C<< $workflow_handle->execute_update >>, or
+C<< $workflow_handle->get_update_handle >> (spec R92, I8 / GitHub issue #8).
+
 When present it is passed as the type hint for the result payload through
-C<< $client->data_converter->from_payloads >>; the stock payload converters
-self-describe and ignore hints, but a custom converter can honor it.
+C<< $client->data_converter->from_payloads >>, on both branches of C<result>:
+the outcome the start RPC already returned, and the one
+C<PollWorkflowExecutionUpdate> supplies. The stock payload converters
+self-describe and ignore hints, so only a custom payload converter observes it;
+C<sdk/t/unit/start_update_result_type.t> pins the hint with a recording
+converter, because an accessor assertion alone cannot tell a handle that
+applies the hint from one that merely stores it.
 
 =head2 run_id
 
@@ -205,7 +229,7 @@ Accessor returning the workflow id.
         result_type => $type_hint);
 
 Constructs a Temporalio::Client::WorkflowUpdateHandle. Normally created by
-C<< $workflow_handle->start_update >> or
-C<< $workflow_handle->get_update_handle >> rather than directly.
+C<< $workflow_handle->start_update >>, C<< $workflow_handle->execute_update >>,
+or C<< $workflow_handle->get_update_handle >> rather than directly.
 
 =cut
