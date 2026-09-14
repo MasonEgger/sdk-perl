@@ -204,10 +204,23 @@ class Temporalio::Test::Worker {
 
     # shutdown($timeout=120): initiate worker shutdown so the poll loops drain on
     # the ShutDown sentinel, then await the run future so finalize + free + fork
-    # pool teardown all complete (no orphaned processes). Idempotent. Raises if
-    # the drain wedges: the run future is shielded from wait_any's loser-cancel
-    # (finding I5/spec R47 shape, same as await_result above) so a timed-out
-    # drain is diagnosed as a genuine hang, not misreported as a clean exit.
+    # pool teardown all complete. Idempotent. Raises if the drain wedges: the run
+    # future is shielded from wait_any's loser-cancel (finding I5/spec R47 shape,
+    # same as await_result above) so a timed-out drain is diagnosed as a genuine
+    # hang, not misreported as a clean exit.
+    #
+    # "No orphaned processes" is a guarantee of the CLEAN drain only. On the
+    # timeout branch the worker is deliberately left un-finalized and the fork
+    # pool un-closed, because finalizing would block on the very poll that
+    # failed to drain; tearing that process state down is the caller's job (an
+    # END block). The run future is left pending rather than cancelled, so the
+    # still-live worker is not ripped out from under the caller, and a
+    # continuation is attached so its late outcome is still observed. Reference
+    # harnesses sidestep the question by never bounding the drain: sdk-python
+    # awaits worker.shutdown() and then the run task with no timeout
+    # (tests/helpers/worker.py:250-252) and sdk-ruby joins inside a
+    # block-scoped worker.run (test/workflow_utils.rb:52), so the bound here is
+    # this harness's own addition and diagnosing it is its own responsibility.
     method shutdown ($timeout = 120) {
         $worker->shutdown;
         $loop->await(Future->wait_any(
@@ -219,8 +232,25 @@ class Temporalio::Test::Worker {
         # look like success. without_cancel keeps it PENDING on the timeout
         # arm instead, so this branches on the run future's ACTUAL state:
         # not ready -> timeout won, genuinely stalled; else check is_failed.
-        die "worker run did not drain within ${timeout}s\n"
-            unless $run_future->is_ready;
+        if (!$run_future->is_ready) {
+            # Still pending: the drain genuinely wedged. Attach an observer
+            # BEFORE raising. The worker is still up and its runtime can fail
+            # the undrained poll futures a moment after this die, and that
+            # failure is silent on its own: the without_cancel proxy built for
+            # the race above registers its own callback on this future, which
+            # marks it reported the instant it fails (Future 0.52,
+            # Future::PP::_mark_ready), so the failure lands in a proxy nobody
+            # kept and no abandoned-Future warning ever fires, not even under
+            # PERL_FUTURE_DEBUG. This continuation is the only thing that
+            # reports a post-timeout failure at all.
+            $run_future->on_ready(sub ($late_run) {
+                return if $late_run->is_done || $late_run->is_cancelled;
+                my $failure = '' . (($late_run->failure)[0] // '');
+                $failure =~ s/\s+\z//;
+                warn "worker run loop failed after the drain timeout: $failure\n";
+            });
+            die "worker run did not drain within ${timeout}s\n";
+        }
         # Retrieve the run future's outcome so it is never abandoned: an
         # un-retrieved failed Future warns (and dirties the process exit) at
         # global destruction. A genuine shutdown failure is re-raised so the
@@ -295,7 +325,17 @@ Constructs a Temporalio::Test::Worker. Named parameters:
 
 =head2 await_result
 
-Async. Returns a L<Future> resolving once the worker's run loop has finished.
+    my $handle = $tw->await_result($client->start_workflow(...));
+    my $result = $tw->await_result($handle->result, 30);
+
+Blocks the loop until C<$future> settles, then returns its resolved value. This
+is a synchronous call: it does B<not> return a L<Future>. The worker's poll
+loops run concurrently throughout, and the run future is shielded from
+cancellation so awaiting a result never tears the running worker down. A run
+loop that crashes before C<$future> settles surfaces at once as C<"worker run
+loop failed: ..."> rather than hanging the test, and a future still unsettled
+after C<$timeout> (default 120) seconds dies with C<"future did not resolve
+within ${timeout}s">.
 
 =head2 await_idempotent
 
@@ -355,6 +395,18 @@ drain wedges: a run future that has not settled by C<$timeout> (default 120)
 seconds dies with C<"worker run did not drain within ${timeout}s">, and a run
 loop that failed during shutdown re-raises with C<"worker run loop failed
 during shutdown: ...">. Returns normally only on a clean drain. Idempotent.
+
+The two branches promise different things. A clean drain finalizes and frees
+the worker and reaps the sync-activity fork pool, so nothing is orphaned. The
+timeout branch makes no such promise: it leaves the worker un-finalized
+(finalizing would block on the poll that failed to drain) and leaves the run
+future B<pending and uncancelled>, so a still-live worker is not ripped out
+from under the caller. Tearing that down after a wedged drain is the caller's
+job, typically an C<END> block. The pending run future is still watched,
+though. A continuation is attached before the raise, so a run loop that fails
+after the timeout warns C<"worker run loop failed after the drain timeout:
+..."> instead of being swallowed silently by the cancellation shield, whose own
+callback retrieves the failure into a proxy L<Future> the race discarded.
 
 =head2 worker
 
