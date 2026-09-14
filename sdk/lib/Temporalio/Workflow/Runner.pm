@@ -345,7 +345,12 @@ class Temporalio::Workflow::Runner {
     # completion and drops the runner), so recording either is at best dead
     # state and at worst, on the terminal slot, state a later activation would
     # inherit. _classify_failure returns 'evicting' while this is set, which is
-    # how the drop reaches every consumer. MUST-match sdk-python's
+    # how the drop reaches the two FAILURE consumers (_outcome_for_failure and
+    # _settle_signal). _settle_update reads the field DIRECTLY instead, because
+    # eviction has to silence its completed and task-failure arms too and must
+    # bail out before _update_settlement runs the failure converter (spec F8;
+    # see the comment there).
+    # MUST-match sdk-python's
     # self._deleting, the first check of the generic except clause in
     # _run_top_level_workflow_function (worker/_workflow_instance.py:2528),
     # which covers the body and every handler coroutine alike; Python catches
@@ -2190,14 +2195,36 @@ class Temporalio::Workflow::Runner {
     # continuation survives the run's removal from the dispatcher cache. The
     # dispatcher drops the run_id -> runner mapping; no workflow code runs and an
     # empty successful completion is returned (the §8.3 eviction fast path).
-    # MUST-match sdk-python _handle_cache_eviction (deletes the run from
-    # _running_workflows after cancelling its tasks).
-    # A condition-parked handler future (wait_condition; spec I1) settles via
-    # its UNDERLYING @conditions entry, not a separate clone cancel: it is a
-    # Future::AsyncAwait AWAIT_CLONE of the tracked _ConditionFuture, so
-    # cancelling the clone directly (rather than the real condition first)
-    # double-settles it once the frame resumes. See the @pending_futures
-    # sweep order below.
+    # MUST-match sdk-python _apply_remove_from_cache (sets _deleting, cancels
+    # every outstanding task, and the run is dropped from _running_workflows;
+    # worker/_workflow_instance.py:797-808).
+    #
+    # THE SWEEP-ORDER INVARIANT (spec I1 + F8), stated once here because every
+    # list below is ordered to satisfy it:
+    #
+    #   Every awaitable class that OVERRIDES cancel to fail instead (timers,
+    #   activities, and wait_condition's _ConditionFuture) must be swept BEFORE
+    #   the %in_progress_handlers pass. Those overrides settle by
+    #   ->fail(Cancelled), which RESUMES the suspended handler frame, and
+    #   Future::AsyncAwait then settles that handler's own return future as
+    #   part of the same cancel. Sweeping the handler first instead settles its
+    #   return future once on its own and a second time when the real awaitable
+    #   is reached, and the second ->fail croaks out of evict().
+    #
+    #   Everything else (child-workflow, external-signal, external-cancel and
+    #   Nexus futures) is a plain Temporalio::Workflow::Future, which cancels
+    #   NATIVELY: the frame is discarded rather than resumed, so those sweeps
+    #   carry no ordering obligation.
+    #
+    # The tracked handler future is NOT "a clone of its underlying condition"
+    # in any aliasing sense. Future::AsyncAwait builds an async sub's return
+    # future by AWAIT_CLONE on the FIRST future the body awaits, and the CPAN
+    # Future module defines that as `shift->new` (Future.pm:232): a FRESH
+    # instance of that future's class. So a condition-parked handler's return
+    # future merely inherits _ConditionFuture's fail-on-cancel override; it is
+    # a separate object, and cancelling it does not touch the real @conditions
+    # entry. That inherited override is the whole reason the order above
+    # matters. See the @pending_futures list below.
     method evict () {
         # Raise the eviction guard BEFORE any sweep (spec F2). Every cancel
         # below resumes a suspended frame, and a frame that unwinds with a
@@ -2233,11 +2260,12 @@ class Temporalio::Workflow::Runner {
         for my $future (@pending_activity_futures) {
             $future->_force_cancel unless $future->is_ready;
         }
-        # @conditions is swept BEFORE %in_progress_handlers (spec I1, closes
-        # GitHub #1): a wait_condition-parked :Update/:Signal handler's
-        # tracked future is a Future::AsyncAwait AWAIT_CLONE of its
-        # underlying _ConditionFuture (still an entry here), so failing the
-        # REAL condition future first resumes the suspended handler frame and
+        # @conditions is swept BEFORE %in_progress_handlers, per the
+        # sweep-order invariant above (spec I1, closes GitHub #1): a
+        # wait_condition-parked :Update/:Signal handler's tracked future is a
+        # SEPARATE object that inherited _ConditionFuture's fail-on-cancel
+        # override via AWAIT_CLONE, while the real condition is still an entry
+        # here, so failing the REAL condition first resumes the frame and
         # lets Future::AsyncAwait settle the clone AS PART OF THAT SAME
         # CANCEL. The later %in_progress_handlers pass then finds the clone
         # already ->is_ready and the `unless $future->is_ready` guard below
@@ -2253,6 +2281,9 @@ class Temporalio::Workflow::Runner {
         # uses for the main run future's cancel fallback (R8-R10). A plain-
         # future-parked handler (R17) has no @conditions entry at all, so it
         # is unaffected and still natively cancelled by the handler pass.
+        # Either way the settlement that the one surviving settle reaches is
+        # SILENT, because $evicting is already raised: _settle_update and
+        # _settle_signal both return without emitting (spec F8).
         my @pending_futures = (
             values %pending_timers,
             (map { $_->{future} } @conditions),
@@ -3238,10 +3269,13 @@ class Temporalio::Workflow::Runner {
     #                    WorkflowActivationCompletion.
     #
     # A NATIVELY cancelled handler future (evict()'s %in_progress_handlers
-    # sweep) is dropped with no activation error by the is_cancelled guard,
-    # mirroring _update_settlement's eviction-drop rule; the $evicting branch of
-    # the classifier covers the other eviction shape, a frame that unwinds with
-    # a failure while the sweep tears it down.
+    # sweep) is dropped with no activation error by the is_cancelled guard, and
+    # the $evicting branch of the classifier covers the other eviction shape, a
+    # frame that unwinds with a failure while the sweep tears it down. Update
+    # settlement reaches the same silence by a different route: _settle_update
+    # drops EVERY eviction arm at one `return if $evicting` placed ahead of its
+    # classifier (spec F8), so no update path runs the failure converter on a
+    # dying runner.
     #
     # MUST-match sdk-python: a signal-handler exception runs through the SAME
     # _run_top_level_workflow_function the main :Run body uses
@@ -3937,16 +3971,39 @@ class Temporalio::Workflow::Runner {
     #   cancelled  1         1             ()         croaks "... was cancelled"
     # A cancelled future passes the ->failure check EMPTY and then ->result
     # croaks: the pre-fix _settle_update death that aborted evict() before it
-    # could send the eviction completion. The only producer of a natively
-    # cancelled handler future is evict()'s %in_progress_handlers sweep, and
-    # the eviction contract is DROP: no UpdateResponse, no activation error,
-    # matching sdk-python where the update task's teardown exception during
-    # eviction is swallowed with no response (_workflow_instance.py
-    # run_update, `except BaseException` under self._deleting). A task-cancel
-    # OUTSIDE eviction is the rejected branch instead: the workflow cancel
-    # chain throws Temporalio::Exception::Cancelled INTO the handler, so its
-    # future arrives here FAILED (sdk-python parity: asyncio.CancelledError
-    # becomes a Temporal CancelledError and rejects the update).
+    # could send the eviction completion.
+    #
+    # evict()'s sweep leaves a parked handler in one of TWO shapes, depending
+    # on what the handler parked on:
+    #
+    #   plain-future park (R17, WfDef::PlainFutureUpdater) - the tracked
+    #     handler future is natively cancellable, so the %in_progress_handlers
+    #     pass cancels it and Future::AsyncAwait discards the suspended frame
+    #     without unwinding it, leaving the handler future CANCELLED.
+    #   condition park (I1, WfDef::UpdateParker `park`) - wait_condition's
+    #     _ConditionFuture cancels by ->fail(Cancelled), so the @conditions
+    #     sweep RESUMES the frame and the handler future ends up FAILED with a
+    #     Cancelled, which reads exactly like a post-accept rejection.
+    #
+    # NEITHER shape reaches this classifier during eviction. _settle_update's
+    # `return if $evicting` (spec F8) sits ahead of the call and cuts off every
+    # arm, the completed one a resuming frame can produce included, so the
+    # failure converter never runs on a dying runner. The eviction drop is that
+    # early return, NOT the is_cancelled guard below. The guard is kept for the
+    # L7 direct-call contract stated above (t/unit/settle_update_states.t calls
+    # this method directly with each of the three future states) and as defense
+    # in depth if some later caller settles a swept handler outside
+    # _settle_update.
+    #
+    # Dropping both shapes matches sdk-python, where a handler's teardown
+    # exception during eviction is swallowed with no response (run_update's
+    # `except BaseException` under self._deleting, _workflow_instance.py
+    # :710-717) and no command can be added at all while deleting (:2093-2095).
+    # A task-cancel OUTSIDE eviction is the rejected branch instead: the
+    # workflow cancel chain throws Temporalio::Exception::Cancelled INTO the
+    # handler, so its future arrives here FAILED (sdk-python parity:
+    # asyncio.CancelledError becomes a Temporal CancelledError and rejects the
+    # update).
     method _update_settlement ($future) {
         return { dropped => 1 } if $future->is_cancelled;
         if (my @failure = $future->failure) {
@@ -3964,10 +4021,36 @@ class Temporalio::Workflow::Runner {
     # Settle an accepted update once its handler Future is ready (spec section
     # 19.2 step 4): a returned value -> UpdateResponse.completed; a Temporal
     # failure-type throw -> UpdateResponse.rejected (post-accept); any other die
-    # -> a workflow TASK failure; a cancelled handler future (eviction, spec
-    # R17) -> dropped, no response. Classification lives in _update_settlement
-    # so the three-state contract is unit-testable directly.
+    # -> a workflow TASK failure; a handler future settled by eviction ->
+    # dropped, no response. Classification lives in _update_settlement so the
+    # three-state contract is unit-testable directly.
     method _settle_update ($protocol_instance_id, $future) {
+        # Spec F8: under eviction an update settles SILENTLY, whatever its
+        # outcome. The field is read directly rather than through
+        # _classify_failure (the route _settle_signal takes) because the
+        # classifier only sees a FAILURE value, while eviction has to suppress
+        # the completed and task-failure arms as well: a handler that returned
+        # normally on the resuming frame would otherwise push an
+        # UpdateResponse.completed onto a runner being torn down.
+        #
+        # The guard also has to sit AHEAD of _update_settlement, not inside it:
+        # the rejected arm converts $err through the failure converter, and a
+        # converter that dies there takes evict() with it, so the RemoveFromCache
+        # completion is never sent (t/replay/evict_pending_update_wait_condition.t,
+        # 'a failure converter that dies does not escape evict()'). Externally
+        # the emitted command was already harmless, because
+        # WorkflowDispatcher::_handle_eviction deletes the runner before calling
+        # evict and sends its own fixed empty-success completion; the CALL was
+        # the exposure.
+        #
+        # MUST-match sdk-python, which refuses at both layers: _add_command
+        # raises _WorkflowBeingEvictedError while self._deleting
+        # (worker/_workflow_instance.py:2076-2078 via _assert_not_read_only,
+        # :2093-2095), so run_update never reaches its to_failure call, and
+        # run_update's outer `except BaseException: if self._deleting: return`
+        # (:710-717) swallows whatever still escapes.
+        return if $evicting;
+
         my $settlement = $self->_update_settlement($future);
         return if $settlement->{dropped};
         if (exists $settlement->{task_failure}) {
@@ -5110,6 +5193,15 @@ failure would otherwise claim the one-shot workflow-terminal command slot or
 be recorded as a workflow task failure; neither survives the eviction, which
 sends a fixed empty successful completion. MUST-match sdk-python's
 C<self._deleting>.
+
+Update settlement (C<_settle_update>) takes the same drop, but reads the
+eviction flag directly rather than through this table (spec F8): an update
+also has a C<completed> arm and a task-failure arm to silence, and its
+rejection arm runs the failure converter, so it has to bail out before any
+converter call rather than after classifying one. sdk-python is the same
+shape from the other direction: while C<self._deleting> no command may be
+added at all (C<_add_command> raises C<_WorkflowBeingEvictedError>), and
+C<run_update> swallows whatever still escapes.
 
 =item *
 

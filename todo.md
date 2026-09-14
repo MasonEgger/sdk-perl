@@ -227,14 +227,14 @@ The R1-R97 cycle is archived at `.ai-sessions/r1-r97-remediation/`.
 - [x] 8. Verify: both suites green; commit "Refs #9"
 
 ### Step F8: Settle Handlers Silently During Eviction
-- [ ] 1. RED: condition-parked signal under evict, Cancelled counter, weakened runner freed, converter dies inside evict; fails today
-- [ ] 2. Verify _workflow_instance.py:485-490, 799-808; cite
-- [ ] 3. GREEN: _settle_update early return under $evicting; R17 comment updated
-- [ ] 4. RED: none
-- [ ] 5. GREEN: none
-- [ ] 6. REFACTOR: sweep-order invariant comment; AWAIT_CLONE wording
-- [ ] 7. Docs: tasks-remain tripwire noted as follow-up
-- [ ] 8. Verify: both suites green; commit "Refs #1"
+- [x] 1. RED: condition-parked signal under evict, Cancelled counter, weakened runner freed, converter dies inside evict; fails today
+- [x] 2. Verify _workflow_instance.py:485-490, 799-808; cite
+- [x] 3. GREEN: _settle_update early return under $evicting; R17 comment updated
+- [x] 4. RED: none
+- [x] 5. GREEN: none
+- [x] 6. REFACTOR: sweep-order invariant comment; AWAIT_CLONE wording
+- [x] 7. Docs: tasks-remain tripwire noted as follow-up
+- [x] 8. Verify: both suites green; commit "Refs #1"
 
 ### Step F9: Keep Untyped Search Attributes Through Schedule Action Decode
 - [ ] 1. RED: untyped residual survives, byte-identity round trip, wire-crossing all value types, undef metadata, skip on bad encoding, RetryPolicy defaults, priority undef; fails today
