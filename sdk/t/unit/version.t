@@ -6,12 +6,29 @@ use utf8;
 use Test2::V1;
 
 use FindBin ();
+use File::Basename ();
 use File::Spec ();
 
-# The repo root is two levels up from sdk/t/unit/.
-my $repo_root = File::Spec->rel2abs(
-    File::Spec->catdir($FindBin::Bin, File::Spec->updir, File::Spec->updir,
-        File::Spec->updir));
+# The monorepo root is the nearest ancestor holding both alien-core/dist.ini
+# and sdk/dist.ini. From a source checkout that is three levels up from
+# sdk/t/unit/; under `dzil test` the suite runs from sdk/.build/<id>/, so a
+# fixed depth breaks. An installed distribution has no monorepo at all.
+my $repo_root;
+{
+    my $dir = File::Spec->rel2abs($FindBin::Bin);
+    while (1) {
+        if (-f File::Spec->catfile($dir, 'alien-core', 'dist.ini')
+            && -f File::Spec->catfile($dir, 'sdk', 'dist.ini')) {
+            $repo_root = $dir;
+            last;
+        }
+        my $parent = File::Basename::dirname($dir);
+        last if $parent eq $dir;
+        $dir = $parent;
+    }
+}
+T2->skip_all("monorepo root not found above $FindBin::Bin")
+    unless defined $repo_root;
 
 # The single source of truth for the v0.2 milestone (spec section 11:
 # "Temporalio::SDK::VERSION"). All three distributions ship together

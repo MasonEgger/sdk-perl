@@ -30,9 +30,13 @@ T2->subtest('constraint 1: base must be declared with class, not package' => sub
         1;
     };
     T2->ok(!$ok, 'plain-package base fails to compile under :isa');
+    # perl 5.38 rejects the plain-package base outright. 5.40 and later first
+    # try to `require` it as a module (observed on 5.40.5 and 5.42.3 in CI),
+    # so the failure surfaces as the module load error instead. Either way
+    # the base was not accepted as a class.
     T2->like(
         $@,
-        qr/:isa attribute requires a class but "AttrSpike::PlainBase" is not one/,
+        qr/(?::isa attribute requires a class but "AttrSpike::PlainBase" is not one|Can't locate AttrSpike\/PlainBase\.pm)/,
         'diagnostic names the non-class base',
     );
 });

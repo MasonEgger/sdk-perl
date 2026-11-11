@@ -138,21 +138,25 @@ T2->subtest('update_api_key reaches the FFI call (T-cli-connect-4)' => sub {
     {
         no warnings qw(redefine once);
         local *Temporalio::Core::FFI::client_update_api_key = sub {
-            push @calls, [@_];
+            my ($conn_ptr, $key_ref) = @_;
+            # Decode the token DURING the call, as the bridge does: the
+            # method pins the buffer only until this call returns, so a
+            # later read through the record is a dangling pointer (seen
+            # as garbage on perl 5.42.3 in CI).
+            push @calls, [
+                $conn_ptr, $key_ref,
+                FFI::Platypus::Buffer::buffer_to_scalar(
+                    $key_ref->data, $key_ref->size),
+            ];
         };
         $client->update_api_key('B');
     }
     T2->is(scalar @calls, 1, 'exactly one FFI call');
-    my ($conn_ptr, $key_ref) = @{ $calls[0] };
+    my ($conn_ptr, $key_ref, $key_bytes) = @{ $calls[0] };
     T2->is($conn_ptr, $client->connection->ptr,
         'called with the live connection ptr');
     T2->isa_ok($key_ref, 'Temporalio::Core::FFI::ByteArrayRef');
-    T2->is(
-        FFI::Platypus::Buffer::buffer_to_scalar(
-            $key_ref->data, $key_ref->size),
-        'B',
-        'api key bytes are the new token',
-    );
+    T2->is($key_bytes, 'B', 'api key bytes are the new token');
 
     # And once for real, to exercise the by-value record across the ABI.
     my $real = eval { $client->update_api_key('rotated-token'); 1 };

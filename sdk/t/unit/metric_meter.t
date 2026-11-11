@@ -69,7 +69,13 @@ sub shim_fn ($ptr, $args, $ret) {
     return $ffi->function($ptr => $args => $ret);
 }
 
+# The shim copies the bytes during the call, but the pointer has to be live
+# until then: a signature parameter is a fresh lexical that dies when baref
+# returns, so pin it for the life of the file. Reading the freed PV showed
+# up as a corrupted metric name on perl 5.42.3 in CI.
+my @BAREF_KEEP;
 sub baref ($s) {
+    push @BAREF_KEEP, \$s;
     my ($d, $sz) = FFI::Platypus::Buffer::scalar_to_buffer($s);
     return Temporalio::Core::FFI::ByteArrayRef->new(data => $d, size => $sz);
 }

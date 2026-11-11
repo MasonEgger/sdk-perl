@@ -90,7 +90,13 @@ jobs:
       - name: Install Perl tooling
         shell: bash
         run: |
-          cpanm --notest --quiet Alien::Build@2.88 Dist::Zilla Dist::Zilla::Plugin::AlienBuild
+          # www.cpan.org drops the occasional download mid-run; cpanm skips
+          # what is already installed, so a retry only fetches the rest.
+          for attempt in 1 2 3; do
+            cpanm --notest --quiet Alien::Build@2.88 Dist::Zilla Dist::Zilla::Plugin::AlienBuild && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 30
+          done
           # Author-side dzil plugins used by the dist.ini files. There is no
           # dist.ini at the repo root, so authordeps must run inside each
           # distribution directory, and a miss must fail the step, not hide.
@@ -153,7 +159,16 @@ jobs:
 
       - name: Install SDK deps
         working-directory: sdk
-        run: cpanm --notest --quiet --installdeps --with-develop .
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            cpanm --notest --quiet --installdeps --with-develop . && break
+            [ "$attempt" = 3 ] && exit 1
+            sleep 30
+          done
+          # Linux::FD is a `recommends` (eventfd wakeup); install it on Linux
+          # so the eventfd path and the T-act-10 FD-hygiene probe run here.
+          [ "$RUNNER_OS" != Linux ] || cpanm --notest --quiet Linux::FD
 
       # Stage 8: integration tests drive an ephemeral dev server via the
       # `temporal` CLI; install it so the integration stage runs (rather than

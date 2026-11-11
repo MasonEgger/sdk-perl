@@ -116,7 +116,10 @@ T2->subtest('T-act-6: sync body runs in a child and returns its result' => sub {
 # renumbers fds in the child.
 # ---------------------------------------------------------------------------
 T2->subtest('T-act-10: child closes inherited parent eventfd' => sub {
-    require Linux::FD;
+    # Linux::FD is a `recommends`: without it Callback.pm wakes on a pipe
+    # instead of an eventfd, and this probe has no eventfd to hand down.
+    T2->skip_all('Linux::FD not installed (eventfd wakeup unavailable)')
+        unless eval { require Linux::FD; 1 };
     my $efd = Linux::FD::Event->new(0, 'non-blocking');
     my $efd_no = $efd->fileno;
 
