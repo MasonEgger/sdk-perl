@@ -104,7 +104,7 @@ jobs:
           # `cpanm --installdeps .` cannot configure it; dzil knows the deps.
           deps=$(dzil listdeps --missing)
           [ -z "$deps" ] || echo "$deps" | cpanm --notest --quiet
-          dzil install --install-command "cpanm --notest --quiet ."
+          dzil install --install-command "cpanm --notest ."
 
       # Stage 5: build + install our in-tree Rust shim
       # (Alien::Temporalio::PerlBridge). The alienfile walks up to ext/.
@@ -116,7 +116,17 @@ jobs:
           # `cpanm --installdeps .` cannot configure it; dzil knows the deps.
           deps=$(dzil listdeps --missing)
           [ -z "$deps" ] || echo "$deps" | cpanm --notest --quiet
-          dzil install --install-command "cpanm --notest --quiet ."
+          dzil install --install-command "cpanm --notest ."
+
+      # The alienfile's cargo build output lands in cpanm's build.log, which
+      # never leaves the runner unless something prints it.
+      - name: Show cpanm build log on failure
+        if: failure()
+        shell: bash
+        run: |
+          for f in ~/.cpanm/build.log ~/.cpanm/work/*/build.log; do
+            [ -f "$f" ] && { echo "===== $f"; tail -n 300 "$f"; }
+          done; true
 
       # Stage 3 (cont.): the SDK's runtime + test deps, including the pure-Perl
       # Protobuf distribution pulled from git per sdk/cpanfile.
@@ -170,36 +180,43 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      # PowerShell, not bash: under Git Bash the perl on PATH is Git for
+      # Windows' own, not Strawberry, so core modules look missing to cpanm.
       - name: Install Perl tooling
-        shell: bash
+        shell: pwsh
         run: |
           cpanm --notest --quiet Alien::Build@2.88 Dist::Zilla Dist::Zilla::Plugin::AlienBuild
-          for d in alien-core alien-perl-bridge sdk; do
-            deps=$(cd "$d" && dzil authordeps --missing)
-            [ -z "$deps" ] || echo "$deps" | cpanm --notest --quiet
-          done
+          foreach ($d in 'alien-core', 'alien-perl-bridge', 'sdk') {
+            Push-Location $d
+            $deps = dzil authordeps --missing
+            if ($deps) { $deps | cpanm --notest --quiet }
+            Pop-Location
+          }
 
       - name: Build Alien::Temporalio::Core
         env:
           ALIEN_TEMPORALIO_CORE_SDK_RUST_PATH: ${{ github.workspace }}/sdk-rust
         working-directory: alien-core
-        shell: bash
+        shell: pwsh
         run: |
-          # A dzil source tree has no Makefile.PL, Build.PL, or cpanfile, so
-          # `cpanm --installdeps .` cannot configure it; dzil knows the deps.
-          deps=$(dzil listdeps --missing)
-          [ -z "$deps" ] || echo "$deps" | cpanm --notest --quiet
-          dzil install --install-command "cpanm --notest --quiet ."
+          $deps = dzil listdeps --missing
+          if ($deps) { $deps | cpanm --notest --quiet }
+          dzil install --install-command "cpanm --notest ."
 
       - name: Build Alien::Temporalio::PerlBridge
         working-directory: alien-perl-bridge
-        shell: bash
+        shell: pwsh
         run: |
-          # A dzil source tree has no Makefile.PL, Build.PL, or cpanfile, so
-          # `cpanm --installdeps .` cannot configure it; dzil knows the deps.
-          deps=$(dzil listdeps --missing)
-          [ -z "$deps" ] || echo "$deps" | cpanm --notest --quiet
-          dzil install --install-command "cpanm --notest --quiet ."
+          $deps = dzil listdeps --missing
+          if ($deps) { $deps | cpanm --notest --quiet }
+          dzil install --install-command "cpanm --notest ."
+
+      - name: Show cpanm build log on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path "$HOME\.cpanm" -Recurse -Filter build.log -ErrorAction SilentlyContinue | ForEach-Object { "===== $($_.FullName)"; Get-Content $_.FullName -Tail 300 }
+          exit 0
 
       - name: Install SDK deps
         working-directory: sdk
