@@ -86,7 +86,7 @@ jobs:
             ${{ runner.os }}-perl${{ matrix.perl }}-cpanm-
 
       # Stage 3: author/build tooling + the SDK's own deps. Dist::Zilla builds
-      # all three distributions; Protobuf is a git dependency (cpanfile).
+      # all three distributions.
       - name: Install Perl tooling
         shell: bash
         run: |
@@ -136,7 +136,21 @@ jobs:
           done; true
 
       # Stage 3 (cont.): the SDK's runtime + test deps, including the pure-Perl
-      # Protobuf distribution pulled from git per sdk/cpanfile.
+      # cpanm ignores the cpanfile's `git =>` key and would pull CPAN's
+      # unrelated Protobuf-0.09, so install Mason's pure-Perl Protobuf from
+      # its repo first; it is a dzil source tree like the Alien dists.
+      - name: Install Protobuf (git)
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/MasonEgger/protobuf-perl.git "$RUNNER_TEMP/protobuf-perl"
+          cd "$RUNNER_TEMP/protobuf-perl"
+          deps=$(dzil authordeps --missing)
+          [ -z "$deps" ] || echo "$deps" | cpanm --notest --quiet
+          deps=$(dzil listdeps --missing)
+          [ -z "$deps" ] || echo "$deps" | cpanm --notest --quiet
+          dzil install --install-command "cpanm --notest ."
+          perl -MProtobuf::Parser -e 'print "Protobuf $Protobuf::VERSION\n"'
+
       - name: Install SDK deps
         working-directory: sdk
         run: cpanm --notest --quiet --installdeps --with-develop .
@@ -231,6 +245,19 @@ jobs:
         run: |
           Get-ChildItem -Path "$HOME\.cpanm" -Recurse -Filter build.log -ErrorAction SilentlyContinue | ForEach-Object { "===== $($_.FullName)"; Get-Content $_.FullName -Tail 300 }
           exit 0
+
+      - name: Install Protobuf (git)
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/MasonEgger/protobuf-perl.git "$env:RUNNER_TEMP\protobuf-perl"
+          Push-Location "$env:RUNNER_TEMP\protobuf-perl"
+          $deps = dzil authordeps --missing
+          if ($deps) { $deps | cpanm --notest --quiet }
+          $deps = dzil listdeps --missing
+          if ($deps) { $deps | cpanm --notest --quiet }
+          dzil install --install-command "cpanm --notest ."
+          Pop-Location
+          perl -MProtobuf::Parser -e 'print "Protobuf $Protobuf::VERSION\n"'
 
       - name: Install SDK deps
         working-directory: sdk
