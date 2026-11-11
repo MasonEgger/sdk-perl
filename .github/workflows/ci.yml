@@ -2,9 +2,12 @@
 # ABOUTME: OS x Perl matrix, Rust stable, builds the c-bridge + shim, runs the suite.
 name: CI
 
+# Pull requests run the cheap Linux matrix once (no duplicate push run).
+# The full matrix (both Ubuntus, macOS, Windows) runs on pushes to main and
+# on manual dispatch.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -21,24 +24,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Primary matrix: every supported OS x Perl combination, blocking.
+  # Pick the matrix for this event: Linux-only on pull requests, everything
+  # on main and manual runs.
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      os: ${{ steps.pick.outputs.os }}
+      full: ${{ steps.pick.outputs.full }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            echo 'os=["ubuntu-24.04"]' >> "$GITHUB_OUTPUT"
+            echo 'full=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-22.04","ubuntu-24.04","macos-15","macos-26"]' >> "$GITHUB_OUTPUT"
+            echo 'full=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  # Primary matrix: OS x Perl; Linux legs block, macOS legs report only.
   test:
-    name: ${{ matrix.os }} / perl ${{ matrix.perl }}${{ matrix.allow_failure && ' (allow-failure)' || '' }}
+    needs: plan
+    name: ${{ matrix.os }} / perl ${{ matrix.perl }}${{ startsWith(matrix.os, 'macos') && ' (allow-failure)' || '' }}
     # macOS legs fail one file, t/integration/repro_fd_signal.t: after a
     # fork-pool activity the dev-server shutdown never wakes tokio's child
     # wait there (issue #31). They still run and report; only Linux gates.
-    continue-on-error: ${{ matrix.allow_failure || false }}
+    continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, macos-15, macos-26]
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
         perl: ["5.38", "5.40", "5.42"]
-        include:
-          - os: macos-15
-            allow_failure: true
-          - os: macos-26
-            allow_failure: true
     steps:
       - name: Checkout sdk-perl
         uses: actions/checkout@v4
@@ -199,6 +217,8 @@ jobs:
   # Allow-failure portability canary (spec section 14): one Windows job that
   # surfaces obvious breakage without blocking releases.
   windows:
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     name: windows-2022 / strawberry-perl (allow-failure)
     runs-on: windows-2022
     continue-on-error: true
