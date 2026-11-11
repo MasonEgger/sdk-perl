@@ -81,10 +81,16 @@ jobs:
       # Stage 3: author/build tooling + the SDK's own deps. Dist::Zilla builds
       # all three distributions; Protobuf is a git dependency (cpanfile).
       - name: Install Perl tooling
+        shell: bash
         run: |
           cpanm --notest --quiet Alien::Build@2.88 Dist::Zilla Dist::Zilla::Plugin::AlienBuild
-          # Author-side dzil plugins used by the dist.ini files.
-          dzil authordeps --missing | cpanm --notest --quiet || true
+          # Author-side dzil plugins used by the dist.ini files. There is no
+          # dist.ini at the repo root, so authordeps must run inside each
+          # distribution directory, and a miss must fail the step, not hide.
+          for d in alien-core alien-perl-bridge sdk; do
+            deps=$(cd "$d" && dzil authordeps --missing)
+            [ -z "$deps" ] || echo "$deps" | cpanm --notest --quiet
+          done
 
       # Stage 4: build + install Alien::Temporalio::Core (cargo-builds the
       # sdk-core C bridge from the pinned sdk-rust checkout in place).
@@ -165,9 +171,13 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install Perl tooling
+        shell: bash
         run: |
           cpanm --notest --quiet Alien::Build@2.88 Dist::Zilla Dist::Zilla::Plugin::AlienBuild
-          dzil authordeps --missing | cpanm --notest --quiet
+          for d in alien-core alien-perl-bridge sdk; do
+            deps=$(cd "$d" && dzil authordeps --missing)
+            [ -z "$deps" ] || echo "$deps" | cpanm --notest --quiet
+          done
 
       - name: Build Alien::Temporalio::Core
         env:
