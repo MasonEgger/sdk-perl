@@ -2,6 +2,12 @@
 
 ## Recent
 <!-- 10 most recent lessons, newest first -->
+- sdk-core's child wait is SIGCHLD-driven everywhere but Linux, and no Perl-side arrangement of `$SIG{CHLD}` satisfies both platforms (CI, 2026-11-11, GitHub issue #31).
+  tokio 1.52 waits for the ephemeral dev-server CLI through a pidfd on Linux; on macOS its reaper only polls `waitpid` when the SIGCHLD handler signal-hook-registry installed at core's first spawn fires, and every later Perl `sigaction` (IO::Async's `$SIG{CHLD}` write on the fork pool's first child watch, then the `undef` when the dev-server shutdown window detaches the last attachment) replaces that handler for good, so `$server->shutdown` times out at 30s on every macOS runner while Linux stays green.
+  The obvious pin (attach a permanent no-op CHLD watcher BEFORE core's first spawn so tokio chains to Perl's handler and the window never resets `$SIG{CHLD}`) makes `repro_fd_signal.t` segfault deterministically on Linux with the reaper detached, so the Linux-safe invariant is "no Perl SIGCHLD handler at the OS level while core kills and waits for its child", which also means the issue #1 explanation (the reaper stealing the child) is incomplete.
+  A Perl handler installed only before the spawn and gone by shutdown is harmless with or without `SA_RESTART`.
+  Candidate real fixes live in the shim (capture tokio's sigaction at first spawn, reinstall it for the window) or in having the test helper own the CLI process; until then the macOS legs are allow-failure.
+  Do not re-run this experiment through CI: each macOS round is about 35 minutes and the Linux segfault reproduces locally in seven seconds.
 - A value guard must test `ref` BEFORE any numeric clause, because an object with overloaded numification passes every one of them (F14, GitHub issue #10).
   `Scalar::Util::looks_like_number` follows an overloaded `0+`, and so do `int()` and every comparison, so a blessed reference whose `0+` returns 7 satisfied the whole `priority_key` guard, constructed cleanly, and died much later inside the codec with a proto type mismatch instead of `Temporalio::Exception::Argument` at the offending line.
   Test what the value IS before testing what it looks like numerically, and prove it with a fixture class whose `0+` returns a legal value and whose `""` returns nonsense, since a fixture that stringifies plausibly cannot distinguish the `ref` clause from the `looks_like_number` one (2026-09-14)

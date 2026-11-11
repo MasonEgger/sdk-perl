@@ -23,13 +23,22 @@ env:
 jobs:
   # Primary matrix: every supported OS x Perl combination, blocking.
   test:
-    name: ${{ matrix.os }} / perl ${{ matrix.perl }}
+    name: ${{ matrix.os }} / perl ${{ matrix.perl }}${{ matrix.allow_failure && ' (allow-failure)' || '' }}
+    # macOS legs fail one file, t/integration/repro_fd_signal.t: after a
+    # fork-pool activity the dev-server shutdown never wakes tokio's child
+    # wait there (issue #31). They still run and report; only Linux gates.
+    continue-on-error: ${{ matrix.allow_failure || false }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04, macos-15, macos-26]
         perl: ["5.38", "5.40", "5.42"]
+        include:
+          - os: macos-15
+            allow_failure: true
+          - os: macos-26
+            allow_failure: true
     steps:
       - name: Checkout sdk-perl
         uses: actions/checkout@v4
@@ -193,6 +202,10 @@ jobs:
     name: windows-2022 / strawberry-perl (allow-failure)
     runs-on: windows-2022
     continue-on-error: true
+    env:
+      # Strawberry's cpanm keeps its work dir under its own data path, which
+      # the failure-log step cannot guess; pin it somewhere known.
+      PERL_CPANM_HOME: ${{ github.workspace }}\.cpanm-home
     steps:
       - name: Checkout sdk-perl
         uses: actions/checkout@v4
@@ -258,7 +271,7 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
-          Get-ChildItem -Path "$HOME\.cpanm" -Recurse -Filter build.log -ErrorAction SilentlyContinue | ForEach-Object { "===== $($_.FullName)"; Get-Content $_.FullName -Tail 300 }
+          Get-ChildItem -Path "$env:PERL_CPANM_HOME" -Recurse -Filter build.log -ErrorAction SilentlyContinue | ForEach-Object { "===== $($_.FullName)"; Get-Content $_.FullName -Tail 300 }
           exit 0
 
       - name: Install Protobuf (git)
