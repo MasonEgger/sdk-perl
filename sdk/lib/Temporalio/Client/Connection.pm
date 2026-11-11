@@ -10,7 +10,10 @@ no warnings 'experimental::class';
 use Future ();
 use Future::AsyncAwait;
 use Scalar::Util ();
+use Temporalio::Client::CloudService ();
+use Temporalio::Client::HealthService ();
 use Temporalio::Client::OperatorService ();
+use Temporalio::Client::TestService ();
 use Temporalio::Client::WorkflowService ();
 use Temporalio::Common::Options ();
 use Temporalio::Core::Callback ();
@@ -28,6 +31,27 @@ class Temporalio::Client::Connection {
         test     => 4,
         health   => 5,
     );
+
+    # _service_code: class-level read of the discriminator table:
+    #
+    #     Temporalio::Client::Connection->_service_code('cloud')   # 3
+    #
+    # Returns undef for an unknown key; rpc_call below turns that into the
+    # Argument throw. It exists so a test can pin the wire values (F5,
+    # GitHub issue #12) without standing up a live connection, and rpc_call
+    # reads it too, so the pins cover the dispatch path rather than a copy of
+    # the table. Signature-less on purpose: a signatured sub ahead of this
+    # class's `field ... :param` declarations trips the 5.38.2 parser trap
+    # recorded in .ai-sessions/lessons.md.
+    sub _service_code {
+        my ($class, $name) = @_;
+        return defined $name ? $RPC_SERVICE{$name} : undef;
+    }
+
+    # The service keys rpc_call accepts, sorted, for its error message.
+    sub _service_names {
+        return sort keys %RPC_SERVICE;
+    }
 
     field $runtime :param;          # Temporalio::Runtime (must outlive us)
     field $ptr     :param = undef;  # TemporalCoreConnection* (undef until the
@@ -145,10 +169,10 @@ class Temporalio::Client::Connection {
         my $timeout        = delete $opts{timeout} // 0;
         my $response_class = delete $opts{response_class};
         my $error_context  = delete $opts{error_context} // {};
-        my $service_code = $RPC_SERVICE{$service}
+        my $service_code = __PACKAGE__->_service_code($service)
             // Temporalio::Exception::Argument->throw(
                 message => "unknown RPC service '$service' (expected one of "
-                         . join(', ', sort keys %RPC_SERVICE) . ')');
+                         . join(', ', __PACKAGE__->_service_names) . ')');
         Temporalio::Exception::Argument->throw(
             message => 'rpc_call requires a proto request message object')
             unless Scalar::Util::blessed($request) && $request->can('encode');
@@ -223,6 +247,23 @@ class Temporalio::Client::Connection {
     method operator_service () {
         $self->_assert_open;
         return Temporalio::Client::OperatorService->new(connection => $self);
+    }
+
+    # I12: cloud/test/health raw service handles, the same fresh-handle-per-
+    # call shape as workflow_service/operator_service above.
+    method cloud_service () {
+        $self->_assert_open;
+        return Temporalio::Client::CloudService->new(connection => $self);
+    }
+
+    method test_service () {
+        $self->_assert_open;
+        return Temporalio::Client::TestService->new(connection => $self);
+    }
+
+    method health_service () {
+        $self->_assert_open;
+        return Temporalio::Client::HealthService->new(connection => $self);
     }
 
     # Rotate the bearer token on the live connection (spec section 7.3):
@@ -341,7 +382,8 @@ encodes a request proto, issues C<temporal_core_client_rpc_call> over the
 callback bridge, decodes the typed response, and maps failures onto the
 exception hierarchy. The high-level client's C<_rpc_call> delegates here
 with C<< retry => 1 >>; the raw service handles returned by
-C<workflow_service> and C<operator_service> call it single-shot.
+C<workflow_service>, C<operator_service>, C<cloud_service>, C<test_service>,
+and C<health_service> (spec I12) call it single-shot.
 
 Both C<close> and C<DESTROY> guard the FFI free with a runtime-liveness
 check: C<temporal_core_client_free> drops the core connection on the
@@ -436,6 +478,21 @@ connection (spec R91).
 
 Returns a fresh L<Temporalio::Client::OperatorService> raw handle over this
 connection (spec R91).
+
+=head2 cloud_service
+
+Returns a fresh L<Temporalio::Client::CloudService> raw handle over this
+connection (spec I12).
+
+=head2 test_service
+
+Returns a fresh L<Temporalio::Client::TestService> raw handle over this
+connection (spec I12).
+
+=head2 health_service
+
+Returns a fresh L<Temporalio::Client::HealthService> raw handle over this
+connection (spec I12).
 
 =head2 update_api_key
 

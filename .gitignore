@@ -56,3 +56,6 @@ target/
 
 # v0.2 spec research drafts (scratch, not committed)
 .v0.2-drafts/
+
+# Scratch log for the BPE step executor; absorbed into .ai-sessions/session-*.md.
+.ai-sessions/implementation-notes.md

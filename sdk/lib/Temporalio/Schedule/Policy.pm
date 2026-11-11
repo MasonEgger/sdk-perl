@@ -22,7 +22,8 @@ class Temporalio::Schedule::Policy {
             'temporal.api.schedule.v1.SchedulePolicies');
         return $Pol->new({
             overlap_policy   => overlap_enum($overlap),
-            catchup_window   => _duration($catchup_window),
+            catchup_window   =>
+                Temporalio::Core::Proto::duration_from_seconds($catchup_window),
             pause_on_failure => $pause_on_failure ? 1 : 0,
         });
     }
@@ -30,7 +31,9 @@ class Temporalio::Schedule::Policy {
     sub _from_proto ($class, $pol) {
         return $class->new(
             overlap          => overlap_name($pol->overlap_policy // 0),
-            catchup_window   => _duration_to_seconds($pol->catchup_window),
+            catchup_window   =>
+                Temporalio::Core::Proto::seconds_from_duration(
+                    $pol->catchup_window),
             pause_on_failure => $pol->pause_on_failure ? 1 : 0,
         );
     }
@@ -63,17 +66,9 @@ class Temporalio::Schedule::Policy {
         return $OVERLAP_REV{$num // 0} // 'unspecified';
     }
 
-    sub _duration ($seconds) {
-        my $Duration = Temporalio::Core::Proto::resolve('google.protobuf.Duration');
-        my $whole = int($seconds);
-        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-        return $Duration->new({ seconds => $whole, nanos => $nanos });
-    }
-
-    sub _duration_to_seconds ($duration) {
-        return undef unless defined $duration;
-        return ($duration->seconds // 0) + ($duration->nanos // 0) / 1_000_000_000;
-    }
+    # The seconds<->google.protobuf.Duration conversion pair lives in
+    # Temporalio::Core::Proto (I14; formerly local _duration/
+    # _duration_to_seconds helpers here).
 }
 
 1;

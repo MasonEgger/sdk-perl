@@ -56,19 +56,33 @@ class Temporalio::Activity::Context {
     # lets the sync-activity fork pool (P2.5) substitute a pipe relay.
     field $heartbeat_recorder :param;
 
+    # A coderef (@details) -> () invoked with the RAW, unconverted heartbeat
+    # detail values, AFTER that heartbeat's payload conversion has succeeded
+    # (step F6; spec I7 direction B, closes GitHub #7 half B). Pure
+    # observation: the real recording still goes through heartbeat_recorder
+    # above (bytes-based, unaffected). The fork-pool child wires one that
+    # relays the Perl-level details to the parent over the pool's control
+    # channel, so the parent's ActivityOutbound chain can observe them
+    # structured (not opaque bytes) before the pre-encoded bytes reach the
+    # real heartbeat_relay: see Temporalio::Activity::Pool's
+    # `_child_dispatch`/`_on_control_frame`.
+    # undef (every other construction) means no such relay.
+    field $heartbeat_details_recorder :param = undef;
+
     # The finished activity-outbound interceptor chain (spec R72, parity
     # finding 2), supplied by the ActivityDispatcher after it calls
     # inbound->init(root outbound). When set, info() and heartbeat() route
     # through it before the real work runs — the Perl form of sdk-python's
     # _ActivityInboundImpl.init installing outbound.info/outbound.heartbeat
     # on the context (worker/_activity.py:813-818, _interceptor.py:135-156).
-    # undef (the fork-pool child's context and direct unit constructions)
-    # means the direct behavior: pooled sync-activity heartbeats therefore
-    # BYPASS the outbound chain, a documented spec §0 deviation — Python
-    # routes them parent-side via register_heartbeater(ctx.heartbeat)
-    # (_activity.py:857-865), but our pool relay carries already-serialized
-    # ActivityHeartbeat BYTES, not Perl-level details, so there is nothing
-    # chain-shaped to intercept parent-side.
+    # undef for direct unit constructions. The fork-pool child's context also
+    # gets undef here (interceptor OBJECTS do not cross the fork; they live
+    # only in the parent), but pooled sync-activity heartbeats are NOT
+    # bypassed: Temporalio::Activity::Pool relays the RAW Perl-level details
+    # to the parent (via heartbeat_details_recorder below) and runs the SAME
+    # finished outbound chain there, parent-side, before forwarding the
+    # pre-encoded bytes to the real heartbeat_relay (spec I7 direction B,
+    # closes GitHub #7 half B; was a documented spec §0 deviation before I7).
     field $outbound :param = undef;
 
     # The set-on-cancel holder ({ details => CancellationDetails-or-undef })
@@ -76,10 +90,14 @@ class Temporalio::Activity::Context {
     # (spec R76). Shared BY REFERENCE with the dispatcher's running-activity
     # entry — Python's _ActivityCancellationDetailsHolder (activity.py:164-166)
     # — so a cancel landing after this context was built is still observable.
-    # undef for direct constructions and the fork-pool child's context (the
-    # holder does not cross the fork: a pooled sync body sees the frozen
-    # `cancelled` flag and the R19 live-cancel relay but no details — a
-    # documented spec section 0 deviation, like the heartbeat chain above).
+    # undef for direct constructions. The fork-pool child builds its OWN
+    # per-invocation holder (Activity::Pool's `_child_dispatch`): the holder
+    # OBJECT does not cross the fork, but the cancel's reason + six boolean
+    # causes now do, relayed down the pool's control channel and decoded into
+    # a fresh Temporalio::Activity::CancellationDetails in-child (spec I7
+    # direction A, closes GitHub #7 half A; was a documented spec §0
+    # deviation before I7: a pooled body saw only the frozen `cancelled`
+    # flag and the R19 live-cancel relay, no details).
     field $cancellation_details_holder :param = undef;
 
     # The dispatcher-shared Temporalio::Common::Event that fires when the
@@ -89,11 +107,14 @@ class Temporalio::Activity::Context {
     # await shutdown independently). Set by ActivityDispatcher->notify_shutdown
     # at shutdown-begin, BEFORE core's graceful-period cancels propagate —
     # Python's worker_shutdown_event on _Context (activity.py:200,400-438,
-    # worker/_activity.py:185-187). undef for direct constructions and the
-    # fork-pool child's context (the event does not cross the fork — the same
-    # documented spec section 0 deviation as cancellation_details_holder
-    # above): there is_worker_shutdown stays false and the wait future never
-    # resolves.
+    # worker/_activity.py:185-187). undef for direct constructions. The
+    # fork-pool child gets a Temporalio::Activity::ChildShutdownEvent instead
+    # of this SAME shared event object (which cannot cross the fork): it
+    # exposes the identical is_set/set/wait surface, backed by a poll of the
+    # pool's control channel for the 'shutdown' frame
+    # Pool->notify_shutdown broadcasts (spec I7 direction A, closes GitHub #7
+    # half A; was a documented spec §0 deviation before I7: is_worker_shutdown
+    # stayed permanently false in a pooled body).
     field $worker_shutdown_event :param = undef;
 
     # The worker runtime's metric meter (spec R83), injected by the
@@ -223,21 +244,56 @@ class Temporalio::Activity::Context {
     }
 
     method _record_heartbeat (@details) {
-        my $converter = $data_converter->payload_converter;
-        my @payloads  = map { $converter->to_payload($_) } @details;
+        # Encode FIRST, relay the raw details SECOND (step F6). The two go
+        # out as separate frames on the fork pool's control channel, and the
+        # parent pairs them by parking the details until the bytes arrive
+        # (Activity::Pool's 'hbd'/'hb' cases), so a details frame sent for a
+        # heartbeat that then fails to encode would sit parked and pair with
+        # a LATER heartbeat's bytes, making the parent re-encode the earlier
+        # heartbeat's args in place of the later one's. Ordering the two
+        # calls is the whole fix: a failed encode now sends neither frame,
+        # so nothing is ever parked without its own bytes following
+        # immediately. The alternative (tagging both frames with a
+        # per-invocation sequence number and pairing only on a match) buys
+        # nothing here, because the child is synchronous: it cannot have two
+        # heartbeats in flight at once, so "the details immediately before
+        # these bytes" is already an exact identification once the orphan
+        # case is gone.
+        my $bytes =
+            encode_heartbeat_bytes($data_converter, $info->{task_token},
+                @details);
+        $heartbeat_details_recorder->(@details)
+            if defined $heartbeat_details_recorder;
 
-        my $HB = Temporalio::Core::Proto::resolve('coresdk.ActivityHeartbeat');
-        my $msg = $HB->new({
-            task_token => $info->{task_token},
-            details    => \@payloads,
-        });
-
-        my $error = $heartbeat_recorder->($msg->encode);
+        my $error = $heartbeat_recorder->($bytes);
         if (defined $error && length $error) {
             Temporalio::Exception::Heartbeat->throw(
                 message => "recording activity heartbeat failed: $error");
         }
         return;
+    }
+
+    # encode_heartbeat_bytes($data_converter, $task_token, @details) -> bytes
+    # (spec I7 REFACTOR sub-step 6, closes GitHub #7): the ONE parent-side
+    # place that converts heartbeat detail values into an encoded
+    # coresdk.ActivityHeartbeat frame. _record_heartbeat above calls it for
+    # the async path; Temporalio::Activity::Pool's parent-side chain root
+    # (_on_control_frame's 'hb' case) calls it fully-qualified for the
+    # pooled path, so a heartbeat an ActivityOutbound interceptor rewrites
+    # is encoded from the SAME (possibly-rewritten) args on both paths
+    # instead of the pooled path relaying the child's pre-rewrite bytes.
+    # A package sub, not a method: the pool has no Context instance to call
+    # it on.
+    sub encode_heartbeat_bytes ($data_converter, $task_token, @details) {
+        my $converter = $data_converter->payload_converter;
+        my @payloads  = map { $converter->to_payload($_) } @details;
+
+        my $HB = Temporalio::Core::Proto::resolve('coresdk.ActivityHeartbeat');
+        my $msg = $HB->new({
+            task_token => $task_token,
+            details    => \@payloads,
+        });
+        return $msg->encode;
     }
 }
 
@@ -335,8 +391,22 @@ When the dispatcher installed an activity-outbound interceptor chain (spec
 R72), both C<heartbeat> and C<info> route through it first, matching
 sdk-python's C<ActivityOutboundInterceptor>; the chain root performs the real
 recording (or returns the real info). The fork-pool child's context has no
-chain, so pooled sync-activity heartbeats bypass interceptors (a documented
-spec section 0 deviation).
+chain object of its own (interceptors live only in the parent process), but a
+pooled sync-activity heartbeat still runs the SAME finished chain: the child
+relays the raw Perl-level details to the parent over the pool's control
+channel, and the parent's chain root re-encodes the chain's (possibly
+interceptor-rewritten) output args via L</encode_heartbeat_bytes> before
+forwarding to the real recorder, so a rewrite is honored identically on both
+paths (spec I7 direction B, closes GitHub #7 half B; REFACTOR sub-step 6).
+
+=head2 encode_heartbeat_bytes($data_converter, $task_token, @details)
+
+A package sub, not a method: converts heartbeat detail values into an
+encoded C<coresdk.ActivityHeartbeat> frame. The ONE parent-side entry point
+(spec I7 REFACTOR sub-step 6, closes GitHub #7) both L</heartbeat> above (the
+async path) and L<Temporalio::Activity::Pool>'s parent-side chain root (the
+pooled path) call to produce the bytes handed to the real heartbeat recorder,
+so both paths encode identically.
 
 =head2 cancellation
 
@@ -352,26 +422,31 @@ cancellation).
 The L<Temporalio::Activity::CancellationDetails> captured from the C<Cancel>
 activity task (its reason plus the six boolean causes), or C<undef> while the
 activity has not been cancelled. Set once when the cancel arrives; mirrors
-sdk-python's C<activity.cancellation_details()>. The fork-pool child's
-context always reports C<undef> (the holder does not cross the fork, a
-documented spec section 0 deviation).
+sdk-python's C<activity.cancellation_details()>. The fork-pool child builds
+its own per-invocation holder from the reason + six boolean causes relayed
+down the pool's control channel alongside the cancel (spec I7 direction A,
+closes GitHub #7 half A), so a pooled body observes the same details an async
+body would for the same cancel. C<undef> for a direct construction with no
+holder.
 
 =head2 is_worker_shutdown
 
 True once the worker has begun shutting down (spec R84; Python parity:
 C<activity.is_worker_shutdown()>). Distinct from the cancellation token: an
 ordinary cancel leaves this false, and worker shutdown flips it at
-shutdown-begin, before the shutdown-driven cancel propagates. Always false on
-the fork-pool child's context (the shutdown event does not cross the fork, a
-documented spec section 0 deviation).
+shutdown-begin, before the shutdown-driven cancel propagates. The fork-pool
+child's context is backed by a L<Temporalio::Activity::ChildShutdownEvent>
+that polls the pool's control channel for the 'shutdown' frame
+C<< Pool->notify_shutdown >> broadcasts (spec I7 direction A, closes GitHub
+#7 half A), so this flips true in a pooled body too. Stays false for a
+direct construction with no event.
 
 =head2 wait_for_worker_shutdown
 
 A L<Future> that resolves when the worker begins shutdown (spec R84; Python
 parity: C<activity.wait_for_worker_shutdown()>). Already resolved when
-shutdown has begun. On a context without a dispatcher-shared shutdown event
-(the fork-pool child, direct constructions) the returned Future never
-resolves.
+shutdown has begun. On a context without a shutdown event (a direct
+construction) the returned Future never resolves.
 
 =head2 metric_meter
 
@@ -423,6 +498,16 @@ Constructs a Temporalio::Activity::Context. Named parameters:
 =item C<heartbeat_recorder>
 
 (required)
+
+=item C<heartbeat_details_recorder>
+
+(optional, default C<undef>) A coderef invoked with the RAW, unconverted
+C<@details> (spec I7 direction B), for pure observation; the fork-pool child
+wires one to relay Perl-level heartbeat details to the parent's
+ActivityOutbound chain. It is invoked only B<after> that heartbeat's own
+payload conversion has succeeded (step F6), so a heartbeat that fails to
+encode never announces details the real recording will not follow: see
+L<Temporalio::Activity::Pool/Frame pairing guarantees (step F6)>.
 
 =item C<outbound>
 

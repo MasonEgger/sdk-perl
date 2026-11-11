@@ -115,6 +115,43 @@ C<headers>, read-only everything else).
 
 =back
 
+=head1 INPUT CLASSES
+
+=head2 StartWorkflowUpdate
+
+C<Temporalio::Client::Interceptor::Input::StartWorkflowUpdate> carries
+C<update> (the update name), C<args>, C<headers>, C<id>, C<run_id>, and an
+C<opts> hashref holding the rest of what the caller passed to
+C<< $workflow_handle->start_update >>:
+
+=over 4
+
+=item * C<wait_for_stage> is C<'accepted'> or C<'completed'>. An absent key
+means C<'accepted'>; C<'admitted'> raises L<Temporalio::Exception::Argument>.
+
+=item * C<update_id> is the caller's update id. An absent key means a fresh
+UUID is generated.
+
+=item * C<result_type> is the optional decode hint (spec R92, I8 / GitHub
+issue #8). It is threaded onto the L<Temporalio::Client::WorkflowUpdateHandle>
+and from there to the payload converter when the update result is decoded.
+
+=back
+
+Python keeps these as named fields on its C<StartWorkflowUpdateInput>
+(sdk-python C<client/_interceptor.py> C<StartWorkflowUpdateInput>:
+C<update_id> at :316, C<wait_for_stage> at :319, C<ret_type> at :321). Here
+they share one hashref, so an interceptor changes them by mutating that
+hashref IN PLACE:
+
+    my $opts = $input->get('opts');
+    $opts->{result_type} = 'My::ResultType';
+
+C<< $input->set('opts', \%replacement) >> does not work. Only C<args> and
+C<headers> are writable on L<Temporalio::Interceptor::Input>; every other field
+name, C<opts> included, throws L<Temporalio::Exception::Argument> reading
+C<< interceptor Input field 'opts' is read-only >> (spec section 27.1).
+
 =head1 FUNCTIONS
 
 =head2 build_outbound_chain

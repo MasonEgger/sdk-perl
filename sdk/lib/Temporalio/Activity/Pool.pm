@@ -28,9 +28,12 @@ use Socket ();
 use Storable ();
 
 use Temporalio::Activity ();
+use Temporalio::Activity::CancellationDetails ();
 use Temporalio::Activity::ChildCancellation ();
+use Temporalio::Activity::ChildShutdownEvent ();
 use Temporalio::Activity::Context ();
 use Temporalio::Activity::Invocation ();
+use Temporalio::Worker::Interceptor ();
 
 class Temporalio::Activity::Pool {
     field $loop :param;
@@ -61,6 +64,19 @@ class Temporalio::Activity::Pool {
     # => heartbeats from children are dropped (no relay wired).
     field $heartbeat_relay :param = undef;
 
+    # The worker's Temporalio::Converter::Data (spec I7 REFACTOR sub-step 6,
+    # closes GitHub #7): when an outbound chain is wired for an invocation
+    # (see %token_outbound below) AND its heartbeat details survived the fork
+    # (the paired 'hbd' frame), the parent's chain root encodes the chain's
+    # OUTPUT args with THIS converter via Context::encode_heartbeat_bytes,
+    # instead of relaying the child's pre-rewrite bytes unchanged, so an
+    # interceptor that rewrites heartbeat args is honored on the pooled path
+    # the same way it already is on the async path. undef (direct
+    # constructions / tests that omit it) falls back to the pool's own
+    # default converter (_pool_data_converter below), the same symmetric
+    # default the fork channel already uses for error encoding.
+    field $data_converter :param = undef;
+
     field $function;
 
     # A reference to the R4 %channel hash below, kept so invoke() can refresh
@@ -78,7 +94,43 @@ class Temporalio::Activity::Pool {
     field %conns;               # fileno => { fh, handle, buf, token }
     field %token_conn;          # in-flight task token => fileno running it
     field %inflight;            # task tokens with an invoke() in progress
-    field %cancel_pending;      # cancels awaiting the child's 'start' frame
+    field %cancel_pending;      # cancel frames awaiting the child's 'start' frame
+
+    # task token => the parent-side Temporalio::Worker::ActivityOutbound chain
+    # for that invocation, when the caller wired one (spec I7 direction B,
+    # closes GitHub #7 half B). Consulted by _on_control_frame's 'hb' case so
+    # a pooled sync activity's heartbeat runs the SAME ActivityOutbound chain
+    # the async path uses, before the pre-encoded bytes reach the real
+    # heartbeat_relay.
+    field %token_outbound;
+
+    # Broadcast-once flag for notify_shutdown (spec R84 parity for pooled
+    # activities, spec I7 direction A): once true, every newly-accepted
+    # connection also gets the shutdown frame immediately (a child that
+    # forked/connected AFTER notify_shutdown was called would otherwise never
+    # see it).
+    field $shutdown_notified = 0;
+
+    # Test-only (temporal.heartbeat-chain-teardown-race regression coverage,
+    # see _hold_control_drain/_release_control_drain below): while true,
+    # EVERY 'start' frame processed on any connection pauses further control
+    # draining on that connection right after 'start' registers
+    # %token_conn, so a test can force invoke()'s reply-pipe completion to
+    # race ahead of the paired 'hbd'/'hb'/'end' frames deterministically.
+    # It stays armed until _release_control_drain clears it; it is not a
+    # one-shot. Never set outside t/unit/pool_heartbeat_interceptor.t.
+    field $hold_after_start = 0;
+
+    # Test-only companion to $hold_after_start (step F6), armed by
+    # _hold_control_drain_at_accept below: while true, a newly accepted
+    # connection is held BEFORE its first read-ready, so not even 'start' is
+    # drained and %token_conn stays empty for the token the child is
+    # running. That is the reply-before-'start' ordering the child's own
+    # control_connected report exists for (see invoke()'s reply-time
+    # %token_outbound delete), and the one a parent-side %token_conn guard
+    # could not survive. Never set outside
+    # t/unit/pool_heartbeat_interceptor.t.
+    field $hold_at_accept = 0;
 
     ADJUST {
         # --- the R18/R19 control-channel listener, created BEFORE the fork
@@ -222,10 +274,17 @@ class Temporalio::Activity::Pool {
     # body records stream to the parent over the control channel WHILE the
     # body runs (R18) and are relayed to the real FFI heartbeat as they
     # arrive; a `cancellation => $token` option wires a parent-side cancel
-    # firing mid-body down the same channel (R19).
+    # firing mid-body down the same channel (R19). Two spec I7 additions
+    # (closes GitHub #7): `details_holder => { details => ... }` is the SAME
+    # shared holder the dispatcher writes a Cancel job's reason/details into
+    # (spec R76): read here so a delivered cancel carries them down to the
+    # child. `outbound => $chain` is the finished parent-side ActivityOutbound
+    # chain (spec R72): when given, a heartbeat this invocation relays runs
+    # through it before the pre-encoded bytes reach heartbeat_relay.
     async method invoke ($invocation, %opts) {
         my $token = $invocation->task_token;
         $inflight{$token} = 1;
+        $token_outbound{$token} = $opts{outbound} if defined $opts{outbound};
 
         # R30: refresh the parent-fd snapshot before the call below, which is
         # the point where IO::Async::Function may fork a fresh child (workers
@@ -241,16 +300,23 @@ class Temporalio::Activity::Pool {
         # was invisible in-child. Subscribing to the parent-side token here
         # forwards a later cancel down the control channel. (An unlikely
         # cancel BETWEEN the dispatcher's flag capture and this subscription
-        # is covered too: is_cancelled is re-checked first.)
+        # is covered too: is_cancelled is re-checked first.) The details
+        # holder, when given, is read at the moment of delivery: the
+        # dispatcher's _handle_cancel writes it BEFORE cancelling the token
+        # (spec R76), so it is already populated by the time either branch
+        # below fires (spec I7 direction A).
+        my $details_holder = $opts{details_holder};
         if (defined(my $cancellation = $opts{cancellation})) {
             if ($cancellation->is_cancelled) {
-                $self->cancel_invocation($token);
+                $self->cancel_invocation($token,
+                    $details_holder ? $details_holder->{details} : undef);
             }
             else {
                 my $weak_self = $self;
                 Scalar::Util::weaken($weak_self);
                 $cancellation->cancelled->on_done(sub {
-                    $weak_self->cancel_invocation($token)
+                    $weak_self->cancel_invocation($token,
+                        $details_holder ? $details_holder->{details} : undef)
                         if defined $weak_self;
                 });
             }
@@ -264,12 +330,36 @@ class Temporalio::Activity::Pool {
         catch ($call_error) {
             delete $inflight{$token};
             delete $cancel_pending{$token};
+            delete $token_outbound{$token};
             die $call_error;
         }
         delete $inflight{$token};
         delete $cancel_pending{$token};
 
         my $out = Storable::thaw($reply);
+
+        # temporal.heartbeat-chain-teardown-race: the reply pipe (this
+        # IO::Async::Function call) and the control socket ('start'/'hbd'/
+        # 'hb'/'end' frames) are two independently-ordered streams, so the
+        # reply can drain BEFORE ANY of the child's control frames have been
+        # processed -- not just before 'end', but before 'start' too, since
+        # a fast synchronous child can send its whole frame sequence before
+        # the parent's event loop gets around to draining the listener
+        # accept and the connection's first read-ready. Gating this delete
+        # on whether 'start' already registered %token_conn (as an earlier
+        # revision of this fix did) therefore still raced: on that race,
+        # $token_conn{$token} was ALSO not yet set at reply time, so the
+        # degraded-path branch fired and deleted the chain anyway, before
+        # the still-in-flight 'hb' frame could use it. Gating on the CHILD's
+        # own report of its connection state instead (captured fresh, right
+        # before it replies, in _child_dispatch's `control_connected`) is
+        # immune to parent-side drain timing: a live connection means
+        # control frames including 'end' WILL eventually arrive no matter
+        # how late they are drained, so _on_control_frame's 'end' case and
+        # _close_conn own the teardown for that case; only a connection that
+        # was never live (child connect failed, or died mid-invocation, so
+        # 'end' will never be sent) needs the reply-time delete here.
+        delete $token_outbound{$token} unless $out->{control_connected};
 
         # Degraded-path relay: frames the child could NOT stream live (its
         # control connect failed) come back with the reply and are relayed
@@ -289,21 +379,49 @@ class Temporalio::Activity::Pool {
         die _thaw_error($out->{error});
     }
 
-    # cancel_invocation($task_token): deliver a post-dispatch cancel to the
-    # child running $task_token (spec R19). If the child's 'start' frame has
-    # not arrived yet — the cancel raced ahead of it — the cancel parks in
-    # %cancel_pending and _on_control_frame sends it on arrival. Unknown /
-    # already-finished tokens are a no-op.
-    method cancel_invocation ($task_token) {
+    # cancel_invocation($task_token, $details = undef): deliver a post-dispatch
+    # cancel to the child running $task_token (spec R19). $details, when given,
+    # is the Temporalio::Activity::CancellationDetails the dispatcher captured
+    # from the Cancel job (spec R76, spec I7 direction A, closes GitHub #7):
+    # its reason + six boolean causes ride the frame as plain (Storable-safe)
+    # scalars, NOT the blessed object itself (Storable cannot freeze `feature
+    # class` instances; the Common::Priority/RetryPolicy precedent). If the
+    # child's 'start' frame has not arrived yet (the cancel raced ahead of it),
+    # the built frame parks in %cancel_pending and _on_control_frame sends
+    # it on arrival. Unknown / already-finished tokens are a no-op.
+    method cancel_invocation ($task_token, $details = undef) {
         return unless $inflight{$task_token};
+        my $frame = {
+            op      => 'cancel',
+            token   => $task_token,
+            reason  => defined $details ? $details->reason : undef,
+            details => _cancel_details_to_hash($details),
+        };
         my $fno  = $token_conn{$task_token};
         my $conn = defined $fno ? $conns{$fno} : undef;
         if (defined $conn) {
-            $self->_send_control($conn->{fh},
-                { op => 'cancel', token => $task_token });
+            $self->_send_control($conn->{fh}, $frame);
         }
         else {
-            $cancel_pending{$task_token} = 1;
+            $cancel_pending{$task_token} = $frame;
+        }
+        return;
+    }
+
+    # notify_shutdown: broadcast a 'shutdown' frame to every pooled child
+    # (spec R84 parity for pooled sync activities, spec I7 direction A, closes
+    # GitHub #7). Mirrors Temporalio::Worker::ActivityDispatcher->notify_shutdown
+    # (which sets the async-path $worker_shutdown_event); called BY that same
+    # dispatcher method so one notify_shutdown reaches both async and pooled
+    # activities. Idempotent: once broadcast, every LATER-accepted connection
+    # (a child that forks/connects after this call) also gets the frame
+    # immediately from _accept_control below, so a race with a still-forking
+    # child cannot drop it.
+    method notify_shutdown () {
+        return if $shutdown_notified;
+        $shutdown_notified = 1;
+        for my $conn (values %conns) {
+            $self->_send_control($conn->{fh}, { op => 'shutdown' });
         }
         return;
     }
@@ -346,6 +464,18 @@ class Temporalio::Activity::Pool {
                 token  => undef,
             };
             $loop->add($handle);
+            # Test-only hold (see the $hold_at_accept field above): arm
+            # before this connection's first read-ready, so NOTHING on it is
+            # drained, 'start' included.
+            if ($hold_at_accept) {
+                $conns{$fno}{_held} = 1;
+                $handle->want_readready(0);
+            }
+            # A child that connects AFTER notify_shutdown was already
+            # broadcast (spec I7 direction A) still needs the frame: it
+            # raced the broadcast loop above, so catch it here too.
+            $self->_send_control($conn_fh, { op => 'shutdown' })
+                if $shutdown_notified;
         }
         return;
     }
@@ -363,19 +493,61 @@ class Temporalio::Activity::Pool {
             if ($n == 0) { $eof = 1; last; }    # child closed / exited
             $conn->{buf} .= $chunk;
         }
-        while (defined(my $msg = _take_frame(\$conn->{buf}))) {
+        # Test-only: a connection held via _hold_control_drain stops
+        # consuming its buffer mid-loop (right after 'start' sets the hold,
+        # see _on_control_frame), leaving any already-arrived 'hbd'/'hb'/
+        # 'end' bytes untouched in $conn->{buf} for _release_control_drain
+        # to process later.
+        while (!$conn->{_held}
+            && defined(my $msg = _take_frame(\$conn->{buf})))
+        {
             $self->_on_control_frame($fno, $msg);
         }
-        $self->_close_conn($fno) if $eof;
+        $self->_close_conn($fno) if $eof && !$conn->{_held};
         return;
     }
 
     # One handler for every frame a child sends up its connection:
     #   start — the child began running a task; note the token->connection
-    #           mapping and flush any cancel that raced ahead of it (R19)
-    #   hb    — a heartbeat recorded DURING the body; relay it to the real
-    #           FFI heartbeat immediately (R18, finding L13 — the pre-R18
-    #           pool batched these until the body returned)
+    #           mapping and flush any cancel that raced ahead of it (R19),
+    #           carrying its reason/details when the pending frame had them
+    #           (spec I7 direction A)
+    #   hbd   : the RAW Perl-level heartbeat details for the heartbeat that
+    #           immediately follows (spec I7 direction B, closes GitHub #7
+    #           half B): parked per-connection until the paired 'hb' frame
+    #           arrives, since a synchronous child sends them back-to-back
+    #           over the one ordered stream. The child only sends this frame
+    #           AFTER that heartbeat's own encode succeeded (step F6,
+    #           Context::_record_heartbeat), which is what makes "the
+    #           details parked on this connection" mean "the details of the
+    #           next 'hb' on it" rather than "the details of some earlier
+    #           heartbeat that never produced bytes"
+    #   hb    : a heartbeat recorded DURING the body; if this invocation has
+    #           a parent-side ActivityOutbound chain wired (spec R72) AND a
+    #           parked 'hbd' arrived for it, run the chain with the
+    #           STRUCTURED details first, its root RE-ENCODING the chain's
+    #           (possibly interceptor-rewritten) output args via the shared
+    #           Context::encode_heartbeat_bytes entry point (spec I7 REFACTOR
+    #           sub-step 6) before forwarding to the real FFI heartbeat;
+    #           otherwise relay the bytes directly, unchanged from pre-I7
+    #           (R18, finding L13: the pre-R18 pool batched these until the
+    #           body returned). A chain that THROWS is contained to this one
+    #           heartbeat (temporal.interceptor-exception-containment,
+    #           validator warn iter 1): the throw must not escape into this
+    #           read-ready callback and abort whatever await is pumping the
+    #           shared IO::Async loop, which would disrupt every other
+    #           pooled activity sharing it. Contained means warned and
+    #           DROPPED, not relayed (step F6): a chain that threw delegated
+    #           nothing, so no heartbeat was recorded, matching the async
+    #           path (Context::heartbeat lets the interceptor's die
+    #           propagate out of the body's heartbeat() call). Python does
+    #           the same on both of its sync executors: a thread pool
+    #           re-raises the chain failure into the body through
+    #           .result(10) (worker/_activity.py:851-853, over the
+    #           outbound.heartbeat _ActivityInboundImpl.init installed at
+    #           :813-818), and a process pool's parent-side heartbeater logs
+    #           the exception and ends its poll loop
+    #           (worker/_activity.py:1114-1116).
     #   end   — the invocation finished; drop the token mapping
     method _on_control_frame ($fno, $msg) {
         my $op    = $msg->{op}    // '';
@@ -383,31 +555,128 @@ class Temporalio::Activity::Pool {
         if ($op eq 'start') {
             $conns{$fno}{token} = $token;
             $token_conn{$token} = $fno;
-            if (delete $cancel_pending{$token}) {
-                $self->_send_control($conns{$fno}{fh},
-                    { op => 'cancel', token => $token });
+            if (my $pending = delete $cancel_pending{$token}) {
+                $self->_send_control($conns{$fno}{fh}, $pending);
+            }
+            # Test-only hold (see field comment above): arm right after
+            # %token_conn is set, so a held connection still satisfies the
+            # invoke() reply-time guard's precondition.
+            if ($hold_after_start) {
+                $conns{$fno}{_held} = 1;
+                $conns{$fno}{handle}->want_readready(0)
+                    if defined $conns{$fno}{handle};
             }
         }
+        elsif ($op eq 'hbd') {
+            $conns{$fno}{pending_hb_details} = $msg->{details};
+        }
         elsif ($op eq 'hb') {
-            $heartbeat_relay->($token, $msg->{bytes})
-                if defined $heartbeat_relay;
+            my $details = delete $conns{$fno}{pending_hb_details};
+            my $outbound = $token_outbound{$token};
+            if (defined $outbound && defined $details) {
+                try {
+                    $outbound->heartbeat(
+                        Temporalio::Worker::Interceptor::Input::Heartbeat->new(
+                            args  => $details,
+                            _root => sub {
+                                my $dc = $data_converter // _pool_data_converter();
+                                my $bytes =
+                                    Temporalio::Activity::Context::encode_heartbeat_bytes(
+                                        $dc, $token, @{ $_[0]->args });
+                                $heartbeat_relay->($token, $bytes)
+                                    if defined $heartbeat_relay;
+                                return;
+                            },
+                        ));
+                }
+                catch ($chain_error) {
+                    # Warn and DROP (step F6): a chain that threw delegated
+                    # nothing, so there is no heartbeat to record. Relaying
+                    # the child's pre-chain bytes here would record a value
+                    # the interceptor chain refused to pass on, which is the
+                    # opposite of what the async path does (Context's
+                    # heartbeat lets the interceptor's die propagate out of
+                    # the body's heartbeat() call and records nothing).
+                    warn 'Temporalio::Activity::Pool: ActivityOutbound'
+                        . " heartbeat chain failed for token $token;"
+                        . " heartbeat dropped: $chain_error";
+                }
+            }
+            elsif (defined $heartbeat_relay) {
+                $heartbeat_relay->($token, $msg->{bytes});
+            }
         }
         elsif ($op eq 'end') {
-            delete $token_conn{$token}
-                if defined $token_conn{$token} && $token_conn{$token} == $fno;
-            $conns{$fno}{token} = undef;
+            # Stream-ordered teardown (temporal.heartbeat-chain-teardown-race):
+            # the control socket delivers 'start' then 'end' for one token in
+            # order, so this is the reliable place to drop %token_outbound,
+            # unlike the reply pipe's completion time in invoke(), which can
+            # race ahead of this frame.
+            if (defined $token_conn{$token} && $token_conn{$token} == $fno) {
+                delete $token_conn{$token};
+                delete $token_outbound{$token};
+            }
+            $conns{$fno}{token}              = undef;
+            $conns{$fno}{pending_hb_details} = undef;
         }
         return;
     }
 
     method _close_conn ($fno) {
         my $conn = delete $conns{$fno} or return;
-        delete $token_conn{ $conn->{token} }
-            if defined $conn->{token}
+        # A connection can drop (child exited/crashed) before its 'end'
+        # frame arrives; clear %token_outbound here too so a token whose
+        # only teardown chance was the 'end' case above is not left
+        # dangling (temporal.heartbeat-chain-teardown-race).
+        if (defined $conn->{token}
             && defined $token_conn{ $conn->{token} }
-            && $token_conn{ $conn->{token} } == $fno;
+            && $token_conn{ $conn->{token} } == $fno)
+        {
+            delete $token_conn{ $conn->{token} };
+            delete $token_outbound{ $conn->{token} };
+        }
         $loop->remove($conn->{handle}) if defined $conn->{handle};
         close $conn->{fh}              if defined $conn->{fh};
+        return;
+    }
+
+    # --- test-only control-drain hold (temporal.heartbeat-chain-teardown-race
+    # regression coverage) ---------------------------------------------------
+    # Not part of the public API; not documented in SYNOPSIS/METHODS POD.
+    # Arms $hold_after_start so EVERY start frame drained while it is armed
+    # pauses that connection's draining right after it registers %token_conn,
+    # leaving any already-arrived 'hbd'/'hb'/'end' bytes sitting untouched in
+    # its buffer. This lets a test force invoke()'s reply-pipe completion (a
+    # channel wholly separate from the control socket) to run BEFORE those
+    # frames are processed, reproducing the race deterministically instead
+    # of depending on scheduler timing.
+    method _hold_control_drain () {
+        $hold_after_start = 1;
+        return;
+    }
+
+    # The step F6 companion: holds each NEWLY ACCEPTED connection before its
+    # first read-ready instead of after 'start', so a test can reproduce the
+    # ordering where invoke()'s reply lands while %token_conn is still empty
+    # for the token the child ran. _hold_control_drain cannot reproduce that
+    # one: it arms after 'start' has already registered the token, which is
+    # why a reply-time guard keyed on %token_conn passed under it and still
+    # dropped live heartbeats in production.
+    method _hold_control_drain_at_accept () {
+        $hold_at_accept = 1;
+        return;
+    }
+
+    # Releases every held connection and drains its buffered frames through
+    # the normal path. Disarms both holds.
+    method _release_control_drain () {
+        $hold_after_start = 0;
+        $hold_at_accept   = 0;
+        for my $conn (values %conns) {
+            next unless delete $conn->{_held};
+            $conn->{handle}->want_readready(1) if defined $conn->{handle};
+        }
+        $self->_drain_control($_) for keys %conns;
         return;
     }
 
@@ -452,6 +721,39 @@ class Temporalio::Activity::Pool {
         my $payload = substr($$bufref, 4, $len);
         substr($$bufref, 0, 4 + $len) = '';
         return Storable::thaw($payload);
+    }
+
+    # --- the R76/spec I7 cancellation-details plain-hash codec (direction A,
+    # closes GitHub #7 half A) ------------------------------------------------
+    # Temporalio::Activity::CancellationDetails is a `feature class` instance
+    # (Storable cannot freeze it, the Common::Priority/RetryPolicy precedent),
+    # so it crosses the fork as the same six-boolean plain hash on BOTH sides:
+    # cancel_invocation (parent, encode) and _child_drain_control (child,
+    # decode) share this ONE flag-list definition rather than each spelling
+    # it out.
+    sub _cancel_details_to_hash ($details) {
+        return undef unless defined $details;
+        return {
+            not_found        => $details->not_found        ? 1 : 0,
+            cancel_requested => $details->cancel_requested  ? 1 : 0,
+            paused           => $details->paused            ? 1 : 0,
+            reset            => $details->reset             ? 1 : 0,
+            timed_out        => $details->timed_out         ? 1 : 0,
+            worker_shutdown  => $details->worker_shutdown   ? 1 : 0,
+        };
+    }
+
+    sub _cancel_details_from_hash ($reason, $hash) {
+        $hash //= {};
+        return Temporalio::Activity::CancellationDetails->new(
+            reason           => $reason,
+            not_found        => $hash->{not_found}        // 0,
+            cancel_requested => $hash->{cancel_requested} // 0,
+            paused           => $hash->{paused}           // 0,
+            reset            => $hash->{reset}            // 0,
+            timed_out        => $hash->{timed_out}        // 0,
+            worker_shutdown  => $hash->{worker_shutdown}  // 0,
+        );
     }
 
     # --- the R30 inherited-descriptor sweep (finding L16) --------------------
@@ -544,10 +846,13 @@ class Temporalio::Activity::Pool {
     }
 
     # Drain any parent->child frames without blocking, recording cancel
-    # tokens. Called from the ChildCancellation poll (every is_cancelled)
-    # and from each heartbeat — the natural observation points of a
-    # synchronous body (Python parity: a sync activity observes cancellation
-    # via its cancelled_event / heartbeat, sdk-python worker/_activity.py).
+    # tokens (and, spec I7 direction A, their reason/details into the
+    # invocation's shared holder) and the worker-shutdown flag. Called from
+    # the ChildCancellation poll (every is_cancelled), the ChildShutdownEvent
+    # poll (every is_worker_shutdown/wait_for_worker_shutdown), and from each
+    # heartbeat: the natural observation points of a synchronous body
+    # (Python parity: a sync activity observes cancellation via its
+    # cancelled_event / heartbeat, sdk-python worker/_activity.py).
     sub _child_drain_control ($child) {
         my $sock = $child->{control};
         if (defined $sock) {
@@ -563,8 +868,39 @@ class Temporalio::Activity::Pool {
             }
         }
         while (defined(my $msg = _take_frame(\$child->{buf}))) {
-            $child->{cancelled}{ $msg->{token} } = 1
-                if ($msg->{op} // '') eq 'cancel' && defined $msg->{token};
+            my $op = $msg->{op} // '';
+            if ($op eq 'cancel' && defined $msg->{token}) {
+                $child->{cancelled}{ $msg->{token} } = 1;
+                # spec I7 direction A, made token-exact by step F6: only one
+                # invocation runs per child at a time (synchronous body), so
+                # $child->{holder} is the CURRENT invocation's
+                # cancellation_details holder (rebound in _child_dispatch
+                # below, with $child->{holder_token} naming the invocation
+                # it belongs to). That is NOT enough on its own, because a
+                # frame can outlive the invocation it names: the parent
+                # writes a cancel for token A while A is still inflight on
+                # its side, A's body has already stopped polling, and the
+                # frame is drained by the NEXT invocation on this same
+                # child. Writing it into that invocation's holder would give
+                # it a cancellation_details it never earned, with
+                # is_cancelled false. The token check below is what keeps
+                # the write on the invocation the frame actually names, the
+                # same way the async dispatcher looks the holder up by task
+                # token (sdk-python worker/_activity.py:221, over
+                # _running_activities, each entry owning its own holder at
+                # :741 and handing it to the sync worker's context at :938
+                # and :968).
+                if (defined $child->{holder}
+                    && defined $child->{holder_token}
+                    && $child->{holder_token} eq $msg->{token})
+                {
+                    $child->{holder}{details} = _cancel_details_from_hash(
+                        $msg->{reason}, $msg->{details});
+                }
+            }
+            elsif ($op eq 'shutdown') {
+                $child->{worker_shutdown} = 1;
+            }
         }
         return;
     }
@@ -583,6 +919,13 @@ class Temporalio::Activity::Pool {
         $child //= { control => undef };
         my @child_heartbeats;
         my $token;
+        # temporal.heartbeat-chain-teardown-race: whether THIS invocation
+        # actually attempted a 'start' announcement, checked alongside
+        # $child->{control}'s final state below to build the reply frame's
+        # `control_connected` flag (see invoke()'s reply-time
+        # %token_outbound delete for why the parent cannot infer this from
+        # its own drain timing).
+        my $start_sent = 0;
         my $out = eval {
             my $inv = Temporalio::Activity::Invocation->thaw($frozen);
             $token = $inv->task_token;
@@ -590,6 +933,7 @@ class Temporalio::Activity::Pool {
             # Announce the running invocation so the parent can route a
             # post-dispatch cancel to THIS child's connection (R19).
             _child_send($child, { op => 'start', token => $token });
+            $start_sent = 1;
 
             # Preserve-cause (spec R62, finding L32): a module this pool was
             # told to preload failed to require in init_code. The child is
@@ -623,6 +967,30 @@ class Temporalio::Activity::Pool {
                 },
             );
 
+            # spec I7 direction A (closes GitHub #7 half A): a fresh
+            # cancellation_details holder for THIS invocation.
+            # _child_drain_control writes into it when a 'cancel' frame
+            # carrying reason/details arrives. Only one invocation runs per
+            # child at a time, so $child->{holder} unambiguously means "the
+            # current one": reassigned fresh on every _child_dispatch call,
+            # even though the SAME forked child serves many invocations
+            # across its lifetime. $child->{holder_token} names the
+            # invocation this holder belongs to, so a cancel frame that
+            # outlived the invocation it was written for (step F6) is
+            # recognized and not written here; see _child_drain_control.
+            # A worker-shutdown event backed by the same control channel:
+            # the pool's notify_shutdown broadcasts a 'shutdown' frame
+            # (spec R84 parity for pooled activities).
+            my $details_holder = { details => undef };
+            $child->{holder}       = $details_holder;
+            $child->{holder_token} = $token;
+            my $shutdown_event = Temporalio::Activity::ChildShutdownEvent->new(
+                poll => sub {
+                    _child_drain_control($child);
+                    return $child->{worker_shutdown} ? 1 : 0;
+                },
+            );
+
             my $ctx = Temporalio::Activity::Context->new(
                 info               => $inv->info,
                 cancellation       => $cancellation,
@@ -645,6 +1013,36 @@ class Temporalio::Activity::Pool {
                     _child_drain_control($child);
                     return undef;
                 },
+                # spec I7 direction B (closes GitHub #7 half B): relay the
+                # RAW Perl-level details up the channel AFTER
+                # Context::_record_heartbeat has encoded them (step F6) and
+                # BEFORE the bytes-based heartbeat_recorder above sends the
+                # encoded bytes, so the parent can run its ActivityOutbound
+                # chain with the structured values the body actually passed.
+                # Best-effort: a failed send here does not fall back (the
+                # paired 'hb' frame above still carries the encoded bytes
+                # either way; a lost 'hbd' just means the parent skips the
+                # chain for that one heartbeat and relays the bytes directly,
+                # the pre-I7 behavior). Storable
+                # cannot freeze a `feature 'class'` instance at all (dies
+                # "Can't store OBJECT items", lessons.md): a caller
+                # heartbeating one as a raw detail (e.g. a RawBytes/BinaryProto
+                # hint wrapper) must not crash the WHOLE activity over a
+                # best-effort relay (temporal.storable-freeze-heartbeat-details,
+                # validator warn iter 1), so the send is try/catch-guarded
+                # here, matching the comment's own documented contract.
+                heartbeat_details_recorder => sub (@details) {
+                    try {
+                        _child_send($child,
+                            { op => 'hbd', token => $token,
+                              details => [@details] });
+                    }
+                    catch ($freeze_error) {
+                        # Swallowed by design: best-effort, see above.
+                    }
+                },
+                cancellation_details_holder => $details_holder,
+                worker_shutdown_event        => $shutdown_event,
             );
 
             my $result = do {
@@ -666,6 +1064,15 @@ class Temporalio::Activity::Pool {
             _child_send($child, { op => 'end', token => $token });
             delete $child->{cancelled}{$token} if $child->{cancelled};
         }
+        # temporal.heartbeat-chain-teardown-race: true only when 'start' was
+        # actually sent for THIS invocation AND the connection is still
+        # live after the 'end' send attempt above -- so the parent's
+        # invoke() can trust that a matching 'end' frame either already
+        # arrived or is still in flight, and skip its own reply-time
+        # %token_outbound cleanup in favor of _on_control_frame's 'end' case
+        # (or _close_conn, if the connection drops before 'end' lands).
+        $frame{control_connected} = ($start_sent && defined $child->{control})
+            ? 1 : 0;
         return Storable::freeze(\%frame);
     }
 
@@ -809,7 +1216,11 @@ long-running body's heartbeats reach the server while it runs and a
 C<heartbeat_timeout> shorter than the body does not fire for a compliant
 activity (finding L13: the pre-R18 pool collected frames in the child and
 relayed them only after the body returned). If the child's control connect
-failed, frames fall back to the collect-and-return path.
+failed, frames fall back to the collect-and-return path. Since spec I7
+(closes GitHub #7 half B) the child ALSO relays the raw Perl-level details
+alongside the bytes, so the parent can run its ActivityOutbound chain before
+forwarding: see L</The parent-side ActivityOutbound chain (spec I7,
+direction B)> below.
 
 =item Cooperative cancellation (down, R19)
 
@@ -821,9 +1232,133 @@ child runs down the control channel (finding L15: pre-R19, cancellation
 crossed the fork exactly once, as that dispatch-time boolean). The child's
 L<Temporalio::Activity::ChildCancellation> polls the channel on every
 C<is_cancelled> call (and on each heartbeat), so a cooperating body observes
-the cancel and its cancellation Future resolves.
+the cancel and its cancellation Future resolves. Since spec I7 (closes
+GitHub #7 half A) the SAME cancel frame also carries the Cancel job's reason
++ six boolean causes, so a pooled body's C<< $ctx->cancellation_details >>
+reports them exactly as an async body's would: see L</Cancellation details
+and worker shutdown (spec I7, direction A)> below.
 
 =back
+
+=head2 Cancellation details and worker shutdown (spec I7, direction A)
+
+Closes GitHub #7 half A. Two pooled-activity gaps this fills, both riding the
+same control channel as the cooperative-cancel flag above:
+
+=over 4
+
+=item Cancellation details
+
+C<cancel_invocation>'s C<$details> parameter (a
+L<Temporalio::Activity::CancellationDetails>, when the dispatcher captured
+one from the Cancel job, spec R76) rides the cancel frame as a plain
+Storable-safe hash (the class instance itself cannot cross Storable). The
+child's C<_child_drain_control> decodes it into a fresh
+C<CancellationDetails> and writes it into a per-invocation holder shared with
+the child's L<Temporalio::Activity::Context>, matching the async
+dispatcher's C<_handle_cancel> contract (spec R76) closely enough that a
+pooled and an async activity report identical C<cancellation_details> for the
+same cancel. The write is matched to the frame's task token, not to whatever
+invocation the child happens to be running: see L</Frame pairing guarantees
+(step F6)>.
+
+=item Worker shutdown
+
+C<notify_shutdown> broadcasts a C<< { op => 'shutdown' } >> frame to every
+connected child (and to any child that connects afterward, closing the race).
+The child's context is backed by a L<Temporalio::Activity::ChildShutdownEvent>
+polling the same channel, so C<< $ctx->is_worker_shutdown >> and
+C<< $ctx->wait_for_worker_shutdown >> observe shutdown-begin the same way an
+async activity's C<Temporalio::Common::Event> does (spec R84); pre-I7 a
+pooled body's C<is_worker_shutdown> stayed permanently false.
+L<Temporalio::Worker::ActivityDispatcher>'s own C<notify_shutdown> calls both
+this method and its own C<$worker_shutdown_event-\>set> so one call reaches
+every running activity, pooled or async.
+
+=back
+
+=head2 The parent-side ActivityOutbound chain (spec I7, direction B)
+
+Closes GitHub #7 half B. C<invoke>'s C<outbound> option is the SAME finished
+L<Temporalio::Worker::ActivityOutbound> chain
+L<Temporalio::Worker::ActivityDispatcher> builds once per dispatch (spec R72)
+and hands to the async path's Context directly. For a pooled activity the
+chain cannot run IN the child (interceptor instances do not cross the fork),
+so C<_on_control_frame>'s C<hb> handler runs it PARENT-side instead: the
+child sends the raw, unconverted heartbeat details up as a paired C<hbd>
+frame (via the Context's C<heartbeat_details_recorder>) immediately before
+the encoded-bytes C<hb> frame, and the parent's chain root RE-ENCODES the
+chain's (possibly interceptor-rewritten) output args with C<data_converter>
+via the shared C<Temporalio::Activity::Context::encode_heartbeat_bytes> entry
+point (spec I7 REFACTOR sub-step 6) before forwarding to C<heartbeat_relay>,
+so an interceptor both observes the SAME structured Perl values the body
+passed AND has any rewrite it makes honored, matching the async path's
+C<Context::heartbeat> exactly. A pooled activity with no C<outbound> wired,
+or whose paired C<hbd> frame was lost (a Storable freeze failure on the child
+side, best-effort), falls back to relaying the child's bytes directly, the
+pre-I7 behavior. C<data_converter> itself is optional: a pool built without
+one (a direct construction, or a test double) falls back to the pool's own
+default converter for the re-encode, the same symmetric default the fork
+channel already uses for error encoding.
+
+=head2 Frame pairing guarantees (step F6)
+
+The control channel carries several frames per invocation over one ordered
+stream, and every one of them is matched to an invocation B<by task token>,
+never by "whatever is current on this connection". Two rules make that hold:
+
+=over 4
+
+=item A cancel frame is applied only to the invocation it names
+
+A child serves many invocations over its lifetime, one at a time, and a
+cancel frame can outlive the invocation it was written for: the parent can
+still hold a token inflight (and still route it through C<%token_conn>) after
+the child's body stopped polling and its C<end> frame went out, which is the
+normal shape at worker shutdown, where core cancels every running activity.
+Such a frame is drained by the B<next> invocation on that child. The child
+therefore records C<< $child->{holder_token} >> alongside the per-invocation
+cancellation-details holder and writes the decoded details only when the
+frame's token matches; the cancelled flag was already keyed by token. Without
+that check the next invocation reported a C<< $ctx->cancellation_details >>
+it never earned, with C<< $ctx->cancellation->is_cancelled >> false. Python
+has no such window because it looks the holder up by task token
+(C<worker/_activity.py:221>), and each running activity owns its own
+(C<:741>, handed to the sync worker's context at C<:938> and C<:968>).
+
+=item A heartbeat's details frame never outlives its bytes frame
+
+C<hbd> (raw Perl details) and C<hb> (encoded bytes) are two frames for one
+heartbeat, paired by parking the details until the bytes arrive.
+L<Temporalio::Activity::Context>'s C<_record_heartbeat> therefore encodes
+B<first> and relays the raw details B<second>, so a heartbeat whose encode
+dies sends neither frame. Otherwise its details sat parked and paired with
+the next heartbeat's bytes, and the parent re-encoded the earlier heartbeat's
+args in place of the later one's. The reverse case is already benign and
+stays that way: an C<hb> that arrives with no parked details (its C<hbd> was
+lost to a Storable freeze failure, which is best-effort) relays the child's
+bytes directly. A sequence number on both frames would also work, but buys
+nothing: the child is synchronous, so it cannot have two heartbeats in
+flight, and once the orphan case is gone "the details immediately before
+these bytes" already identifies the pair exactly.
+
+=back
+
+=head2 A heartbeat whose chain fails is dropped, not relayed (step F6)
+
+An C<ActivityOutbound> chain that throws instead of delegating is contained
+to the one heartbeat: the throw must not escape the read-ready callback and
+abort whatever await is pumping the shared L<IO::Async> loop, which would
+disrupt every other pooled activity on it. Contained means B<warned and
+dropped>. Nothing is recorded, because the chain delegated nothing, and
+recording the child's pre-chain bytes would push a value the chain refused to
+pass on. This matches the async path, where the interceptor's C<die>
+propagates out of the body's own C<< $ctx->heartbeat >> call and nothing is
+recorded, and both of Python's sync executors: a thread pool re-raises the
+chain failure into the body through C<.result(10)>
+(C<worker/_activity.py:851-853>, over the C<outbound.heartbeat> installed on
+the context at C<:813-818>), and a process pool's parent-side heartbeater
+logs the exception and ends its poll loop (C<worker/_activity.py:1114-1116>).
 
 =head2 Cross-fork invocation struct
 
@@ -871,6 +1406,7 @@ pools with distinct registries in one process dispatch independently
         inherited_fhs => ...,
         activity_modules => ...,
         heartbeat_relay => ...,
+        data_converter => ...,
     );
 
 Constructs a Temporalio::Activity::Pool. Named parameters:
@@ -901,6 +1437,15 @@ Constructs a Temporalio::Activity::Pool. Named parameters:
 
 (optional, default C<undef>)
 
+=item C<data_converter>
+
+(optional, default C<undef>) The worker's L<Temporalio::Converter::Data>
+(spec I7 REFACTOR sub-step 6). When set, the parent-side ActivityOutbound
+chain root re-encodes a pooled heartbeat's (possibly rewritten) output args
+with it instead of relaying the child's pre-rewrite bytes unchanged. Omitted
+constructions fall back to the pool's own default converter for the
+re-encode.
+
 =back
 
 =head1 METHODS
@@ -918,15 +1463,36 @@ Dispatches an activity invocation onto the fork pool, returning a L<Future>
 that resolves with the activity result (or fails with the activity error).
 The optional C<cancellation> key takes the parent-side
 L<Temporalio::Cancellation> for this activity: if it fires while the child
-runs, the cancel is delivered down the control channel (spec R19).
+runs, the cancel is delivered down the control channel (spec R19). The
+optional C<details_holder> key (spec I7 direction A) is the SAME
+C<{ details => ... }> holder L<Temporalio::Worker::ActivityDispatcher>
+writes a Cancel job's captured reason/details into (spec R76); when given, a
+delivered cancel forwards them down to the child. The optional C<outbound>
+key (spec I7 direction B) is the finished
+L<Temporalio::Worker::ActivityOutbound> chain (spec R72); when given, a
+relayed heartbeat runs through it parent-side before reaching
+C<heartbeat_relay>.
 
 =head2 cancel_invocation
 
-    $pool->cancel_invocation($task_token);
+    $pool->cancel_invocation($task_token, $details);
 
 Delivers a post-dispatch cancel to the child currently running
 C<$task_token> over the control channel. A cancel that races ahead of the
 child's start announcement is parked and delivered on arrival; unknown or
-already-finished tokens are a no-op.
+already-finished tokens are a no-op. C<$details> (optional, a
+L<Temporalio::Activity::CancellationDetails>, spec I7 direction A) rides the
+same frame as its reason + six boolean causes, so the child's
+C<< $ctx->cancellation_details >> observes them.
+
+=head2 notify_shutdown
+
+    $pool->notify_shutdown;
+
+Broadcasts a C<'shutdown'> frame to every connected child (and to any child
+that connects afterward), so C<< $ctx->is_worker_shutdown >> and
+C<< $ctx->wait_for_worker_shutdown >> observe shutdown-begin in a pooled
+activity (spec R84 parity, spec I7 direction A). Idempotent.
+L<Temporalio::Worker::ActivityDispatcher>'s C<notify_shutdown> calls this.
 
 =cut

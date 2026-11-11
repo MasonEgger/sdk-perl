@@ -353,8 +353,10 @@ T2->subtest('unknown update name -> immediate rejected (T-upd-8)' => sub {
 });
 
 # ---------------------------------------------------------------------------
-# T-upd-9: a dynamic handler receives ($name, @args), emits accepted/completed,
-# and is not validated.
+# T-upd-9: a dynamic handler receives ($name, @args), emits accepted/completed.
+# This fixture registers no dynamic validator, so it is accepted unconditionally
+# (a dynamic handler installed WITH a runtime validator is exercised in
+# dynamic_update_validator.t, I9 / #9).
 # ---------------------------------------------------------------------------
 T2->subtest('dynamic update handler dispatch (T-upd-9)' => sub {
     my $harness = Temporalio::Test::WorkflowReplay->new(
@@ -382,7 +384,7 @@ T2->subtest('dynamic update handler dispatch (T-upd-9)' => sub {
     my @ur = grep { $_->which_variant eq 'update_response' } @cmds;
     T2->is(scalar @ur, 2, 'accepted then completed');
     T2->is($ur[0]->update_response->which_response, 'accepted',
-        'the dynamic handler accepted (never validated)');
+        'the dynamic handler accepted (no validator registered)');
     T2->is($PC->from_payload($ur[1]->update_response->completed), 'whatever=v',
         'the dynamic handler got (name, @args)');
 });

@@ -14,6 +14,8 @@ use Protobuf::Schema ();
 use Protobuf::Codec ();
 use Protobuf::JSON ();
 use Protobuf::Class::Generator ();
+use Scalar::Util ();
+use Temporalio::Exception::Argument ();
 use Temporalio::Exception::Runtime ();
 
 # One-shot load guard and the full-name -> generated-package registry that
@@ -88,6 +90,82 @@ sub resolve ($full_name) {
     return $pkg;
 }
 
+# The inclusive bound on google.protobuf.Duration.seconds (10000 years either
+# way), MUST-matched to _DURATION_SECONDS_MAX in protobuf's
+# google/protobuf/internal/well_known_types.py (checked against protobuf
+# 6.33.6). Well inside 2**53, so a value that passes this check also survives
+# the float-to-int64 encode.
+my $DURATION_SECONDS_MAX = 315_576_000_000;
+
+# duration_from_seconds($seconds) -> google.protobuf.Duration instance.
+# Perl-side seconds (possibly fractional) split into Duration { seconds,
+# nanos }. No undef handling here: every call site already guards for
+# definedness before calling (I14; formerly duplicated as
+# Converter/Failure.pm's _duration_from_seconds, Common/RetryPolicy.pm's,
+# Client.pm's, Workflow/Runner.pm's, and Schedule::{Policy,Interval,Action,
+# Spec}'s local _duration).
+#
+# Rounding follows Duration._NormalizeDuration and _CheckDurationValid in
+# protobuf's google/protobuf/internal/well_known_types.py (checked against
+# protobuf 6.33.6): seconds and nanos always share a sign, and nanos
+# stay within [-999999999, 999999999]. Two consequences (F10):
+#   1. The fraction is rounded on its ABSOLUTE value and the sign applied
+#      afterwards. The old `int(($seconds - int($seconds)) * 1e9 + 0.5)` split
+#      -1.5 into (-1, -499999999), one nanosecond short, because +0.5 rounds a
+#      negative fraction toward zero.
+#   2. A fraction within half a nanosecond of the next second carries into
+#      seconds. The old form left nanos at 1_000_000_000 (0.9999999999 gave
+#      (0, 1000000000)), which is outside the proto-legal range.
+#
+# Non-numeric input, non-finite input (NaN, +/-Inf), and input beyond the
+# Duration range throw Temporalio::Exception::Argument rather than encoding a
+# mangled int64. The check lives here because this pair is the single choke
+# point for every seconds-to-Duration call site. It is the full house guard
+# from Common/Priority.pm's ADJUST block (:57-60), both halves:
+#   * looks_like_number rejects a string Perl would numify quietly. Without
+#     it 'abc' and '' encode as a zero Duration and '3abc' as 3 seconds, with
+#     nothing louder than a numeric warning to say so.
+#   * `$s - $s != 0` is the finite check: for finite x, x - x is exactly 0,
+#     while Inf - Inf and NaN - NaN are both NaN. It is still needed after
+#     looks_like_number, which accepts the strings 'Inf' and 'NaN'.
+# Numeric strings ('1.5', '1e3', a padded ' 1') pass both halves and convert
+# like the numbers they spell.
+sub duration_from_seconds ($seconds) {
+    Temporalio::Exception::Argument->throw(
+        message => "duration seconds must be a finite number, got '$seconds'")
+        if !Scalar::Util::looks_like_number($seconds)
+        || $seconds - $seconds != 0;
+    Temporalio::Exception::Argument->throw(
+        message => "duration seconds $seconds is outside the "
+            . "google.protobuf.Duration range [-$DURATION_SECONDS_MAX, "
+            . "$DURATION_SECONDS_MAX]")
+        if abs($seconds) > $DURATION_SECONDS_MAX;
+
+    my $Duration = resolve('google.protobuf.Duration');
+    my $sign  = $seconds < 0 ? -1 : 1;
+    my $magn  = abs($seconds);
+    my $whole = int($magn);
+    my $nanos = int(($magn - $whole) * 1_000_000_000 + 0.5);
+    if ($nanos >= 1_000_000_000) {
+        $whole += 1;
+        $nanos -= 1_000_000_000;
+    }
+    return $Duration->new(
+        { seconds => $sign * $whole, nanos => $sign * $nanos });
+}
+
+# seconds_from_duration($duration) -> Perl-side seconds (possibly fractional),
+# or undef when $duration is unset. The inverse of duration_from_seconds
+# (I14; formerly duplicated as Converter/Failure.pm's _seconds_from_duration
+# and the local _duration_to_seconds in Common/RetryPolicy.pm and
+# Schedule::{Policy,Interval,Action}; Schedule::Spec keeps its own
+# unset-Duration-reads-as-undef check at the call site since that behavior
+# is not shared by the other copies).
+sub seconds_from_duration ($duration) {
+    return undef unless defined $duration;
+    return ($duration->seconds // 0) + ($duration->nanos // 0) / 1_000_000_000;
+}
+
 # The vendored proto root: the checkout's sdk/share/proto when running from
 # the source tree (prove -l), else the installed distribution share dir.
 sub _proto_root {
@@ -121,9 +199,12 @@ sub _wkt_root {
 }
 
 # The root .proto files to parse (spec section 4.6): every
-# temporal/api/workflowservice/v1/*.proto and (spec R91, for the raw
-# operator-service client) temporal/api/operatorservice/v1/*.proto, plus
-# every coresdk root under temporal/sdk/core/. The *_fq.proto variant is EXCLUDED: it redefines the
+# temporal/api/workflowservice/v1/*.proto, (spec R91, for the raw
+# operator-service client) temporal/api/operatorservice/v1/*.proto, and (I12,
+# for the raw cloud/test/health service clients)
+# temporal/api/cloud/cloudservice/v1/*.proto and
+# temporal/api/testservice/v1/*.proto, plus every coresdk root under
+# temporal/sdk/core/. The *_fq.proto variant is EXCLUDED: it redefines the
 # coresdk.workflow_activation package with fully-qualified type names (a
 # codegen aid sdk-core itself does not compile), so parsing it would collide
 # with workflow_activation.proto in the schema index. Paths are relative to
@@ -131,7 +212,12 @@ sub _wkt_root {
 sub _root_files ($root) {
     my @roots;
 
-    for my $service_dir ([qw(workflowservice v1)], [qw(operatorservice v1)]) {
+    for my $service_dir (
+        [qw(workflowservice v1)],
+        [qw(operatorservice v1)],
+        [qw(cloud cloudservice v1)],
+        [qw(testservice v1)],
+    ) {
         my $svc = File::Spec->catdir($root, 'temporal', 'api', @$service_dir);
         push @roots, glob File::Spec->catfile($svc, '*.proto');
     }
@@ -154,6 +240,11 @@ sub _root_files ($root) {
     push @roots,
         File::Spec->catfile($root, qw(google rpc status.proto)),
         File::Spec->catfile($root, qw(temporal api errordetails v1 message.proto));
+
+    # grpc.health.v1.Health (I12, for the raw health-service client): it
+    # lives outside temporal/api/, so add it explicitly the same way as the
+    # google/rpc/status.proto root above.
+    push @roots, File::Spec->catfile($root, qw(grpc health v1 health.proto));
 
     return sort map { File::Spec->abs2rel($_, $root) } @roots;
 }
@@ -219,12 +310,18 @@ Temporalio::Core::Proto - load vendored Temporal protos, generate message classe
 
 =head1 DESCRIPTION
 
-Parses the complete vendored proto trees under C<share/proto> (the Temporal
-C<api_upstream> and coresdk C<local> trees, re-vendored from the pinned
-sdk-rust tag via C<xt/author/vendor-protos.pl>) with the pure-Perl
-L<Protobuf::Parser> — no C<protoc>, no C<libprotobuf> — and installs a Perl
-class for every message under C<Temporalio::Proto::*> via
+Parses the complete vendored proto trees under C<share/proto> with the
+pure-Perl L<Protobuf::Parser> (no C<protoc>, no C<libprotobuf>) and installs a
+Perl class for every message under C<Temporalio::Proto::*> via
 L<Protobuf::Class::Generator>.
+
+Every vendored file is byte-identical to the pinned sdk-rust tag, which holds
+them under C<crates/common/protos/>: the Temporal C<api_upstream> tree, the
+coresdk C<local> tree, C<google/rpc>, and (for the raw cloud, test, and health
+service clients) C<api_cloud_upstream>, C<testsrv_upstream>,
+C<grpc/health/v1>, and C<protoc-gen-openapiv2/options>. Re-vendor from the tag
+path, never from a checkout's current C<HEAD>; a file from a later upstream can
+carry a field the pinned c-bridge's own decode drops on the way through.
 
 The package mapping is mechanical: the proto package's leading C<temporal>
 component is dropped, the remaining components are CamelCased, and the result
@@ -242,6 +339,28 @@ protos on first use.
 
 =head1 METHODS
 
+=head2 duration_from_seconds
+
+Converts Perl-side (possibly fractional) seconds to a C<google.protobuf.Duration> instance. The shared home (I14) for the seconds-to-Duration conversion formerly duplicated in C<Converter::Failure>, C<Common::RetryPolicy>, C<Client>, C<Workflow::Runner>, and the C<Schedule::*> modules.
+
+The split matches protobuf's own C<Duration._NormalizeDuration> and C<_CheckDurationValid>, so the resulting message is always proto-legal:
+
+=over 4
+
+=item *
+
+B<Sign-aware rounding.> C<seconds> and C<nanos> carry the same sign, and the fractional part is rounded half-away-from-zero on its absolute value: C<-1.5> gives C<< { seconds => -1, nanos => -500000000 } >>, and C<-0.25> gives C<< { seconds => 0, nanos => -250000000 } >>.
+
+=item *
+
+B<Carry at one billion.> A fraction within half a nanosecond of the next second rounds up into C<seconds> rather than leaving C<nanos> at C<1_000_000_000>, which the proto range forbids: C<0.9999999999> gives C<< { seconds => 1, nanos => 0 } >>. C<nanos> therefore always lands in C<[-999999999, 999999999]>.
+
+=item *
+
+B<Non-numeric, non-finite, and out-of-range input throws.> A value that is not a number at all (C<"abc">, C<"">, C<"3abc">, which Perl would otherwise numify quietly to 0, 0, and 3), C<NaN>, C<+Inf>, C<-Inf>, and any magnitude above C<315_576_000_000> seconds (protobuf's inclusive bound, 10000 years either way) all raise L<Temporalio::Exception::Argument>. Callers do not need their own guard: this is the single choke point for every seconds-to-Duration conversion in the SDK. A string that does spell a number is taken as the number it spells, so C<"1.5"> converts like C<1.5>.
+
+=back
+
 =head2 json
 
 Returns the JSON descriptor / mapping used when resolving messages.
@@ -250,6 +369,10 @@ Returns the JSON descriptor / mapping used when resolving messages.
 
 Loads and parses the vendored proto trees, generating the C<Temporalio::Proto::*> message classes. Idempotent.
 
+The load is eager and whole-graph: the first call to C<load>, C<schema>, C<json>, or C<resolve> parses every root, including the cloud and testservice roots that only the raw C<CloudService> and C<TestService> handles use. Measured on the F5 re-vendor, warm cache: 67 files, 1.8s, 40 MB peak RSS without those roots and C<grpc/health>; 87 files, 2.4s, 45 MB with them. So a client that never touches a raw cloud or test handle still pays about 0.6s and 5 MB at startup.
+
+That cost is deliberate, because neither way of avoiding it is currently safe. Deferring the two trees to first use fails because L<Protobuf::Schema>'s C<resolve> latches: it returns early once the schema is resolved, so a file added afterwards is indexed but never type-resolved or feature-resolved, and there is no reset short of patching the L<Protobuf> distribution. Parsing them into a I<second> schema fails because C<temporal/api/cloud/nexus/v1/message.proto>, which C<temporal/api/cloud/cloudservice/v1/request_response.proto> pulls in, imports C<temporal/api/common/v1/message.proto>: the second schema would regenerate the shared C<Temporalio::Proto::Api::Common::V1::*> classes over the ones the main schema already installed, and those classes back every payload on the hot path. Revisit if L<Protobuf::Schema> grows an incremental resolve, or a generator mode that skips already-installed packages.
+
 =head2 resolve
 
 Resolves a fully-qualified proto message name (e.g. C<temporal.api.common.v1.Payload>) to its generated Perl class, triggering the one-time vendored-proto load on first use.
@@ -257,5 +380,13 @@ Resolves a fully-qualified proto message name (e.g. C<temporal.api.common.v1.Pay
 =head2 schema
 
 Returns the parsed proto schema object backing message resolution.
+
+=head2 seconds_from_duration
+
+Converts a C<google.protobuf.Duration> instance back to Perl-side (possibly fractional) seconds, or C<undef> when the Duration is unset. The inverse of C<duration_from_seconds>; the shared home (I14) for the Duration-to-seconds conversion formerly duplicated across the same call sites.
+
+Because C<duration_from_seconds> emits same-sign C<seconds>/C<nanos> pairs, the sum here reproduces the input exactly: C<-1.5> and C<0.9999999999> both survive the round trip (the latter as C<1>, its rounded value). A Duration that reached the SDK with a mismatched sign is summed as given, not normalized.
+
+An all-zero Duration reads back as C<0>, not C<undef>, since the unset-versus-zero distinction is a call-site concern: proto3 cannot tell the two apart on the wire, and only some call sites (C<Schedule::Spec>'s C<jitter>) want zero folded to C<undef>.
 
 =cut

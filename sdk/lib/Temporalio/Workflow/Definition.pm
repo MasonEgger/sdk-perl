@@ -165,6 +165,14 @@ class Temporalio::Workflow::Definition {
                 );
             }
             $_DEFS{$pkg}{dynamic}{$dyn_kind} = $ref;
+            # A dynamic handler has NO update/signal/query name, so the only
+            # key an :UpdateValidator can name it by is its METHOD name (spec
+            # F7). Record it here; Runner::_handlers reads it to promote a
+            # matching validator onto the dynamic definition, the Perl
+            # spelling of sdk-python's @workflow.update(dynamic=True) +
+            # @fn.validator pair (workflow/_handlers.py:382, which calls
+            # set_validator on the dynamic _UpdateDefinition itself).
+            $_DEFS{$pkg}{dynamic_methods}{$dyn_kind} = $method_name;
             if (my $policy = $opts{unfinished_policy}) {
                 $_DEFS{$pkg}{unfinished_policies}{dynamic}{$dyn_kind} = $policy;
             }
@@ -200,6 +208,10 @@ class Temporalio::Workflow::Definition {
             validators => $d->{validators} // {},
             init       => $d->{init},
             dynamic    => $d->{dynamic}    // {},
+            # The METHOD name behind each dynamic slot (spec F7), keyed
+            # {signal|query|update}. The key an :UpdateValidator names when it
+            # guards a dynamic :Update.
+            dynamic_methods     => $d->{dynamic_methods} // {},
             # Explicit per-handler unfinished policies (spec R87), keyed
             # {signals|updates}{$name} and {dynamic}{signal|update}. Sparse:
             # absent means the WARN_AND_ABANDON default.
@@ -329,7 +341,33 @@ C<HandlerUnfinishedPolicy>.
 
 =item C<:UpdateValidator('updateName')>
 
-Pairs a synchronous validator with the named C<:Update> handler.
+Pairs a validator with an C<:Update> handler. The argument is the update name
+for a named handler, and the C<:Update(dynamic=1)> method's own B<method>
+name for the dynamic catch-all (a dynamic handler has no update name, so the
+method name is the only key available). Both spellings are honored on every
+dispatch path, as is the runtime equivalent
+(C<< Temporalio::Workflow->set_update_handler >> /
+C<set_dynamic_update_handler> with a C<validator>); a class may pair a
+validator with its dynamic update exactly as sdk-python pairs
+C<@workflow.update(dynamic=True)> with C<@fn.validator>.
+
+    method any_update :Update(dynamic=1) ($name, @args) { ... }
+    method check_any :UpdateValidator('any_update') ($name, @args) { ... }
+
+A validator B<must be synchronous>: do the checks inline and throw to reject
+the update. A validator that returns a Future which is not ready (an
+C<async method>, for instance) is itself a validator error, and the update is
+rejected with a failure of type C<AsyncUpdateValidator> naming the fix. Move
+anything that awaits into the update handler, which runs after acceptance.
+
+A named update is validated only by its B<own> validator. It never falls back
+to the dynamic handler's validator, matching sdk-python
+(C<_workflow_instance.py:2938-2941>); a dynamic update is validated by the
+dynamic handler's validator alone.
+
+A validator runs in a read-only context and passes through the workflow
+inbound interceptor chain's C<validate_update>, so an interceptor sees every
+validated update.
 
 =item C<:Init>
 
@@ -344,7 +382,10 @@ The constructor hook that runs just before C<:Run>.
 =item C<_workflow_defs>
 
 The normalised per-class definition hash (C<run>, C<run_type>, C<signals>,
-C<queries>, C<updates>, C<validators>, C<init>, C<dynamic>).
+C<queries>, C<updates>, C<validators>, C<init>, C<dynamic>,
+C<dynamic_methods>, C<unfinished_policies>). C<dynamic_methods> records the
+method name behind each dynamic slot, which is how an C<:UpdateValidator>
+names the C<:Update(dynamic=1)> method it guards.
 
 =item C<_workflow_type>
 

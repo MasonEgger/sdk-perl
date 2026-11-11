@@ -29,7 +29,11 @@ my %INSTALLED;
 # so the CamelCase rpc name the c-bridge dispatches on (client.rs
 # call_*_service match arms) and the response class both come from the proto
 # service descriptor rather than a hand-listed map (parity audit client
-# finding 1). Idempotent per target package.
+# finding 1). A client- or server-streaming rpc (I12: grpc.health.v1.Health's
+# Watch) is SKIPPED: Connection::rpc_call is unary-only over the c-bridge,
+# and Python's generated services_generated.py omits streaming rpcs the same
+# way (HealthService exposes only check, never watch). Idempotent per target
+# package.
 sub install_rpc_methods ($target, $service_full_name) {
     return if $INSTALLED{$target};
 
@@ -41,6 +45,7 @@ sub install_rpc_methods ($target, $service_full_name) {
     (my $package = $service_full_name) =~ s/\.[^.]+\z//;
 
     for my $rpc (@{ $service->methods }) {
+        next if $rpc->{client_streaming} || $rpc->{server_streaming};
         my $name           = $rpc->{name};
         my $response_class = Temporalio::Core::Proto::resolve(
             _qualified($rpc->{output_type}, $package));
@@ -112,8 +117,12 @@ finding 1).
 
 Installs the named proto service's rpc surface into C<$target_package> as
 snake_case methods, each calling C<< $target_package->call >> with the rpc's
-CamelCase name and descriptor-resolved response class. Idempotent per target
-package; throws L<Temporalio::Exception::Runtime> when the schema has no such
-service. Internal: the handles install their own methods at construction.
+CamelCase name and descriptor-resolved response class. A client- or
+server-streaming rpc (I12: C<grpc.health.v1.Health>'s C<Watch>) is skipped:
+C<Connection::rpc_call> is unary-only over the c-bridge, matching Python's
+generated C<HealthService>, which likewise exposes only C<check>. Idempotent
+per target package; throws L<Temporalio::Exception::Runtime> when the schema
+has no such service. Internal: the handles install their own methods at
+construction.
 
 =cut

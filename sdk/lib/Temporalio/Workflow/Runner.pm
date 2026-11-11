@@ -22,6 +22,7 @@ use Temporalio::Converter::Failure ();
 use Temporalio::Interceptor::Headers ();
 use Temporalio::Core::Proto ();
 use Temporalio::Exception ();
+use Temporalio::Exception::Application ();
 use Temporalio::Exception::Cancelled ();
 use Temporalio::Exception::ChildWorkflow ();
 use Temporalio::Exception::WorkflowAlreadyStarted ();
@@ -116,9 +117,10 @@ class Temporalio::Workflow::Runner {
     # The combined worker interceptor list (client-supplied then worker-supplied,
     # spec section 27.2). Folded over a root impl once the instance exists to
     # form $workflow_inbound; execute_workflow / handle_signal / handle_query /
-    # handle_update all flow through that chain to the real handler (#10: the
-    # chain was built by Worker.pm but the dispatch path never called it). The
-    # replay harness defaults it empty (no interceptors).
+    # validate_update / handle_update all flow through that chain to the real
+    # handler (#10: the chain was built by Worker.pm but the dispatch path
+    # never called it; spec F7 added validate_update, which _apply_do_update
+    # used to bypass). The replay harness defaults it empty (no interceptors).
     field $interceptors :param = [];
 
     # The worker's runtime metric meter (spec R83), injected by the
@@ -332,6 +334,29 @@ class Temporalio::Workflow::Runner {
     # error this is recorded synchronously inside _apply_do_update and routed by
     # the outcome decision table as a task failure. Only the first is kept.
     field $current_activation_error;
+
+    # Set once, at the top of evict(), and never cleared: the run is being torn
+    # down and no settlement may emit anything (spec F2). evict() cancels every
+    # parked timer, activity, condition, and handler Future, and each of those
+    # cancels resumes a suspended frame whose unwind failure would otherwise
+    # reach the failure classifier and either claim the one-shot terminal
+    # command slot or record a workflow task failure. Neither survives eviction
+    # (WorkflowDispatcher::_handle_eviction sends a fixed empty successful
+    # completion and drops the runner), so recording either is at best dead
+    # state and at worst, on the terminal slot, state a later activation would
+    # inherit. _classify_failure returns 'evicting' while this is set, which is
+    # how the drop reaches the two FAILURE consumers (_outcome_for_failure and
+    # _settle_signal). _settle_update reads the field DIRECTLY instead, because
+    # eviction has to silence its completed and task-failure arms too and must
+    # bail out before _update_settlement runs the failure converter (spec F8;
+    # see the comment there).
+    # MUST-match sdk-python's
+    # self._deleting, the first check of the generic except clause in
+    # _run_top_level_workflow_function (worker/_workflow_instance.py:2528),
+    # which covers the body and every handler coroutine alike; Python catches
+    # _ContinueAsNewError in an earlier clause (:2521), outcome-equivalent under
+    # eviction since the completion is discarded either way.
+    field $evicting = 0;
 
     # Read-only guard depth (spec section 19.2 + step R24 / sdk-python
     # _as_read_only): while > 0 the runner is executing a synchronous read-only
@@ -794,7 +819,8 @@ class Temporalio::Workflow::Runner {
             start_to_close_timeout heartbeat_timeout))
         {
             next unless defined $opts{$t};
-            $fields{$t} = _duration($opts{$t});
+            $fields{$t} =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$t});
         }
 
         # Retry policy -> temporal.api.common.v1.RetryPolicy proto when given.
@@ -933,7 +959,8 @@ class Temporalio::Workflow::Runner {
             (@args ? (arguments => [@args]) : ()),
             cancellation_type =>
                 _cancellation_type_number($opts{cancellation_type}),
-            local_retry_threshold => _duration($threshold),
+            local_retry_threshold =>
+                Temporalio::Core::Proto::duration_from_seconds($threshold),
         );
 
         # The three LA timeouts (NO heartbeat_timeout — LAs do not heartbeat at
@@ -942,7 +969,8 @@ class Temporalio::Workflow::Runner {
             start_to_close_timeout))
         {
             next unless defined $opts{$t};
-            $base{$t} = _duration($opts{$t});
+            $base{$t} =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$t});
         }
 
         if (defined(my $rp = $opts{retry_policy})) {
@@ -1233,7 +1261,8 @@ class Temporalio::Workflow::Runner {
         );
         for my $opt (keys %timeout_field) {
             next unless defined $opts{$opt};
-            $fields{ $timeout_field{$opt} } = _duration($opts{$opt});
+            $fields{ $timeout_field{$opt} } =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$opt});
         }
 
         # cron_schedule is a plain string field when given.
@@ -1639,7 +1668,8 @@ class Temporalio::Workflow::Runner {
         );
         for my $opt (keys %timeout_field) {
             next unless defined $opts{$opt};
-            $fields{ $timeout_field{$opt} } = _duration($opts{$opt});
+            $fields{ $timeout_field{$opt} } =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$opt});
         }
 
         # headers -> nexus_header: a PLAIN string -> string map transmitted to
@@ -1823,7 +1853,8 @@ class Temporalio::Workflow::Runner {
 
         push @commands, Temporalio::Workflow::Commands::start_timer({
             seq                   => $seq,
-            start_to_fire_timeout => _duration($seconds),
+            start_to_fire_timeout =>
+                Temporalio::Core::Proto::duration_from_seconds($seconds),
         }, $summary);
 
         # A timer future whose ->cancel FAILS the future with a
@@ -2164,9 +2195,43 @@ class Temporalio::Workflow::Runner {
     # continuation survives the run's removal from the dispatcher cache. The
     # dispatcher drops the run_id -> runner mapping; no workflow code runs and an
     # empty successful completion is returned (the §8.3 eviction fast path).
-    # MUST-match sdk-python _handle_cache_eviction (deletes the run from
-    # _running_workflows after cancelling its tasks).
+    # MUST-match sdk-python _apply_remove_from_cache (sets _deleting, cancels
+    # every outstanding task, and the run is dropped from _running_workflows;
+    # worker/_workflow_instance.py:797-808).
+    #
+    # THE SWEEP-ORDER INVARIANT (spec I1 + F8), stated once here because every
+    # list below is ordered to satisfy it:
+    #
+    #   Every awaitable class that OVERRIDES cancel to fail instead (timers,
+    #   activities, and wait_condition's _ConditionFuture) must be swept BEFORE
+    #   the %in_progress_handlers pass. Those overrides settle by
+    #   ->fail(Cancelled), which RESUMES the suspended handler frame, and
+    #   Future::AsyncAwait then settles that handler's own return future as
+    #   part of the same cancel. Sweeping the handler first instead settles its
+    #   return future once on its own and a second time when the real awaitable
+    #   is reached, and the second ->fail croaks out of evict().
+    #
+    #   Everything else (child-workflow, external-signal, external-cancel and
+    #   Nexus futures) is a plain Temporalio::Workflow::Future, which cancels
+    #   NATIVELY: the frame is discarded rather than resumed, so those sweeps
+    #   carry no ordering obligation.
+    #
+    # The tracked handler future is NOT "a clone of its underlying condition"
+    # in any aliasing sense. Future::AsyncAwait builds an async sub's return
+    # future by AWAIT_CLONE on the FIRST future the body awaits, and the CPAN
+    # Future module defines that as `shift->new` (Future.pm:232): a FRESH
+    # instance of that future's class. So a condition-parked handler's return
+    # future merely inherits _ConditionFuture's fail-on-cancel override; it is
+    # a separate object, and cancelling it does not touch the real @conditions
+    # entry. That inherited override is the whole reason the order above
+    # matters. See the @pending_futures list below.
     method evict () {
+        # Raise the eviction guard BEFORE any sweep (spec F2). Every cancel
+        # below resumes a suspended frame, and a frame that unwinds with a
+        # failure lands in _settle_signal; with $evicting set, _classify_failure
+        # answers 'evicting' and the settlement emits nothing. Never lowered:
+        # the run is gone once this method returns.
+        $evicting = 1;
         # Iterate COPIED snapshots of the pending tables, never the aliased
         # `values` lists (finding L6 / spec R16). Cancel continuations run
         # synchronously and may de-register ANY pending entry: each future's
@@ -2195,14 +2260,38 @@ class Temporalio::Workflow::Runner {
         for my $future (@pending_activity_futures) {
             $future->_force_cancel unless $future->is_ready;
         }
+        # @conditions is swept BEFORE %in_progress_handlers, per the
+        # sweep-order invariant above (spec I1, closes GitHub #1): a
+        # wait_condition-parked :Update/:Signal handler's tracked future is a
+        # SEPARATE object that inherited _ConditionFuture's fail-on-cancel
+        # override via AWAIT_CLONE, while the real condition is still an entry
+        # here, so failing the REAL condition first resumes the frame and
+        # lets Future::AsyncAwait settle the clone AS PART OF THAT SAME
+        # CANCEL. The later %in_progress_handlers pass then finds the clone
+        # already ->is_ready and the `unless $future->is_ready` guard below
+        # skips it, landing exactly ONE settle on the method future. Pre-fix,
+        # sweeping handlers first meant the clone's OWN _ConditionFuture-
+        # inherited cancel override (->fail(Cancelled)) settled it, and the
+        # conditions pass then resumed the frame and made Future::AsyncAwait
+        # try to ->fail the already-failed clone a second time ("... is
+        # already failed and cannot be ->fail'ed"), killing evict() before
+        # the eviction completion was ever sent
+        # (t/replay/evict_pending_update_wait_condition.t). This mirrors the
+        # sweep-then-guard discrimination _apply_cancel_workflow already
+        # uses for the main run future's cancel fallback (R8-R10). A plain-
+        # future-parked handler (R17) has no @conditions entry at all, so it
+        # is unaffected and still natively cancelled by the handler pass.
+        # Either way the settlement that the one surviving settle reaches is
+        # SILENT, because $evicting is already raised: _settle_update and
+        # _settle_signal both return without emitting (spec F8).
         my @pending_futures = (
             values %pending_timers,
+            (map { $_->{future} } @conditions),
             # %in_progress_handlers entries are { future, kind, name,
             # unfinished_policy } records (spec R87); sweep their futures.
             (map { $_->{future} } values %in_progress_handlers),
             values %pending_external_signals,
             values %pending_external_cancels,
-            map { $_->{future} } @conditions,
         );
         for my $future (@pending_futures) {
             $future->cancel unless $future->is_ready;
@@ -3151,6 +3240,110 @@ class Temporalio::Workflow::Runner {
         return (undef);
     }
 
+    # Settle a signal-handler Future once it is ready (spec §I2 and spec F2,
+    # GitHub issue #2; the single sink both the sync and async :Signal arms
+    # below settle through). A signal has no response channel to reject through
+    # (unlike an update), so its die is classified exactly like the main :Run
+    # body's own die: both callers run the value through the SHARED ordered
+    # table in _classify_failure and dispatch to the same emitters, so the two
+    # paths cannot drift.
+    #
+    #   evicting         drop: emit nothing (see the $evicting field).
+    #   continue_as_new  ContinueAsNewWorkflowExecution, through the same
+    #                    one-shot _emit_terminal_command slot the body uses.
+    #   cancelled        DEFER: emit nothing. The run's single
+    #                    CancelWorkflowExecution belongs to the BODY, and it is
+    #                    not due while the handler resumes. See the arm below.
+    #   nondeterminism   recorded in $nondeterminism_error so _build_completion's
+    #                    step 1 applies the worker's
+    #                    nondeterminism_as_workflow_fail policy, identically to
+    #                    a non-determinism detected during job application.
+    #   workflow_failure FailWorkflowExecution via _workflow_failed_completion
+    #                    (guarded by _emit_terminal_command so a later
+    #                    $current_activation_error still takes priority in
+    #                    _build_completion's step 1b).
+    #   task_failure     stashed in $current_activation_error, the same route
+    #                    _apply_do_update uses for a post-accept die and
+    #                    validators use for a read-only violation, which
+    #                    _build_completion turns into a failed
+    #                    WorkflowActivationCompletion.
+    #
+    # A NATIVELY cancelled handler future (evict()'s %in_progress_handlers
+    # sweep) is dropped with no activation error by the is_cancelled guard, and
+    # the $evicting branch of the classifier covers the other eviction shape, a
+    # frame that unwinds with a failure while the sweep tears it down. Update
+    # settlement reaches the same silence by a different route: _settle_update
+    # drops EVERY eviction arm at one `return if $evicting` placed ahead of its
+    # classifier (spec F8), so no update path runs the failure converter on a
+    # dying runner.
+    #
+    # MUST-match sdk-python: a signal-handler exception runs through the SAME
+    # _run_top_level_workflow_function the main :Run body uses
+    # (worker/_workflow_instance.py:2518-2565), whose ordered branches are
+    # _ContinueAsNewError (:2521), self._deleting (:2528), CancelledError under
+    # self._cancel_requested (:2556), workflow_is_failure_exception
+    # (:1820-1835) to _set_workflow_failure (:2558-2562, FailWorkflowExecution),
+    # then self._current_activation_error (:2565, the workflow-TASK-failure
+    # route). Pre-F2 this method implemented only the last two of those, so the
+    # Cancelled that a workflow cancel delivers into a parked handler claimed
+    # the terminal slot with FailWorkflowExecution before the body could emit
+    # its CancelWorkflowExecution.
+    method _settle_signal ($future) {
+        return if $future->is_cancelled;
+        my @failure = $future->failure;
+        return unless @failure;
+
+        my $err   = $failure[0];
+        my $class = $self->_classify_failure($err);
+
+        return if $class eq 'evicting';
+
+        if ($class eq 'continue_as_new') {
+            $self->_emit_terminal_command(
+                $self->_build_continue_as_new_command($err));
+            return;
+        }
+        if ($class eq 'cancelled') {
+            # DEFER, do not emit. A parked handler is resumed by
+            # _apply_cancel_workflow FAILING its awaitable with
+            # Temporalio::Exception::Cancelled, so the handler's Future arrives
+            # here FAILED, not natively cancelled, and the is_cancelled guard
+            # above does not catch it. But it arrives MID-SWEEP: the timer sweep
+            # is third of eight, so the child / nexus / external / condition
+            # sweeps have not run and the :Run body has not unwound. Claiming
+            # the one-shot terminal slot here would drop a body's post-cancel
+            # cleanup command (spec R8 / finding T8: a body that catches
+            # Cancelled may schedule new work) via _repartition_after_terminal
+            # and suppress its later CompleteWorkflowExecution, and because body
+            # and handler can both park in %pending_timers, which one won the
+            # slot would follow hash order.
+            #
+            # The single CancelWorkflowExecution is therefore owned by the body:
+            # _outcome_for_failure's cancel branch when the body unwinds through
+            # a swept awaitable, or that same branch reached from
+            # _build_completion's is_cancelled arm when the guarded
+            # $main_run_future fallback cancelled a body parked on something
+            # untracked. Either way it is emitted after the WHOLE sweep, from
+            # _build_completion. MUST-match sdk-python, whose
+            # _apply_cancel_workflow (_workflow_instance.py:597-606) cancels
+            # self._primary_task alone, so a workflow cancel never reaches a
+            # handler coroutine's own classification in the first place.
+            return;
+        }
+        if ($class eq 'nondeterminism') {
+            $nondeterminism_error //= $err;
+            return;
+        }
+        if ($class eq 'workflow_failure') {
+            # Called for its command side effect; the completion it returns is
+            # built again by _build_completion at the end of the activation.
+            $self->_workflow_failed_completion($err);
+            return;
+        }
+        $current_activation_error //= $err;
+        return;
+    }
+
     # Invoke a resolved signal handler (spec section 10.3 ASYNC HANDLER
     # TRACKING). $handler is a unified-table descriptor (spec R86). Named
     # handlers are called with the decoded args; a dynamic handler is called
@@ -3184,14 +3377,19 @@ class Temporalio::Workflow::Runner {
             return Future->wrap($workflow_inbound->handle_signal($input));
         });
 
-        # An already-ready handler (a synchronous handler that returned or threw)
-        # needs no tracking. A pending (async) handler is tracked and removed
-        # from the in-progress set when it becomes ready. The record carries
-        # the descriptor's unfinished policy (spec R87) so the completion
-        # warning can honor a per-handler ABANDON opt-out — Python tracks the
-        # same via HandlerExecution(job.signal_name, defn.unfinished_policy)
-        # (_workflow_instance.py:2446-2447).
-        if (!$future->is_ready) {
+        # An already-ready handler (a synchronous handler that returned or
+        # threw) settles immediately (spec §I2): a sync die must be classified
+        # (via _settle_signal) in THIS activation, not vanish unobserved. A
+        # pending (async) handler is tracked and settled + removed from the
+        # in-progress set when it becomes ready. The record carries the
+        # descriptor's unfinished policy (spec R87) so the completion warning
+        # can honor a per-handler ABANDON opt-out (Python tracks the same via
+        # HandlerExecution(job.signal_name, defn.unfinished_policy),
+        # _workflow_instance.py:2446-2448).
+        if ($future->is_ready) {
+            $self->_settle_signal($future);
+        }
+        else {
             my $id = ++$handler_seq;
             $in_progress_handlers{$id} = {
                 future            => $future,
@@ -3200,7 +3398,12 @@ class Temporalio::Workflow::Runner {
                 unfinished_policy => $handler->{unfinished_policy}
                                        // 'WARN_AND_ABANDON',
             };
-            $future->on_ready(sub { delete $in_progress_handlers{$id} });
+            # on_ready hands the settled Future in as $_[0], so the closure
+            # captures only $self and $id, never $future itself.
+            $future->on_ready(sub {
+                delete $in_progress_handlers{$id};
+                $self->_settle_signal($_[0]);
+            });
         }
         return;
     }
@@ -3262,12 +3465,32 @@ class Temporalio::Workflow::Runner {
                     unfinished_policy => $bucket_pols->{$_} // 'WARN_AND_ABANDON',
                 } } keys %$bucket };
             };
+            my $validators = $wrap->($defs->{validators});
+            my $dynamic    = $wrap->($defs->{dynamic}, $pols->{dynamic} // {});
+            # Spec F7: an ATTRIBUTE-declared :UpdateValidator that names the
+            # dynamic :Update method belongs to the DYNAMIC definition, not to
+            # a named update (a dynamic handler has no update name, so the
+            # method name is the only key the attribute can carry). Promote it
+            # into the dynamic slot the runtime path writes
+            # (workflow_set_update_handler with undef $name), so
+            # _resolve_update_validator reads ONE place regardless of how the
+            # validator was registered. sdk-python reaches the same state via
+            # @workflow.update(dynamic=True) + @fn.validator, which calls
+            # set_validator on the dynamic _UpdateDefinition
+            # (workflow/_handlers.py:382). The entry is COPIED, not moved: a
+            # separately declared :Update whose NAME happens to equal that
+            # method name keeps its own validator.
+            if (my $dyn_method = $defs->{dynamic_methods}{update}) {
+                if (my $v = $validators->{$dyn_method}) {
+                    $dynamic->{update_validator} = $v;
+                }
+            }
             {
                 signals    => $wrap->($defs->{signals}, $pols->{signals} // {}),
                 queries    => $wrap->($defs->{queries}),
                 updates    => $wrap->($defs->{updates}, $pols->{updates} // {}),
-                validators => $wrap->($defs->{validators}),
-                dynamic    => $wrap->($defs->{dynamic}, $pols->{dynamic} // {}),
+                validators => $validators,
+                dynamic    => $dynamic,
             };
         };
     }
@@ -3384,9 +3607,12 @@ class Temporalio::Workflow::Runner {
     # _workflow_instance.py:1428-1447). The new definition REPLACES the old
     # wholesale (Python builds a fresh _UpdateDefinition), so an omitted
     # validator removes any previous one for that name and removing the
-    # handler drops its validator too. Only a NAMED update carries a validator
-    # here: _apply_do_update never validates a dynamic handler (its documented
-    # step 3), so a validator passed with a dynamic install is ignored.
+    # handler drops its validator too. A validator passed with a DYNAMIC
+    # install is carried on the dynamic definition too (I9, closes #9):
+    # _apply_do_update step 3 resolves it via _resolve_update_validator, the
+    # same read-only guard a named validator runs under. Python carries the
+    # validator the same way, on the _UpdateDefinition itself
+    # (workflow_get_update_validator, _workflow_instance.py:1245-1250).
     # Updates buffer only for a missing instance, never for a missing handler,
     # so there is nothing to drain.
     method workflow_set_update_handler ($name, $handler, $validator = undef) {
@@ -3410,6 +3636,14 @@ class Temporalio::Workflow::Runner {
             }
             else {
                 $h->{dynamic}{update} = $desc;
+                if (defined $validator) {
+                    $h->{dynamic}{update_validator} =
+                        { code => $validator, is_method => 0,
+                          unfinished_policy => 'WARN_AND_ABANDON' };
+                }
+                else {
+                    delete $h->{dynamic}{update_validator};
+                }
             }
         }
         else {
@@ -3419,6 +3653,7 @@ class Temporalio::Workflow::Runner {
             }
             else {
                 delete $h->{dynamic}{update};
+                delete $h->{dynamic}{update_validator};
             }
         }
         return;
@@ -3477,13 +3712,36 @@ class Temporalio::Workflow::Runner {
             (($job->input // [])->@*);
 
         # --- validation phase (sync, read-only) ------------------------------
-        # A named handler with a registered validator is validated only when the
-        # job asks (run_validator is false on replay). A dynamic handler is never
-        # validated (there is no dynamic validator).
-        if ($job->run_validator && !$is_dynamic) {
-            my $validator = $self->_handlers->{validators}{$name};
+        # A named handler is validated against its OWN named validator only,
+        # never falling back to the dynamic validator for a named update that
+        # has none (mirrors Python's handle_update_validator comment,
+        # _workflow_instance.py:2938-2941: "we shouldn't fall back to the
+        # dynamic validator for some defined, named update which doesn't have
+        # a defined validator"). A dynamic handler is validated against the
+        # dynamic definition's validator, when one was registered (I9, closes
+        # #9). Either way, validation runs only when the job asks
+        # (run_validator is false on replay).
+        if ($job->run_validator) {
+            my $validator = $self->_resolve_update_validator($name, $is_dynamic);
             if (defined $validator) {
-                my $result = $self->_run_update_validator($validator, \@args);
+                # The validator and the handler are handed the SAME Input
+                # shape and the SAME argument list: the bare decoded @args on
+                # the Input, with the update name prepended by the `_root`
+                # coderef on the dynamic path only. sdk-python builds the list
+                # ONCE via _process_handler_args and feeds one HandleUpdateInput
+                # to both handle_update_validator and handle_update_handler
+                # (_workflow_instance.py:2400-2414, :650, :667). Keep
+                # _run_update_validator and the acceptance phase below in
+                # lockstep. The two Inputs get SEPARATE shallow copies of
+                # @args, so an interceptor that rewrites args inside
+                # validate_update cannot reach the handler. sdk-python goes
+                # further and re-decodes the payloads for the handler after
+                # validation (_workflow_instance.py:651-658), where we hand
+                # each phase a shallow copy, so an in-place mutation of a
+                # reference-typed argument by a validator can still reach the
+                # handler here (pre-existing difference, not introduced by I9).
+                my $result = $self->_run_update_validator(
+                    $validator, $job->id // '', $name, $is_dynamic, \@args);
                 # A read-only-context violation is a workflow TASK failure: the
                 # error is stashed and the outcome table routes it (no
                 # UpdateResponse emitted).
@@ -3571,6 +3829,21 @@ class Temporalio::Workflow::Runner {
         return (undef);
     }
 
+    # Resolve the validator for an update (I9, closes #9; mirrors sdk-python
+    # workflow_get_update_validator, _workflow_instance.py:1245-1250, and the
+    # no-fallback rule at :2938-2941). $is_dynamic comes from the paired
+    # _resolve_update_handler call, so this ALWAYS agrees with which
+    # definition actually handled the update: a named update validates
+    # against its own named validator only (never the dynamic one), and a
+    # dynamic update validates against the dynamic definition's validator, if
+    # one was registered (workflow_set_update_handler, undef $name). Returns
+    # the validator descriptor or undef.
+    method _resolve_update_validator ($name, $is_dynamic) {
+        my $h = $self->_handlers;
+        return $is_dynamic ? $h->{dynamic}{update_validator}
+                            : $h->{validators}{$name};
+    }
+
     # durable_scheduler_disabled($code) — run $code with the durable scheduler
     # disabled (spec section 27.4). Raises $durable_suppress_depth for the
     # duration of the block via Syntax::Keyword::Dynamically so it unwinds even
@@ -3586,27 +3859,51 @@ class Temporalio::Workflow::Runner {
     # True while a durable_scheduler_disabled block is on the stack.
     method durable_scheduler_suppressed { return $durable_suppress_depth > 0 ? 1 : 0 }
 
-    # Run a sync update validator under the read-only guard (spec section 19.2
-    # step 3). Returns a hashref:
-    #   { rejected => $failure_proto }  — the validator threw a normal failure
-    #   { task_failure => 1 }           — the validator violated read-only
-    #   {}                              — the validator passed (accept)
+    # Run a sync update validator through the workflow-INBOUND chain under the
+    # read-only guard (spec section 19.2 step 3, spec F7). Returns a hashref:
+    #   { rejected => $failure_proto }  the validator threw a normal failure,
+    #                                   or was not synchronous (see below)
+    #   { task_failure => 1 }           the validator violated read-only
+    #   {}                              the validator passed (accept)
     # A read-only violation (the validator issued a command) is routed as a
     # workflow TASK failure via $current_activation_error.
-    method _run_update_validator ($validator, $args) {
+    #
+    # The chain call is $workflow_inbound->validate_update($input), the analog
+    # of sdk-python's `self._inbound.handle_update_validator(handler_input)`
+    # inside `with self._as_read_only(in_query_or_validator=True)`
+    # (_workflow_instance.py:650). An interceptor overriding validate_update
+    # therefore observes every validated update, named or dynamic, and may
+    # rewrite the Input's args before the validator sees them. The caller has
+    # already resolved WHICH validator applies (_resolve_update_validator, and
+    # the no-fallback rule with it), so the chain root just calls `_root`.
+    method _run_update_validator ($validator, $id, $name, $is_dynamic, $args) {
         my $commands_before = scalar @commands;
         my $future = Future->call(sub {
             dynamically $read_only_depth = $read_only_depth + 1;
-            return Future->wrap($self->_invoke_handler($validator, @$args));
+            my $input =
+                Temporalio::Worker::Interceptor::Input::HandleUpdate->new(
+                    id     => $id,
+                    update => $name,
+                    args   => [@$args],
+                    _root  => sub ($in) {
+                        return $self->_invoke_handler($validator,
+                            $is_dynamic
+                                ? ($name, @{ $in->args })
+                                : @{ $in->args });
+                    },
+                );
+            return Future->wrap($workflow_inbound->validate_update($input));
         });
         # Leak backstop (step R24 REFACTOR, finding R8; mirrors
         # _apply_query_workflow): commands buffered by an unguarded API inside
         # the read-only scope are stripped, and a validator that leaked without
         # dying is routed as the same task failure the guard would have raised.
+        # ->failure is only legal on a READY Future (a pending one croaks from
+        # ->await), so the readiness check comes first here and again below.
         my $leaked = scalar(@commands) - $commands_before;
         if ($leaked > 0) {
             splice @commands, $commands_before, $leaked;
-            if (!$future->failure) {
+            if (!($future->is_ready && $future->failure)) {
                 $current_activation_error //= Temporalio::Exception::ReadOnly->new(
                     message => "Temporalio::Workflow::Runner: update validator "
                              . "emitted $leaked command(s) from a read-only "
@@ -3615,6 +3912,31 @@ class Temporalio::Workflow::Runner {
                 );
                 return { task_failure => 1 };
             }
+        }
+        # Spec F7: an update validator MUST be synchronous. sdk-python calls it
+        # as `handler(*input.args)` with no await (_workflow_instance.py:2938
+        # -2945), so an `async def` validator there hands back an un-awaited
+        # coroutine that is merely truthy and the update is accepted
+        # unvalidated. Perl sees the same mistake as a Future that is not
+        # ready, and REJECTS the update: a rejection is deterministic (the same
+        # decision on every replay) and tells the caller what to fix, where
+        # accepting would ship an unvalidated update and a task failure would
+        # wedge the workflow task in a retry loop. The abandoned Future is
+        # cancelled so nothing keeps waiting on a result no one will read.
+        if (!$future->is_ready) {
+            $future->cancel;
+            return {
+                rejected => $failure_converter->to_failure(
+                    Temporalio::Exception::Application->new(
+                        message => "Update validator for '$name' must be "
+                                 . "synchronous: it returned a Future that is "
+                                 . "not ready. Do the checks inline and throw "
+                                 . "to reject; move any awaiting into the "
+                                 . "update handler.",
+                        type => 'AsyncUpdateValidator',
+                    ),
+                    $payload_converter),
+            };
         }
         if (my @failure = $future->failure) {
             my $err = $failure[0];
@@ -3649,16 +3971,39 @@ class Temporalio::Workflow::Runner {
     #   cancelled  1         1             ()         croaks "... was cancelled"
     # A cancelled future passes the ->failure check EMPTY and then ->result
     # croaks: the pre-fix _settle_update death that aborted evict() before it
-    # could send the eviction completion. The only producer of a natively
-    # cancelled handler future is evict()'s %in_progress_handlers sweep, and
-    # the eviction contract is DROP: no UpdateResponse, no activation error,
-    # matching sdk-python where the update task's teardown exception during
-    # eviction is swallowed with no response (_workflow_instance.py
-    # run_update, `except BaseException` under self._deleting). A task-cancel
-    # OUTSIDE eviction is the rejected branch instead: the workflow cancel
-    # chain throws Temporalio::Exception::Cancelled INTO the handler, so its
-    # future arrives here FAILED (sdk-python parity: asyncio.CancelledError
-    # becomes a Temporal CancelledError and rejects the update).
+    # could send the eviction completion.
+    #
+    # evict()'s sweep leaves a parked handler in one of TWO shapes, depending
+    # on what the handler parked on:
+    #
+    #   plain-future park (R17, WfDef::PlainFutureUpdater) - the tracked
+    #     handler future is natively cancellable, so the %in_progress_handlers
+    #     pass cancels it and Future::AsyncAwait discards the suspended frame
+    #     without unwinding it, leaving the handler future CANCELLED.
+    #   condition park (I1, WfDef::UpdateParker `park`) - wait_condition's
+    #     _ConditionFuture cancels by ->fail(Cancelled), so the @conditions
+    #     sweep RESUMES the frame and the handler future ends up FAILED with a
+    #     Cancelled, which reads exactly like a post-accept rejection.
+    #
+    # NEITHER shape reaches this classifier during eviction. _settle_update's
+    # `return if $evicting` (spec F8) sits ahead of the call and cuts off every
+    # arm, the completed one a resuming frame can produce included, so the
+    # failure converter never runs on a dying runner. The eviction drop is that
+    # early return, NOT the is_cancelled guard below. The guard is kept for the
+    # L7 direct-call contract stated above (t/unit/settle_update_states.t calls
+    # this method directly with each of the three future states) and as defense
+    # in depth if some later caller settles a swept handler outside
+    # _settle_update.
+    #
+    # Dropping both shapes matches sdk-python, where a handler's teardown
+    # exception during eviction is swallowed with no response (run_update's
+    # `except BaseException` under self._deleting, _workflow_instance.py
+    # :710-717) and no command can be added at all while deleting (:2093-2095).
+    # A task-cancel OUTSIDE eviction is the rejected branch instead: the
+    # workflow cancel chain throws Temporalio::Exception::Cancelled INTO the
+    # handler, so its future arrives here FAILED (sdk-python parity:
+    # asyncio.CancelledError becomes a Temporal CancelledError and rejects the
+    # update).
     method _update_settlement ($future) {
         return { dropped => 1 } if $future->is_cancelled;
         if (my @failure = $future->failure) {
@@ -3676,10 +4021,36 @@ class Temporalio::Workflow::Runner {
     # Settle an accepted update once its handler Future is ready (spec section
     # 19.2 step 4): a returned value -> UpdateResponse.completed; a Temporal
     # failure-type throw -> UpdateResponse.rejected (post-accept); any other die
-    # -> a workflow TASK failure; a cancelled handler future (eviction, spec
-    # R17) -> dropped, no response. Classification lives in _update_settlement
-    # so the three-state contract is unit-testable directly.
+    # -> a workflow TASK failure; a handler future settled by eviction ->
+    # dropped, no response. Classification lives in _update_settlement so the
+    # three-state contract is unit-testable directly.
     method _settle_update ($protocol_instance_id, $future) {
+        # Spec F8: under eviction an update settles SILENTLY, whatever its
+        # outcome. The field is read directly rather than through
+        # _classify_failure (the route _settle_signal takes) because the
+        # classifier only sees a FAILURE value, while eviction has to suppress
+        # the completed and task-failure arms as well: a handler that returned
+        # normally on the resuming frame would otherwise push an
+        # UpdateResponse.completed onto a runner being torn down.
+        #
+        # The guard also has to sit AHEAD of _update_settlement, not inside it:
+        # the rejected arm converts $err through the failure converter, and a
+        # converter that dies there takes evict() with it, so the RemoveFromCache
+        # completion is never sent (t/replay/evict_pending_update_wait_condition.t,
+        # 'a failure converter that dies does not escape evict()'). Externally
+        # the emitted command was already harmless, because
+        # WorkflowDispatcher::_handle_eviction deletes the runner before calling
+        # evict and sends its own fixed empty-success completion; the CALL was
+        # the exposure.
+        #
+        # MUST-match sdk-python, which refuses at both layers: _add_command
+        # raises _WorkflowBeingEvictedError while self._deleting
+        # (worker/_workflow_instance.py:2076-2078 via _assert_not_read_only,
+        # :2093-2095), so run_update never reaches its to_failure call, and
+        # run_update's outer `except BaseException: if self._deleting: return`
+        # (:710-717) swallows whatever still escapes.
+        return if $evicting;
+
         my $settlement = $self->_update_settlement($future);
         return if $settlement->{dropped};
         if (exists $settlement->{task_failure}) {
@@ -3935,6 +4306,41 @@ class Temporalio::Workflow::Runner {
         return 1;
     }
 
+    # Restore the "terminal command last" invariant when something was pushed
+    # after it (spec R13 / spec F2). Only a HANDLER settlement can produce this
+    # shape: the body's own terminal command is emitted by _build_completion,
+    # after every job in the activation has already been applied, so nothing can
+    # follow it. A handler settles the moment its Future is ready, which for a
+    # sync handler is mid-job-application.
+    #
+    # The rewrite keeps the commands that preceded the terminal one as they are
+    # (_workflow_failed_completion has already partitioned those), keeps only
+    # the handler RESPONSES from what followed, and puts the terminal command
+    # last. A no-op unless the terminal command was emitted AND something
+    # followed it, so an ordinary completion (the body's own terminal command,
+    # already last) is untouched and its state-mutating commands are not
+    # disturbed.
+    method _repartition_after_terminal {
+        return unless $workflow_terminal_emitted;
+
+        my $at = -1;
+        for my $i (0 .. $#commands) {
+            next unless _is_workflow_terminal_command($commands[$i]);
+            $at = $i;
+            last;
+        }
+        # $at < 0: the terminal command was emitted on an EARLIER activation
+        # (@commands is per-activation), so there is nothing to reorder here.
+        return if $at < 0 || $at == $#commands;
+
+        my $terminal = $commands[$at];
+        my @head     = @commands[ 0 .. $at - 1 ];
+        my @tail     = grep { _is_handler_response_command($_) }
+            @commands[ $at + 1 .. $#commands ];
+        @commands = (@head, @tail, $terminal);
+        return;
+    }
+
     # Build the WorkflowActivationCompletion from the run outcome + command
     # buffer. This is the spec section 10.3 step 6 OUTCOME DECISION TABLE
     # (MUST-match sdk-python _run_top_level_workflow_function /
@@ -3956,6 +4362,18 @@ class Temporalio::Workflow::Runner {
     #   - The run method returned a value -> CompleteWorkflowExecution { result }
     #     (T-wf-11); a still-blocked body emits its buffered commands only.
     method _build_completion {
+        # 0. Re-partition around a HANDLER-emitted terminal command (spec R13,
+        #    spec F2). A handler settles mid-activation, so it can claim the
+        #    one-shot terminal slot while jobs are still being applied: a later
+        #    job in the SAME activation (another signal that schedules work, a
+        #    query answered in job set 3) then pushes its command AFTER the
+        #    terminal one, and core rejects any command past the terminal. The
+        #    keep-list is the same one _workflow_failed_completion uses: handler
+        #    RESPONSES survive (they answer a caller waiting on this activation)
+        #    and the state-mutating commands the server will never act on past
+        #    the terminal are dropped.
+        $self->_repartition_after_terminal;
+
         # 1. Non-determinism takes precedence (it is an activation-level fault,
         #    detected while applying jobs, before the run body even ran).
         if (defined $nondeterminism_error) {
@@ -4028,26 +4446,83 @@ class Temporalio::Workflow::Runner {
         return $self->_successful_completion;
     }
 
-    # Route a value that escaped :Run through the failure decision table.
+    # THE shared failure classifier (spec F2). Pure: it reads $err and the
+    # run-scoped flags and returns one label, emitting nothing and mutating
+    # nothing, so both consumers (the :Run body's _outcome_for_failure and
+    # handler settlement in _settle_signal) decide identically and a new branch
+    # cannot be added to one path and forgotten on the other. The ORDER is the
+    # contract, not an implementation detail:
+    #
+    #   1. evicting         the run is being torn down; nothing may be emitted.
+    #   2. continue_as_new  a control signal, NOT a failure, so it is caught
+    #                       before anything can convert it to an error.
+    #   3. cancelled        a Cancelled that ARRIVED WITH a cancel request.
+    #                       Gated on $cancel_requested because a Cancelled with
+    #                       no cancel request is an ordinary failure.
+    #   4. nondeterminism   ahead of the generic Temporal-failure branch, which
+    #                       would otherwise fail the WORKFLOW because
+    #                       Nondeterminism isa Temporalio::Exception. The caller
+    #                       applies the nondeterminism_as_workflow_fail policy.
+    #   5. workflow_failure a Temporal failure exception, or a class the worker
+    #                       listed in workflow_failure_exception_types.
+    #   6. task_failure     anything else: a plain die, a foreign unlisted
+    #                       object.
+    #
+    # MUST-match sdk-python _run_top_level_workflow_function
+    # (worker/_workflow_instance.py:2518-2565), which wraps the run body and
+    # every handler coroutine alike and tests, in order: _ContinueAsNewError
+    # (its own except clause, :2521, repeated defensively at :2536), then inside
+    # the generic clause self._deleting (:2528), CancelledError under
+    # self._cancel_requested (:2556), workflow_is_failure_exception (:2560),
+    # and self._current_activation_error (:2565). Branch 4 below has no Python
+    # counterpart in that function: Python leaves non-determinism to sdk-core,
+    # while Perl's in-language determinism guard (spec section 29.4) raises
+    # Temporalio::Exception::Nondeterminism, which must be caught ahead of the
+    # generic Temporal-failure branch it would otherwise satisfy.
+    method _classify_failure ($err) {
+        return 'evicting' if $evicting;
+
+        my $blessed = Scalar::Util::blessed($err);
+
+        return 'continue_as_new'
+            if $blessed && $err->isa('Temporalio::Workflow::ContinueAsNew');
+
+        return 'cancelled'
+            if $cancel_requested
+            && $blessed
+            && $err->isa('Temporalio::Exception::Cancelled');
+
+        return 'nondeterminism'
+            if $blessed && $err->isa('Temporalio::Exception::Nondeterminism');
+
+        return 'workflow_failure'
+            if $self->_is_workflow_failure_exception($err);
+
+        return 'task_failure';
+    }
+
+    # Route a value that escaped :Run through the failure decision table. The
+    # decision itself lives in _classify_failure, shared with _settle_signal;
+    # this method owns only the body path's completion shape for each label.
     method _outcome_for_failure ($err) {
-        # continue_as_new: a control signal, NOT a failure — caught first so it
-        # is never converted as an error (mirrors sdk-python catching
-        # _ContinueAsNewError before the generic Exception branch).
-        if (Scalar::Util::blessed($err)
-            && $err->isa('Temporalio::Workflow::ContinueAsNew'))
-        {
+        my $class = $self->_classify_failure($err);
+
+        # Unreachable on the body path today: evict() cancels the run Future
+        # but never builds a completion (WorkflowDispatcher::_handle_eviction
+        # sends its own fixed empty success), so nothing routes a body failure
+        # here while $evicting is set. Kept so the classifier's first branch has
+        # a defined meaning for BOTH consumers: emit nothing.
+        if ($class eq 'evicting') {
+            return $self->_successful_completion;
+        }
+
+        if ($class eq 'continue_as_new') {
             $self->_emit_terminal_command(
                 $self->_build_continue_as_new_command($err));
             return $self->_successful_completion;
         }
 
-        # Cancelled after a CancelWorkflow job -> CancelWorkflowExecution (NOT a
-        # FailWorkflowExecution). Gated on cancel_requested: a Cancelled with no
-        # cancel request is a normal failure (sdk-python self._cancel_requested).
-        if ($cancel_requested
-            && Scalar::Util::blessed($err)
-            && $err->isa('Temporalio::Exception::Cancelled'))
-        {
+        if ($class eq 'cancelled') {
             # Guarded so a post-cancel activation (e.g. core resolving the
             # try_cancel activity, #6) never re-emits a second Cancel.
             $self->_emit_terminal_command(
@@ -4056,27 +4531,20 @@ class Temporalio::Workflow::Runner {
         }
 
         # A Nondeterminism escaping :Run (e.g. the determinism guard trapped a
-        # time/entropy builtin in the body — spec §29.4) routes the SAME as a
+        # time/entropy builtin in the body, spec §29.4) routes the SAME as a
         # recorded non-determinism: a workflow-TASK failure by default (the
         # server retries the task), a workflow failure only when
-        # nondeterminism_as_workflow_fail is set. This is checked BEFORE the
-        # generic Temporal-failure branch below, which would otherwise fail the
-        # WORKFLOW because Nondeterminism isa Temporalio::Exception.
-        if (Scalar::Util::blessed($err)
-            && $err->isa('Temporalio::Exception::Nondeterminism'))
-        {
+        # nondeterminism_as_workflow_fail is set.
+        if ($class eq 'nondeterminism') {
             return $nondeterminism_as_workflow_fail
                 ? $self->_workflow_failed_completion($err)
                 : $self->_task_failed_completion($err);
         }
 
-        # A Temporal failure exception, or a class listed in
-        # workflow_failure_exception_types, fails the WORKFLOW.
-        if ($self->_is_workflow_failure_exception($err)) {
+        if ($class eq 'workflow_failure') {
             return $self->_workflow_failed_completion($err);
         }
 
-        # Anything else (plain die, foreign object not listed) fails the TASK.
         return $self->_task_failed_completion($err);
     }
 
@@ -4117,7 +4585,8 @@ class Temporalio::Workflow::Runner {
         ) {
             my ($opt, $field) = @$pair;
             next unless defined $opts{$opt};
-            $fields{$field} = _duration($opts{$opt});
+            $fields{$field} =
+                Temporalio::Core::Proto::duration_from_seconds($opts{$opt});
         }
 
         if (defined(my $rp = $opts{retry_policy})) {
@@ -4218,6 +4687,17 @@ class Temporalio::Workflow::Runner {
         return $variant eq 'respond_to_query' || $variant eq 'update_response';
     }
 
+    # True when $cmd is one of the four "this run is over" commands, the ones
+    # _emit_terminal_command rations to at most one per run. Nothing may follow
+    # the terminal command in a completion; core rejects the sequence.
+    sub _is_workflow_terminal_command ($cmd) {
+        my $variant = $cmd->which_variant // '';
+        return $variant eq 'complete_workflow_execution'
+            || $variant eq 'fail_workflow_execution'
+            || $variant eq 'cancel_workflow_execution'
+            || $variant eq 'continue_as_new_workflow_execution';
+    }
+
     # True when the command list contains a RespondToQuery whose query_id is the
     # sentinel "legacy_query" (sdk-core LEGACY_QUERY_ID).
     sub _has_legacy_query_response ($cmds) {
@@ -4249,8 +4729,14 @@ class Temporalio::Workflow::Runner {
         # Partition, don't clear: keep the handler responses, drop the
         # state-mutating commands. Routed through the shared terminal-command
         # guard (#6/#7) so a post-terminal activation cannot re-emit a second
-        # Fail; when already terminal, only the surviving responses remain.
-        @commands = grep { _is_handler_response_command($_) } @commands;
+        # Fail. An ALREADY-EMITTED terminal command is kept too (spec F2): a
+        # handler settlement can claim the slot mid-activation, and the
+        # _emit_terminal_command call below is then suppressed, so dropping the
+        # handler's command here would leave the completion with no terminal
+        # command at all. _repartition_after_terminal has already moved it last.
+        @commands = grep {
+            _is_handler_response_command($_) || _is_workflow_terminal_command($_)
+        } @commands;
         my $failure = $failure_converter->to_failure($err, $payload_converter);
         $self->_emit_terminal_command(
             Temporalio::Workflow::Commands::fail_workflow_execution($failure));
@@ -4396,16 +4882,9 @@ class Temporalio::Workflow::Runner {
                  . "'$name'";
     }
 
-    # Seconds (float) -> google.protobuf.Duration { seconds, nanos }. Mirrors
-    # Temporalio::Common::RetryPolicy::_duration; the activity timeouts cross
-    # the wire as Durations.
-    sub _duration ($seconds) {
-        my $Duration = Temporalio::Core::Proto::resolve(
-            'google.protobuf.Duration');
-        my $whole = int($seconds);
-        my $nanos = int(($seconds - $whole) * 1_000_000_000 + 0.5);
-        return $Duration->new({ seconds => $whole, nanos => $nanos });
-    }
+    # The seconds<->google.protobuf.Duration conversion pair lives in
+    # Temporalio::Core::Proto (I14; formerly a local _duration helper here);
+    # the activity timeouts cross the wire as Durations.
 }
 
 # A Workflow::Future for timers whose ->cancel maps to a Temporalio::Exception::
@@ -4689,51 +5168,118 @@ L<Temporalio::Exception::Cancelled> after emitting C<CancelTimer>.
 
 =head2 Completion-outcome decision table (spec section 10.3 step 6)
 
-C<_build_completion> routes the run outcome to one of:
+A value that escapes the C<:Run> body and a value that escapes a C<:Signal>
+handler are classified by the SAME ordered table, C<_classify_failure> (spec
+F2, GitHub issue #2). It is a pure function of the value plus the run-scoped
+flags: it emits nothing and records nothing, and returns one of C<evicting>,
+C<continue_as_new>, C<cancelled>, C<nondeterminism>, C<workflow_failure>, or
+C<task_failure>. The body path (C<_outcome_for_failure>, reached from
+C<_build_completion>) and handler settlement (C<_settle_signal>) each consume
+that label and dispatch to the same emitters, so the two paths cannot drift.
+This is the Perl equivalent of sdk-python wrapping the run coroutine AND every
+handler coroutine in one C<_run_top_level_workflow_function>
+(C<worker/_workflow_instance.py:2518-2565>).
+
+The order is the contract:
 
 =over 4
 
 =item *
 
-A non-determinism error this activation (e.g. a C<ResolveActivity> for a
-sequence the workflow never emitted) — a workflow B<task> failure by default,
-or C<FailWorkflowExecution> when C<nondeterminism_as_workflow_fail> is set
-(T-wf-13).
+C<evicting>: C<evict> is tearing the run down, so nothing is emitted and
+nothing is recorded. Eviction cancels every parked timer, activity, condition,
+and handler Future, and each cancel resumes a suspended frame whose unwind
+failure would otherwise claim the one-shot workflow-terminal command slot or
+be recorded as a workflow task failure; neither survives the eviction, which
+sends a fixed empty successful completion. MUST-match sdk-python's
+C<self._deleting>.
+
+Update settlement (C<_settle_update>) takes the same drop, but reads the
+eviction flag directly rather than through this table (spec F8): an update
+also has a C<completed> arm and a task-failure arm to silence, and its
+rejection arm runs the failure converter, so it has to bail out before any
+converter call rather than after classifying one. sdk-python is the same
+shape from the other direction: while C<self._deleting> no command may be
+added at all (C<_add_command> raises C<_WorkflowBeingEvictedError>), and
+C<run_update> swallows whatever still escapes.
 
 =item *
 
-A C<continue_as_new> control signal (L<Temporalio::Workflow::ContinueAsNew>)
-escaping C<:Run> — C<ContinueAsNewWorkflowExecution> carrying the new args and
-type/task-queue/policy overrides (T-wf-8).
+C<continue_as_new>: a C<continue_as_new> control signal
+(L<Temporalio::Workflow::ContinueAsNew>), which is deliberately not a
+L<Temporalio::Exception>, so it is caught before anything can convert it to an
+error. Emits C<ContinueAsNewWorkflowExecution> carrying the new args and
+type/task-queue/policy overrides (T-wf-8). Raising it from a C<:Signal>
+handler continues the run exactly as raising it from C<:Run> does.
 
 =item *
 
-A L<Temporalio::Exception::Cancelled> escaping after a C<CancelWorkflow> job —
-C<CancelWorkflowExecution> (NOT a failure) (T-wf-12).
+C<cancelled>: a L<Temporalio::Exception::Cancelled> that arrived WITH a cancel
+request. Emits C<CancelWorkflowExecution>, not a failure (T-wf-12). Gated on
+the cancel request because a Cancelled with no cancel request is an ordinary
+failure. This is the one branch where the two consumers act differently, and
+deliberately so. C<_apply_cancel_workflow> delivers cancellation by FAILING each
+parked awaitable with Cancelled, so a C<:Signal> handler parked on a timer or a
+C<wait_condition> unwinds with a Cancelled failure (not a native Future cancel)
+and reaches this branch too. But it reaches it MID-SWEEP, before the later
+sweeps have run and before the C<:Run> body has unwound, so the handler DEFERS
+and emits nothing: a body that catches Cancelled and schedules post-cancel
+cleanup (spec R8) would otherwise lose that cleanup command to the
+terminal-command partition, and with body and handler both parked on timers,
+which of them claimed the one-shot slot would follow hash order. The run's
+single C<CancelWorkflowExecution> is owned by the body, emitted from
+C<_build_completion> after the whole sweep. sdk-python has no equivalent
+question: its C<_apply_cancel_workflow> cancels the primary task only, so a
+workflow cancel is never delivered into a handler coroutine.
 
 =item *
 
-A Temporal failure exception (any C<Temporalio::Exception::*>) or a class
-listed in C<workflow_failure_exception_types> — C<FailWorkflowExecution>
-(T-wf-15b/c). Query and update responses buffered in the same activation
-survive alongside the fail command; only state-mutating commands are dropped
-(spec R13, sdk-python parity).
+C<nondeterminism>: a L<Temporalio::Exception::Nondeterminism>, whether recorded
+during job application (e.g. a C<ResolveActivity> for a sequence the workflow
+never emitted) or raised out of the body or a handler. A workflow B<task>
+failure by default, C<FailWorkflowExecution> when
+C<nondeterminism_as_workflow_fail> is set (T-wf-13). Ordered ahead of the
+generic Temporal-failure branch, which would otherwise fail the workflow
+because Nondeterminism is itself a L<Temporalio::Exception>.
 
 =item *
 
-Any other exception (a plain C<die>, a foreign class not listed) — the entire
-completion is C<failed>: a workflow B<task> failure the server retries
-(T-wf-15a).
+C<workflow_failure>: a Temporal failure exception (any
+C<Temporalio::Exception::*>) or a class listed in
+C<workflow_failure_exception_types>. Emits C<FailWorkflowExecution>
+(T-wf-15b/c), matching sdk-python's C<workflow_is_failure_exception> check that
+leads to C<_set_workflow_failure> (C<_workflow_instance.py:2560-2562>). Query
+and update responses buffered in the same activation survive alongside the fail
+command; only state-mutating commands are dropped (spec R13, sdk-python
+parity).
 
 =item *
 
-A normal return — C<CompleteWorkflowExecution { result }> (T-wf-11).
+C<task_failure>: anything else (a plain C<die>, a foreign class not listed).
+The entire completion is C<failed>: a workflow B<task> failure the server
+retries (T-wf-15a), matching sdk-python's C<_current_activation_error> fallback
+(C<_workflow_instance.py:2563-2565>). A signal has no response channel to
+reject through, so this is where a plain or foreign die from a C<:Signal>
+handler lands too.
 
 =back
 
-Query and update responses ride the same per-activation command buffer as
-these outcome commands; C<RemoveFromCache> eviction is consumed by the
-dispatcher's fast path and never reaches the runner.
+A C<:Run> body that returns normally instead of failing completes the workflow:
+C<CompleteWorkflowExecution { result }> (T-wf-11).
+
+Query and update responses ride the same per-activation command buffer as these
+outcome commands. A handler settles the moment its Future is ready, which for a
+synchronous handler is mid-job-application, so a handler CAN claim the terminal
+command slot while later jobs in the same activation are still pushing
+commands. C<_build_completion> re-runs the spec R13 partition in that case
+(C<_repartition_after_terminal>): the handler responses survive, the
+state-mutating commands the server would never act on past the terminal are
+dropped, and the terminal command ends up last, which is the only sequence core
+accepts.
+
+C<RemoveFromCache> is consumed by the dispatcher's eviction fast path, which
+builds no completion from the runner; it calls C<evict> for the teardown and
+sends a fixed empty successful completion of its own.
 
 =head2 Sequence numbers
 

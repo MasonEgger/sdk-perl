@@ -32,6 +32,13 @@ class Temporalio::Worker::_RootWorkflowInbound
     method execute_workflow { $_[0]->get('_root')->($_[0]) }
     method handle_signal    { $_[0]->get('_root')->($_[0]) }
     method handle_query     { $_[0]->get('_root')->($_[0]) }
+    # validate_update runs the update's validator (spec F7), the analog of
+    # sdk-python's _WorkflowInboundImpl.handle_update_validator
+    # (_workflow_instance.py:2938-2945). The Runner resolves the validator
+    # before building the input and stashes the call in `_root`, so the
+    # no-fallback rule lives in ONE place (_resolve_update_validator) instead
+    # of being re-derived here the way Python re-derives it.
+    method validate_update  { $_[0]->get('_root')->($_[0]) }
     method handle_update    { $_[0]->get('_root')->($_[0]) }
 }
 

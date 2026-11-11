@@ -484,12 +484,21 @@ class Temporalio::Client::WorkflowHandle {
     # is at least ACCEPTED (durability), then returns a
     # Temporalio::Client::WorkflowUpdateHandle seeded with the ref and any
     # returned outcome. 'admitted' is rejected with Argument before any RPC.
-    # %opts: update_id (default a fresh UUID), wait_for_stage.
+    # %opts: update_id (default a fresh UUID), wait_for_stage, result_type (I8 /
+    # GitHub issue #8: optional decode hint for the eventual result, threaded to
+    # _update_handle exactly as get_update_handle already does, and from there
+    # to the payload converter as the decode type hint on both branches of
+    # WorkflowUpdateHandle::result. Python parity: WorkflowHandle.start_update
+    # result_type, ../sdk-python temporalio/client/_workflow.py:903, carried on
+    # the interceptor input as StartWorkflowUpdateInput.ret_type
+    # (client/_interceptor.py:321) and read back to build the handle at
+    # client/_impl.py:766.
     async method start_update ($name, $args = [], %opts) {
         # Also guards execute_update, which funnels its caller options here.
         Temporalio::Common::Options::assert_known_keys(
             'WorkflowHandle->start_update', \%opts,
-            { headers => 1, wait_for_stage => 1, update_id => 1 });
+            { headers => 1, wait_for_stage => 1, update_id => 1,
+              result_type => 1 });
         Temporalio::Exception::Argument->throw(
             message => 'start_update requires an update name (string)')
             unless defined $name && !ref $name && length $name;
@@ -524,6 +533,7 @@ class Temporalio::Client::WorkflowHandle {
                          . "'accepted' or 'completed')");
 
         my $update_id = delete $opts{update_id} // Temporalio::Client::_new_uuid();
+        my $result_type = delete $opts{result_type};
 
         my $WaitPolicy = _resolve('temporal.api.update.v1.WaitPolicy');
         my $Meta       = _resolve('temporal.api.update.v1.Meta');
@@ -564,7 +574,8 @@ class Temporalio::Client::WorkflowHandle {
         }
 
         return $self->_update_handle($update_id,
-            known_outcome => $response->outcome);
+            known_outcome => $response->outcome,
+            result_type   => $result_type);
     }
 
     # get_update_handle($update_id, run_id => ..., result_type => ...) — build
@@ -619,6 +630,29 @@ class Temporalio::Client::WorkflowHandle {
             wait_new_event    => $opts{wait_new_event} ? 1 : 0,
             event_filter_type => $filter,
             skip_archival     => $opts{skip_archival} ? 1 : 0,
+        );
+    }
+
+    # fetch_history(...): the WorkflowHistory assembler over
+    # fetch_history_events (spec I11 / GitHub issue #11; sdk-python
+    # client/_workflow.py:391 fetch_history, which drains
+    # fetch_history_events into a WorkflowHistory(workflow_id, events)). Takes
+    # the SAME known-keys set as fetch_history_events (:616-630) and passes
+    # them straight through; a thin assembler, no iterator logic of its own.
+    async method fetch_history (%opts) {
+        Temporalio::Common::Options::assert_known_keys(
+            'WorkflowHandle->fetch_history', \%opts,
+            { page_size => 1, wait_new_event => 1, event_filter_type => 1,
+              skip_archival => 1 });
+        require Temporalio::Client::WorkflowHistory;
+        my $iterator = $self->fetch_history_events(%opts);
+        my @events;
+        while (defined(my $event = await $iterator->next)) {
+            push @events, $event;
+        }
+        return Temporalio::Client::WorkflowHistory->new(
+            workflow_id => $workflow_id,
+            events      => \@events,
         );
     }
 
@@ -754,6 +788,45 @@ value always wins, and with neither set the request field stays unset.
 C<fetch_history_events>
 returns an async iterator over the workflow's history events.
 
+=head2 fetch_history
+
+    my $history = await $handle->fetch_history;
+    my $history = await $handle->fetch_history(
+        page_size => 100, event_filter_type => 1, skip_archival => 0);
+
+Drains C<fetch_history_events> into a L<Temporalio::Client::WorkflowHistory>
+carrying this handle's C<workflow_id> and every fetched event, in order
+(spec I11; sdk-python C<client/_workflow.py> C<fetch_history>). It is a
+thin assembler over C<fetch_history_events> and accepts the exact same
+option keys (C<page_size>, C<wait_new_event>, C<event_filter_type>,
+C<skip_archival>), passed straight through; C<wait_new_event> defaults
+false so C<fetch_history> never blocks waiting for a new event. Passing
+C<< wait_new_event => 1 >> makes the drain long-poll until the workflow
+closes; use C<fetch_history_events> directly for incremental consumption
+instead. The returned C<WorkflowHistory> is the same input type
+L<Temporalio::Test::WorkflowReplay>'s C<replay_workflow> and
+C<replay_workflows> accept, and its C<to_json> round-trips through
+C<< Temporalio::Client::WorkflowHistory->from_json >>.
+
+Every page is fetched: the drain keeps issuing
+C<GetWorkflowExecutionHistory> calls, threading each response's
+C<next_page_token> into the following request, until the server stops
+returning one. C<page_size> caps the events per call, not the total.
+
+The fetch is pinned to this handle's C<run_id> when the handle has one,
+which matters after a continue-as-new. A handle returned by
+C<start_workflow> or C<signal_with_start_workflow> carries the run id the
+start response reported, so C<fetch_history> on it returns exactly that
+run's history, ending at its C<WorkflowExecutionContinuedAsNew> event; it
+does not walk on into the successor run. (C<execute_workflow> hands back
+the workflow result rather than a handle, so there is no handle to pin.)
+To reach the successor, use a run-id-less handle
+(C<< $client->get_workflow_handle($workflow_id) >>), which sends an empty
+run id and lets the server resolve the workflow's current run. sdk-python differs on this one point: its C<start_workflow>
+leaves the handle's C<run_id> unset and records the started run only as
+C<result_run_id> and C<first_execution_run_id>, so a Python start handle
+is unpinned where a Perl one is pinned.
+
 =head2 reset
 
     my $new_run_id = await $handle->reset(
@@ -791,7 +864,10 @@ sends C<UpdateWorkflowExecution> (retrying until the update is at least
 accepted) and returns a L<Temporalio::Client::WorkflowUpdateHandle>. The
 C<wait_for_stage> option maps C<'accepted'> and C<'completed'> to the update
 lifecycle stages; C<'admitted'> raises L<Temporalio::Exception::Argument> before
-any RPC. C<%opts> also accepts an explicit C<update_id> (default: a fresh UUID).
+any RPC. C<%opts> also accepts an explicit C<update_id> (default: a fresh UUID)
+and C<result_type>, an optional decode hint for the update result, stored on
+the returned (or, for C<execute_update>, internally awaited) update handle the
+same way C<get_update_handle>'s does.
 
 =head2 get_update_handle
 
