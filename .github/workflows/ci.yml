@@ -55,6 +55,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # sdk-core's cargo build shells out to protoc (prost-wkt-types'
+      # build.rs); the hosted images do not ship it.
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       # Stage / cache: cargo registry + git + target, keyed on the sdk-rust pin
       # and the in-tree shim lockfile.
       - name: Cache cargo
@@ -179,6 +186,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      # sdk-core's cargo build shells out to protoc (prost-wkt-types'
+      # build.rs); the hosted images do not ship it.
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # PowerShell, not bash: under Git Bash the perl on PATH is Git for
       # Windows' own, not Strawberry, so core modules look missing to cpanm.
